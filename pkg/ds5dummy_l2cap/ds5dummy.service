@@ -1,0 +1,23 @@
+[Unit]
+Description=DS5Dummy virtual USB DualSense (raw L2CAP backend)
+After=bluetooth.service
+Wants=bluetooth.service
+
+[Service]
+Type=simple
+User=root
+# Module loading is handled by /etc/modules-load.d/ds5dummy.conf.
+# configfs is mounted/remounted rw by the Manager itself when needed.
+ExecStart=/usr/bin/ds5dummyd
+
+# The Manager prints a startup banner (target user, both config paths, final
+# log level) with printf on stdout, so journald has to keep it: it is the only
+# place the effective settings can be read back from.
+StandardOutput=journal
+StandardError=journal
+
+Restart=on-failure
+RestartSec=2
+
+[Install]
+WantedBy=multi-user.target

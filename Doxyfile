@@ -1,0 +1,99 @@
+# Doxyfile — DS5Dummy 源码文档
+#
+# 生成：cmake --build <build> --target doxygen
+# 输出：docs/doxygen/html（已 gitignore，不进版本控制）
+#
+# 配置项名以 doxygen -g 生成的官方模板为准，勿凭印象加 key。
+# 本项目注释采用 /** */ 块与 ///（含成员行尾 ///<）两种形态；
+# third_party 是 vendored 上游代码（loguru），不扫描。
+
+PROJECT_NAME           = "DS5Dummy"
+PROJECT_BRIEF          = "蓝牙 DualSense 桥接成虚拟 USB DualSense（dummy_hcd + FunctionFS）"
+PROJECT_NUMBER         = 0.1
+
+OUTPUT_DIRECTORY       = docs/doxygen
+CREATE_SUBDIRS         = NO
+OUTPUT_LANGUAGE        = Chinese
+
+# ---------------------------------------------------------------------------
+# 输入
+# ---------------------------------------------------------------------------
+
+INPUT                  = src
+FILE_PATTERNS          = *.h *.hpp *.cpp
+RECURSIVE              = YES
+EXCLUDE_PATTERNS       = */third_party/*
+
+# TODO/README 是散文式记账文档，不是 API 文档；排除以免污染生成结果。
+EXCLUDE_PATTERNS       += */TODO.md */README.md
+
+# 关系图只保留项目内与第三方库（loguru 等）的引用，
+# 屏蔽 std 命名空间下所有符号，避免 INCLUDE_GRAPH / CLASS_GRAPH
+# 里出现 std::string、std::vector 等标准库节点。
+EXCLUDE_SYMBOLS        = std::*
+
+# OUTPUT_DIRECTORY 不会自动创建，由 CMake 的 doxygen 目标先 mkdir。
+
+# ---------------------------------------------------------------------------
+# 预处理器：Doxygen 不认 GNU packed 属性，展开掉以免结构体解析失败
+# ---------------------------------------------------------------------------
+
+ENABLE_PREPROCESSING   = YES
+MACRO_EXPANSION        = YES
+EXPAND_ONLY_PREDEF     = YES
+PREDEFINED             = "__attribute__(x)=" \
+                         BT_BACKEND_L2CAP \
+                         BT_BACKEND_HIDRAW
+
+SEARCH_INCLUDES        = YES
+INCLUDE_PATH           = src third_party
+
+# ---------------------------------------------------------------------------
+# 输出
+# ---------------------------------------------------------------------------
+
+GENERATE_HTML          = YES
+HTML_OUTPUT            = html
+GENERATE_LATEX         = NO
+GENERATE_TAGFILE       = docs/doxygen/ds5dummy.tag
+
+HTML_COLORSTYLE        = LIGHT
+GENERATE_TREEVIEW      = YES
+DISABLE_INDEX          = NO
+
+# ---------------------------------------------------------------------------
+# 图表：模块边界与 include 方向是本项目的核心约束，画出依赖图
+# ---------------------------------------------------------------------------
+
+HAVE_DOT               = YES
+DOT_CLEANUP            = YES
+CLASS_GRAPH            = YES
+INCLUDE_GRAPH          = YES
+INCLUDED_BY_GRAPH      = YES
+GRAPHICAL_HIERARCHY    = YES
+DIRECTORY_GRAPH        = YES
+CALL_GRAPH             = NO
+CALLER_GRAPH           = NO
+
+# ---------------------------------------------------------------------------
+# 抽取与告警：匿名 namespace 内的内部函数也要进文档，便于审计门面边界
+# ---------------------------------------------------------------------------
+
+EXTRACT_ALL            = NO
+EXTRACT_STATIC         = YES
+EXTRACT_LOCAL_CLASSES  = YES
+INLINE_GROUPED_CLASSES = YES
+HIDE_UNDOC_MEMBERS     = NO
+HIDE_UNDOC_CLASSES     = NO
+BUILTIN_STL_SUPPORT    = YES
+JAVADOC_AUTOBRIEF      = YES
+QT_AUTOBRIEF           = YES
+MULTILINE_CPP_IS_BRIEF = NO
+DISTRIBUTE_GROUP_DOC   = YES
+TAB_SIZE               = 4
+
+WARNINGS               = YES
+WARN_IF_UNDOCUMENTED   = YES
+WARN_IF_DOC_ERROR      = YES
+WARN_NO_PARAMDOC       = YES
+WARN_AS_ERROR          = NO

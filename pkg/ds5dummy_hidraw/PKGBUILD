@@ -1,0 +1,72 @@
+# Maintainer: DS5Dummy Project
+#
+# DS5Dummy with the BlueZ HIDRAW backend.
+# Build: cd pkg/ds5dummy_hidraw && makepkg -d
+# Install: sudo pacman -U ds5dummy_hidraw-*.pkg.tar.zst
+
+pkgname=ds5dummy_hidraw
+pkgver=0.1.0
+pkgrel=2
+pkgdesc="Bridge a BT DualSense to a virtual USB device (BlueZ HIDRAW backend)"
+arch=('x86_64')
+url="https://github.com/awalol/DS5Dongle"
+license=('MIT')
+provides=('ds5dummy')
+conflicts=('ds5dummy' 'ds5dummy_l2cap')
+replaces=('ds5dummy')
+depends=('bluez' 'pipewire' 'fmt' 'opus' 'libsamplerate' 'yaml-cpp' 'systemd-libs')
+makedepends=('cmake' 'pkgconf' 'boost')
+optdepends=(
+  'dummy_hcd: kernel module (CONFIG_USB_DUMMY_HCD=m)'
+  'hid-playstation-ds5dummy-dkms: hidraw-only Bluetooth DualSense support'
+)
+backup=(
+  'etc/modprobe.d/ds5dummy.conf'
+  'etc/modules-load.d/ds5dummy.conf'
+  'etc/ds5dummy/config.yaml'
+)
+install='ds5dummy.install'
+source=(
+  'ds5dummy.modprobe.conf'
+  'ds5dummy.modules-load.conf'
+  'ds5dummy.install'
+  'ds5dummy.service'
+)
+b2sums=('SKIP' 'SKIP' 'SKIP' 'SKIP')
+
+# Project source lives two directories up from this PKGBUILD.
+_srcdir="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+
+build() {
+  cmake -B "$srcdir/build-hidraw" -S "$_srcdir" \
+    -DCMAKE_BUILD_TYPE=Release \
+    -DBT_BACKEND=HIDRAW \
+    -DDS5DUMMY_STRICT=ON \
+    -DDS5DUMMY_DEBUG=OFF \
+    -DDS5DUMMY_DEBUG_LOG=OFF \
+    -DCMAKE_INSTALL_PREFIX=/usr
+  cmake --build "$srcdir/build-hidraw"
+}
+
+package() {
+  install -Dm755 "$srcdir/build-hidraw/ds5dummyd" \
+    "$pkgdir/usr/bin/ds5dummyd"
+
+  install -Dm755 "$_srcdir/scripts/teardown.sh" \
+    "$pkgdir/usr/lib/ds5dummy/teardown.sh"
+
+  install -Dm644 "$srcdir/ds5dummy.modprobe.conf" \
+    "$pkgdir/etc/modprobe.d/ds5dummy.conf"
+  install -Dm644 "$srcdir/ds5dummy.modules-load.conf" \
+    "$pkgdir/etc/modules-load.d/ds5dummy.conf"
+
+  install -Dm644 "$srcdir/ds5dummy.service" \
+    "$pkgdir/usr/lib/systemd/system/ds5dummy.service"
+  install -Dm755 "$_srcdir/pkg/ds5dummy.sleep-hook" \
+    "$pkgdir/usr/lib/systemd/system-sleep/ds5dummy"
+
+  install -Dm644 "$_srcdir/pkg/ds5dummy.system.yaml" \
+    "$pkgdir/etc/ds5dummy/config.yaml"
+  install -Dm644 "$_srcdir/pkg/user-config.example.yaml" \
+    "$pkgdir/usr/share/doc/ds5dummy/user-config.example.yaml"
+}

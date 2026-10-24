@@ -1,0 +1,46 @@
+#!/bin/sh
+# DS5Dummy suspend/resume hook, installed as
+# /usr/lib/systemd/system-sleep/ds5dummy.
+#
+# Neither side of the bridge survives a suspend cycle in a usable state: the
+# bound FunctionFS gadget keeps its endpoints only while the process is alive
+# (and the controller's BT link drops with the adapter), so resuming with the
+# old setup leaves the host talking to a gadget that no longer answers. Stopping
+# the service before sleep lets the Manager tear the gadget down cleanly and
+# restarting it afterwards rebuilds gadget + BT link + audio from scratch.
+#
+# The hook is invoked as `ds5dummy pre <sleep-mode>` before sleep and
+# `ds5dummy post <sleep-mode>` after resume, as root, for every sleep mode.
+# Only a service that was active before sleep is started again; the marker
+# lives in /run (tmpfs), so a reboot during sleep cannot leave a stale request.
+
+set -u
+
+unit=ds5dummy.service
+# Written in pre, consumed and removed in post; contents are irrelevant.
+marker=/run/ds5dummy/was-active
+
+case "${1:-}" in
+  pre)
+    # is-active covers "failed", "inactive" and "activating": in those states
+    # there is nothing worth restarting after resume.
+    if systemctl is-active --quiet "$unit"; then
+      mkdir -p "${marker%/*}"
+      : > "$marker"
+      echo "ds5dummy: stopping $unit before sleep"
+      # Synchronous: the Manager removes the gadget before systemctl returns.
+      systemctl stop "$unit"
+    fi
+    ;;
+  post)
+    if [ -e "$marker" ]; then
+      rm -f "$marker"
+      echo "ds5dummy: starting $unit after sleep"
+      # The logind session may still be waking up; the Manager exits non-zero
+      # until it can pick an identity and systemd retries every 2 s.
+      systemctl start "$unit"
+    fi
+    ;;
+esac
+
+exit 0

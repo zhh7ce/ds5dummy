@@ -1,0 +1,47 @@
+# Maintainer: DS5Dummy Project
+#
+# Standalone DKMS fork of the in-tree hid-playstation driver.
+# It does not use the ds5dummy CMake build at all.
+#
+# Build: cd hid-playstation-ds5dummy && makepkg -d
+# Install: sudo pacman -U hid-playstation-ds5dummy-dkms-*.pkg.tar.zst
+
+pkgname=hid-playstation-ds5dummy-dkms
+pkgver=0.1.0
+pkgrel=1
+pkgdesc="DS5Dummy hid-playstation DKMS fork: Bluetooth hidraw-only + synthetic VID/PID"
+arch=('x86_64')
+url="https://github.com/awalol/DS5Dongle"
+license=('GPL-2.0-or-later')
+depends=('dkms')
+optdepends=(
+  'linux-cachyos-deckify-headers: build against the CachyOS Deckify kernel'
+  'linux-headers: build against the stock Arch kernel'
+)
+install='hid-playstation-ds5dummy.install'
+source=(
+  'hid-playstation.c'
+  'hid-ids.h'
+  'Makefile'
+  'dkms.conf'
+  'ds5dummy-hid-playstation.conf'
+  'ds5dummy-hid-playstation.modules-load.conf'
+  'hid-playstation-ds5dummy.install'
+)
+b2sums=('SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP')
+
+package() {
+  install -Dm644 hid-playstation.c \
+    "$pkgdir/usr/src/hid-playstation-ds5dummy-0.1.0/hid-playstation.c"
+  install -Dm644 hid-ids.h \
+    "$pkgdir/usr/src/hid-playstation-ds5dummy-0.1.0/hid-ids.h"
+  install -Dm644 Makefile \
+    "$pkgdir/usr/src/hid-playstation-ds5dummy-0.1.0/Makefile"
+  install -Dm644 dkms.conf \
+    "$pkgdir/usr/src/hid-playstation-ds5dummy-0.1.0/dkms.conf"
+
+  install -Dm644 ds5dummy-hid-playstation.conf \
+    "$pkgdir/usr/lib/modprobe.d/ds5dummy-hid-playstation.conf"
+  install -Dm644 ds5dummy-hid-playstation.modules-load.conf \
+    "$pkgdir/usr/lib/modules-load.d/ds5dummy-hid-playstation.conf"
+}

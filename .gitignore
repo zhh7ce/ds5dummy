@@ -1,0 +1,25 @@
+# CMake build outputs
+build*/
+**/build*/
+compile_commands.json
+
+# Packaging artifacts
+pkg/src/
+pkg/pkg/
+*.pkg.tar.zst
+
+# IDE
+.idea/
+.vscode/
+*.swp
+
+# Doxygen 生成的 API 文档
+docs/doxygen/
+
+# SDD 执行工作区（ledger/brief/report/review 包）
+.superpowers/
+
+/pkg/**/pkg/
+/pkg/**/src/
+
+/docs

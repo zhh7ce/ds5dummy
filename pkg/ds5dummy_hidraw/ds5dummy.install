@@ -1,0 +1,61 @@
+# DS5Dummy HIDRAW — pacman install hooks
+
+_load_modules() {
+    # Let systemd read /etc/modules-load.d/ds5dummy.conf.
+    if command -v systemctl >/dev/null 2>&1; then
+        systemctl restart systemd-modules-load.service 2>/dev/null || true
+        systemctl daemon-reload 2>/dev/null || true
+    fi
+
+    # Explicit fallback for non-systemd / first-install cases.
+    if command -v modprobe >/dev/null 2>&1; then
+        modprobe dummy_hcd 2>/dev/null || true
+        modprobe libcomposite 2>/dev/null || true
+        modprobe usb_f_fs 2>/dev/null || true
+        modprobe uhid 2>/dev/null || true
+        modprobe hidp 2>/dev/null || true
+        modprobe hid_playstation 2>/dev/null || true
+    fi
+
+    # configfs is built into the kernel but may be mounted read-only.
+    if command -v mountpoint >/dev/null 2>&1 &&
+       mountpoint -q /sys/kernel/config; then
+        mount -o remount,rw /sys/kernel/config 2>/dev/null || true
+    elif command -v mount >/dev/null 2>&1; then
+        mount -t configfs none /sys/kernel/config 2>/dev/null || true
+    fi
+}
+
+_post_bluetooth() {
+    if command -v systemctl >/dev/null 2>&1; then
+        systemctl daemon-reload 2>/dev/null || true
+        systemctl restart bluetooth 2>/dev/null || true
+    fi
+}
+
+post_install() {
+    _load_modules
+    _post_bluetooth
+    echo ":: ds5dummy (HIDRAW backend) installed."
+    echo "   Loaded: dummy_hcd, libcomposite, usb_f_fs, uhid, hidp, hid_playstation."
+    echo "   BlueZ input plugin stays enabled for the HIDRAW backend."
+    echo "   System config: /etc/ds5dummy/config.yaml (root-owned; identity policy)"
+    echo "   User config:   ~/.config/ds5dummy/config.yaml (controller MAC, audio)"
+    echo "   Example:       /usr/share/doc/ds5dummy/user-config.example.yaml"
+    echo "   Then: systemctl enable --now ds5dummy.service"
+    echo "   Ensure the DualSense is paired, trusted and bonded."
+}
+
+post_upgrade() {
+    post_install
+}
+
+post_remove() {
+    # Do not force-unload shared kernel modules here; other HID/Bluetooth
+    # devices may still be using them.
+    if command -v systemctl >/dev/null 2>&1; then
+        systemctl daemon-reload 2>/dev/null || true
+        systemctl restart bluetooth 2>/dev/null || true
+    fi
+    echo ":: ds5dummy (HIDRAW backend) removed."
+}

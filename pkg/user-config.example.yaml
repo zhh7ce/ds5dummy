@@ -1,0 +1,52 @@
+# Per-user configuration. This file is optional: without it the daemon starts
+# with the same values this template shows uncommented (they are the built-in
+# defaults, and a unit test keeps the two in step). Copy it to
+# ~/.config/ds5dummy/config.yaml to change anything, and keep it owned by the
+# target user (or root) and not writable by group or others.
+#
+# enabled: false turns the service off for this user without deleting the file.
+enabled: true
+
+# Which Bluetooth controllers this user serves:
+#   auto  every supported DualSense found in the system (default)
+#   list  only the controllers named under controllers:
+#   MAC   just that controller, e.g. "AA:BB:CC:DD:EE:FF"
+bt_addr: auto
+
+# Settings are layered: built-in defaults <- global: <- controllers:<MAC>.
+# Every key below is optional; a key you write replaces the inherited value for
+# that group only. The example values are the built-in defaults.
+#
+# global:
+#   # Seconds the worker keeps retrying the Bluetooth link before giving up
+#   # (0 = do not wait).
+#   bt_wait_s: 60
+#   # false = bridge HID only, no audio downlink or virtual microphone.
+#   audio: true
+#   # Haptics amplitude multiplier, 0.0 (silent) .. 2.0 (twice as strong).
+#   # 1.0 leaves the rumble samples exactly as the host sent them. Applied
+#   # before the int8 quantisation, so it never affects the speaker.
+#   haptics_gain: 1.0
+#   # Controller-side speaker pre-gain, 0..7 (SetStateData byte 37, low 3 bits).
+#   # The firmware default is 2; raising it amplifies on the pad, after our
+#   # encode.
+#   speaker_gain: 2
+#   # Host polling cap for the two USB interrupt endpoints: 250, 500 or 1000 Hz.
+#   # This is the USB side only — the controller's own report rate over
+#   # Bluetooth is fixed by its firmware and cannot be changed from here.
+#   usb_report_rate: 1000
+#
+# Per-controller overrides. Keys are the controller's BD_ADDR in uppercase
+# XX:XX:XX:XX:XX:XX; only the keys you write are overridden. With
+# bt_addr: list this section doubles as the allowlist, so it must name at
+# least one controller.
+#
+# controllers:
+#   "AA:BB:CC:DD:EE:FF":
+#     audio: false
+#     haptics_gain: 1.5
+
+# Personal log level, overriding the system-wide one. Names or integers, same
+# vocabulary as the daemon's -v option: OFF/FATAL/ERROR/WARNING/INFO/DEBUG/
+# VERBOSE/TRACE.
+# log_level: INFO

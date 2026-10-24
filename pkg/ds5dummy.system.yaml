@@ -1,0 +1,26 @@
+# DS5Dummy system configuration. Root-owned; only root may edit it.
+#
+# Worker identity comes from the active graphical session:
+#   mode: auto  serve the single user with an active X11/Wayland session
+#   mode: list  serve only the users listed under users:
+identity:
+  mode: auto
+  # Only read with mode: list (a non-empty users: under mode: auto is an error).
+  # Each entry is either a bare uid or {uid, gid}; gid defaults to uid. A gid
+  # must already exist in the group database: a missing one is refused at
+  # startup instead of failing later in setgid.
+  # users:
+  #   - uid: 1000
+  #     gid: 1000
+
+# Base mount point. The Manager mounts one FunctionFS instance per served
+# controller at <ffs_path>.<12 hex MAC digits>; this path itself is not mounted.
+ffs_path: /dev/ffs-ds5
+
+# How often the Manager scans /sys/class/hidraw for new controllers, in seconds
+# (minimum 1). It is also the interval at which exited workers are reaped and
+# retried, so a bigger value saves sysfs reads but delays serving a controller
+# that was just plugged in — and a dead worker's restart — by up to this long.
+discovery_interval_s: 3
+
+log_level: WARNING
