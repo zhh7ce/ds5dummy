@@ -29,6 +29,7 @@ add_executable(ds5dummy_tests
     bt_cache_test.cpp
     usb_test.cpp
     usb_report_test.cpp
+    usb_ep0_test.cpp
     ../src/daemon/options.cpp
     ../src/daemon/config.cpp
     ../src/daemon/discovery.cpp
