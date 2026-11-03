@@ -36,11 +36,12 @@ struct DiscoveredController {
 };
 
 /**
- * @brief 扫描 hidraw 类目录，返回每只有 HID 会话的 DualSense。
+ * @brief 扫描 hidraw 类目录，返回每只有 HID 会话的 DualSense 系手柄。
  *
  * 认定条件（逐节点读 device/uevent）：
  * - HID_ID 的总线字段是 0x0005（Bluetooth HID 总线），排除 USB 直连的手柄；
- * - VID/PID 是真机 054C:0CE6 或 DKMS 补丁合成的 1998:1221；
+ * - VID/PID 命中 core::device::IsDs5HidIdentity：真机 DualSense（054C:0CE6）
+ *   或 Edge（054C:0DF2），以及 DKMS 补丁合成的 1998:1221 / 1998:1103；
  * - HID_UNIQ 是合法的 XX:XX:XX:XX:XX:XX 形式——缺了它就拿不到 MAC，无从分发。
  *
  * @param sysfs_base hidraw 类目录（生产用 kHidrawSysfsBase，测试用临时目录）。

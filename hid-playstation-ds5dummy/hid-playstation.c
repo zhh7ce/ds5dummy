@@ -30,23 +30,29 @@ static DEFINE_IDA(ps_player_id_allocator);
 #define HID_PLAYSTATION_VERSION_PATCH 0x8000
 
 /*
- * DS5Dummy extension: Bluetooth PlayStation controllers are exposed as pure
- * hidraw devices with a synthetic vendor/product. The USB path is untouched.
+ * DS5Dummy extension: Bluetooth DualSense / DualSense Edge controllers are
+ * exposed as pure hidraw devices with a synthetic vendor/product. DualShock 4
+ * and every USB-attached device keep the stock driver behavior.
  */
 static bool bt_hidraw_only = true;
 module_param(bt_hidraw_only, bool, 0644);
 MODULE_PARM_DESC(bt_hidraw_only,
-"Expose Bluetooth PlayStation controllers as hidraw-only devices");
+"Expose Bluetooth DualSense controllers as hidraw-only devices");
 
 static unsigned int bt_fake_vendor = 0x1998;
 module_param(bt_fake_vendor, uint, 0644);
 MODULE_PARM_DESC(bt_fake_vendor,
-"Synthetic HID vendor ID for Bluetooth PlayStation controllers");
+"Synthetic HID vendor ID for Bluetooth DualSense controllers");
 
 static unsigned int bt_fake_product = 0x1221;
 module_param(bt_fake_product, uint, 0644);
 MODULE_PARM_DESC(bt_fake_product,
-"Synthetic HID product ID for Bluetooth PlayStation controllers");
+"Synthetic HID product ID for Bluetooth DualSense controllers");
+
+static unsigned int bt_fake_product_edge = 0x1103;
+module_param(bt_fake_product_edge, uint, 0644);
+MODULE_PARM_DESC(bt_fake_product_edge,
+"Synthetic HID product ID for Bluetooth DualSense Edge controllers");
 
 enum PS_TYPE {
 	PS_TYPE_PS4_DUALSHOCK4,
@@ -2872,14 +2878,19 @@ static int ps_probe(struct hid_device *hdev, const struct hid_device_id *id)
 	}
 
 	/*
-	 * DS5Dummy: for Bluetooth controllers keep only the hidraw interface and
-	 * hide the device from hid-playstation/input consumers. Set the synthetic
-	 * IDs before hid_hw_start() so hidraw reports the new identity.
+	 * DS5Dummy: only the PS5 family (DualSense / Edge) over Bluetooth is kept
+	 * hidraw-only with a synthetic identity. DualSense Edge gets its own
+	 * product so userspace can tell the models apart; every other controller
+	 * (DualShock 4, USB-attached devices) keeps normal driver behavior.
 	 */
-	if (hdev->bus == BUS_BLUETOOTH && bt_hidraw_only) {
+	const bool hidraw_only = hdev->bus == BUS_BLUETOOTH && bt_hidraw_only &&
+				 id->driver_data == PS_TYPE_PS5_DUALSENSE;
+	if (hidraw_only) {
 		hdev->vendor = bt_fake_vendor;
-		hdev->product = bt_fake_product;
-		hid_info(hdev, "DS5Dummy: Bluetooth controller exposed as hidraw-only (%04x:%04x)\n",
+		hdev->product = id->product == USB_DEVICE_ID_SONY_PS5_CONTROLLER_2
+					? bt_fake_product_edge
+					: bt_fake_product;
+		hid_info(hdev, "DS5Dummy: Bluetooth DualSense exposed as hidraw-only (%04x:%04x)\n",
 			 hdev->vendor, hdev->product);
 	}
 
@@ -2889,7 +2900,7 @@ static int ps_probe(struct hid_device *hdev, const struct hid_device_id *id)
 		return ret;
 	}
 
-	if (hdev->bus == BUS_BLUETOOTH && bt_hidraw_only)
+	if (hidraw_only)
 		return 0;
 
 	ret = hid_hw_open(hdev);

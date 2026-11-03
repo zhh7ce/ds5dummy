@@ -1,8 +1,8 @@
 // DS5Dummy — sysfs 发现单测（daemon/discovery.cpp）
 //
 // 用临时目录伪造 /sys/class/hidraw 的节点结构（hidrawN/device/uevent），
-// 覆盖三种认定条件（蓝牙总线、两对 VID/PID、合法 HID_UNIQ）与去重/排序。
-// 全部用例不需要硬件：真实 sysfs 只读且内容随机器变化，不适合做断言。
+// 覆盖三种认定条件（蓝牙总线、两型号 × 真机/合成共四对 VID/PID、合法 HID_UNIQ）
+// 与去重/排序。全部用例不需要硬件：真实 sysfs 只读且内容随机器变化，不适合做断言。
 
 #include "daemon/discovery.h"
 
@@ -79,6 +79,23 @@ TEST_F(DiscoveryTest, FindsBothVidPidPairsAndSortsByMac) {
   EXPECT_EQ(found[0].node, "hidraw1");
   EXPECT_EQ(found[1].mac, "AA:BB:CC:DD:EE:FF");
   EXPECT_EQ(found[1].node, "hidraw0");
+}
+
+TEST_F(DiscoveryTest, FindsDualSenseEdgeIdentities) {
+  // DualSense Edge：真机 054C:0DF2 与 DKMS 合成的 1998:1103 都要认。
+  AddNode("hidraw0",
+          "HID_ID=0005:0000054C:00000DF2\n"
+          "HID_UNIQ=11:22:33:44:55:66\n");
+  AddNode("hidraw1",
+          "HID_ID=0005:00001998:00001103\n"
+          "HID_UNIQ=aa:bb:cc:dd:ee:ff\n");
+
+  const std::vector<ds5::daemon::DiscoveredController> found =
+      ds5::daemon::ScanControllers(base_.string());
+
+  ASSERT_EQ(found.size(), 2u);
+  EXPECT_EQ(found[0].node, "hidraw0");
+  EXPECT_EQ(found[1].node, "hidraw1");
 }
 
 TEST_F(DiscoveryTest, SkipsUsbWiredControllers) {

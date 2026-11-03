@@ -50,11 +50,12 @@ int hidraw_fd = -1;
 std::chrono::steady_clock::time_point last_missing_log{};
 
 /**
- * @brief 扫 /sys/class/hidraw，打开第一个被认定为 DualSense 的节点。
+ * @brief 扫 /sys/class/hidraw，打开第一个被认定的 DualSense 系手柄节点。
  *
  * 认定条件（从各节点的 device/uevent 读取）：
  * - HID_ID 的总线字段是 0x0005（Bluetooth HID 总线），排除 USB 直连的那只；
- * - VID/PID 匹配真 Sony 054C:0CE6 或 DKMS 合成的 1998:1221；
+ * - VID/PID 命中 core::device::IsDs5HidIdentity：真机 DualSense / Edge，
+ *   或 DKMS 合成的 1998:1221 / 1998:1103；
  * - want_mac 非空且节点带 HID_UNIQ 时，MAC 必须大小写不敏感地相等；
  *   UNIQ 为空的节点放行——只有多设备时才需要靠它区分。
  *
@@ -93,12 +94,9 @@ int FindDualSenseHidraw(const std::string& want_mac) {
     }
     fclose(f);
 
-    // 总线必须是 Bluetooth HID；VID/PID 两对候选命中其一即可：真机那一对，
-    // 或本项目 DKMS 补丁给真手柄合成的 1998:1221。
-    if (hid_bus != 0x0005 ||
-        !((vid == core::device::kSonyVid && pid == core::device::kDs5Pid) ||
-          (vid == core::device::kDs5DummyVid &&
-           pid == core::device::kDs5DummyPid)))
+    // 总线必须是 Bluetooth HID；VID/PID 交给与发现侧共用的身份名单：
+    // 真机 DualSense / Edge，或本项目 DKMS 补丁合成的对应 ID。
+    if (hid_bus != 0x0005 || !core::device::IsDs5HidIdentity(vid, pid))
       continue;
 
     // MAC 过滤只对手柄真报了 UNIQ 的节点生效。

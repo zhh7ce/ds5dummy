@@ -77,18 +77,16 @@ bool ReadNodeIdentity(const fs::path& hidraw_dir, NodeIdentity& out) {
 }
 
 /**
- * @brief 节点是否是我们认的 DualSense：蓝牙总线上，真机或合成 VID/PID。
+ * @brief 节点是否是我们认的手柄：蓝牙总线上，真机或合成 VID/PID。
  * @param id 已读到的节点身份。
  * @return 命中 true。
  * @details 总线号过滤掉 USB 直连的那只（0x0003），它不归本程序桥接。
+ *          手柄型号的判断（DualSense / Edge、真机 / 合成）收在
+ *          core::device::IsDs5HidIdentity，与 hidraw 后端共用同一张名单。
  */
 bool IsOurController(const NodeIdentity& id) {
-  if (id.bus != 0x0005) return false;
-  const bool sony =
-      id.vid == core::device::kSonyVid && id.pid == core::device::kDs5Pid;
-  const bool synthesised = id.vid == core::device::kDs5DummyVid &&
-                           id.pid == core::device::kDs5DummyPid;
-  return sony || synthesised;
+  return id.bus == 0x0005 &&
+         core::device::IsDs5HidIdentity(id.vid, id.pid);
 }
 
 }  // namespace

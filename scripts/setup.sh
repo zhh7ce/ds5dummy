@@ -74,7 +74,7 @@ if lsmod | grep -q hid_playstation; then
         # Read VID/PID from uevent
         if [ -f "$dev/device/uevent" ]; then
             hid_id=$(grep '^HID_ID=' "$dev/device/uevent" 2>/dev/null || true)
-            if echo "$hid_id" | grep -qi '054c:0ce6'; then
+            if echo "$hid_id" | grep -qiE '054c:(0ce6|0df2)'; then
                 log "Found DualSense at $devname"
 
                 # Check if hid-playstation is bound
