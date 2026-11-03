@@ -188,8 +188,6 @@ TEST(AudioIdentity, StationIdsDistinguishTwoStations) {
   // 多站并发时 node.name 必须互不相同：撞名会让第二站被看成第一站的重连。
   EXPECT_NE(audio::identity::MakeSinkNodeName("0c275682705e"),
             audio::identity::MakeSinkNodeName("0c275682705f"));
-  EXPECT_EQ(audio::identity::MakeDeviceId("0c275682705e"),
-            "USB054c:0ce6.0c275682705e");
 }
 
 }  // namespace

@@ -99,6 +99,7 @@ set(DS5DUMMY_CORE_SRC
     src/bridge/usb_report.cpp
     src/audio/audio.cpp
     src/audio/audio_identity.cpp
+    src/audio/audio_port.cpp
     src/audio/audio_sink.cpp
     src/audio/audio_encoder.cpp
     src/audio/audio_decoder.cpp
@@ -199,7 +200,8 @@ if(DS5DUMMY_BUILD_TOOLS)
     # tools/ 的头按 <repo>/tools/<file>.h 引用，所以搜索路径加仓库根。
     add_executable(audio_dump tools/audio_dump.cpp tools/dump_sink.cpp
         src/audio/audio.cpp src/audio/audio_identity.cpp
-        src/audio/audio_sink.cpp src/audio/audio_encoder.cpp
+        src/audio/audio_port.cpp src/audio/audio_sink.cpp
+        src/audio/audio_encoder.cpp
         src/audio/audio_decoder.cpp src/audio/audio_source.cpp
         third_party/loguru.cpp)
     target_include_directories(audio_dump PRIVATE

@@ -83,9 +83,10 @@ bool Start(const std::string& mac, float haptics_gain, OutputSink output,
     return false;
   }
 
-  // sink 内部负责断线退避重连；连续恢复失败后经 on_lost 通知 worker 降级
-  // HID-only。失败路径把已建好的编码器一起收回，不留半开的链。
-  if (!sink::Start(station_id, host_sysfs_path, std::move(on_lost))) {
+  // 两条流内部都负责断线退避重连，且收同一个 on_lost：任一条连续恢复失败
+  // 都意味着整条音频链该交回 worker 重建。失败路径把已建好的编码器一起收回，
+  // 不留半开的链。
+  if (!sink::Start(station_id, host_sysfs_path, on_lost)) {
     DS5DUMMY_LOG(ERROR, "[audio] Sink start failed — HID only");
     sink::Stop();
     encoder::Stop();
@@ -101,7 +102,7 @@ bool Start(const std::string& mac, float haptics_gain, OutputSink output,
       DS5DUMMY_LOG(WARNING,
             "[audio] Mic decoder unavailable — the uplink stays off");
     } else if (!source::Start(station_id, host_sysfs_path,
-                              std::move(on_mic_open))) {
+                              std::move(on_mic_open), on_lost)) {
       DS5DUMMY_LOG(WARNING,
             "[audio] Microphone source unavailable — the uplink stays off");
       decoder::Stop();

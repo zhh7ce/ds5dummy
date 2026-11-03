@@ -163,9 +163,5 @@ std::string MakeSourceNodeName(const std::string& station_id) {
   return std::string(kSourceNamePrefix) + station_id + kSourceNameSuffix;
 }
 
-std::string MakeDeviceId(const std::string& station_id) {
-  return std::string(kDeviceIdPrefix) + station_id;
-}
-
 }  // namespace identity
 }  // namespace audio

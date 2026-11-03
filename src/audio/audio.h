@@ -47,11 +47,13 @@ using OutputSink =
     std::function<void(const uint8_t* haptics, const uint8_t* speaker)>;
 
 /**
- * @brief sink 连续恢复失败后的通知。
+ * @brief 下行 sink 或上行 source 连续恢复失败后的通知。
  *
- * @details 由 sink 的恢复线程调用。实现方只应设置原子标志或投递事件，
- *          不得在回调里直接调用 audio::Stop()——Stop 要 join 的正是这条
- *          恢复线程，回调里等它就是自己等自己。
+ * @details 两条流各有一条恢复 monitor，但收同一份 handler：任一方向彻底
+ *          恢复失败都意味着整条音频链该交回调用方重建。回调跑在对应流的
+ *          恢复线程上；实现方只应设置原子标志或投递事件，不得在回调里直接
+ *          调用 audio::Stop()——Stop 要 join 的正是这条线程，回调里等它就是
+ *          自己等自己。
  */
 using LostHandler = std::function<void()>;
 
@@ -90,7 +92,8 @@ using MicOpenHandler = std::function<void(bool open)>;
  *                    Manager 建站时解析、经 worker 的交接参数传到这里，sink 与
  *                    source 共用同一个值，空串则两条流都不带 device.sysfs.path
  *                    与 alsa.card 属性。
- * @param on_lost     sink 连续恢复失败后的通知；可为空（不降级，只丢音频）。
+ * @param on_lost     sink 或 source 连续恢复失败后的通知；两条流收同一个
+ *                    handler，可为空（不降级，只丢音频）。
  * @param on_mic_open 主机开始/停止录音的通知；空表示**不建**上行麦克风
  *                    （虚拟 Source 不出现，手柄麦克风永远不会被打开）。
  * @return 成功 true；false 时线程与流没有半开的残留，调用方继续 HID-only

@@ -34,11 +34,6 @@ constexpr char kSinkIconName[] = "audio-card-analog";
 /// 对应字面量可抄，这里沿用 PulseAudio 对采集设备的通行写法。
 constexpr char kSourceIconName[] = "audio-input-microphone";
 
-/// 节点昵称/描述里的设备标识前缀，后接本站的 12 位 MAC 十六进制。真 ALSA
-/// 节点的 Pulse 设备串就是这个形状（厂商 4 位 + 产品 4 位 + 实例），抄它的
-/// 目的是让两只 dongle 在同一台机器的扁平设备列表里可分辨。
-constexpr char kDeviceIdPrefix[] = "USB054c:0ce6.";
-
 /**
  * @brief 拼播放 sink 的节点名，形态照真手柄有线模式下 UCM 切出的喇叭 sink。
  *
@@ -55,7 +50,7 @@ constexpr char kDeviceIdPrefix[] = "USB054c:0ce6.";
  *         `alsa_output.usb-Sony_Interactive_Entertainment_DualSense_Wireless_Controller-0c275682705e.HiFi__Speaker__sink`。
  * @note 纯函数，无副作用；改动返回值形状前先把上面三段 `strstr` 判据当门禁
  *       重新核一遍（tests/audio_identity_test.cpp 逐条钉住了它们）。
- * @see MakeSourceNodeName —— 同形状的采集侧；MakeDeviceId —— 显示名用的标识。
+ * @see MakeSourceNodeName —— 同形状的采集侧。
  */
 std::string MakeSinkNodeName(const std::string& station_id);
 
@@ -72,19 +67,6 @@ std::string MakeSinkNodeName(const std::string& station_id);
  * @see MakeSinkNodeName。
  */
 std::string MakeSourceNodeName(const std::string& station_id);
-
-/**
- * @brief 拼写进节点昵称/描述的设备标识：kDeviceIdPrefix + 本站标识。
- *
- * 显示名不参与任何 `strstr` 判据，但要在 `wpctl`/`pavucontrol` 的扁平列表里
- * 区分两只 dongle，所以保留真 ALSA 设备串的完整形状（含 `:`），而不是只留
- * MAC。
- *
- * @param station_id 12 位小写 MAC 十六进制，与节点名用同一个值。
- * @return 形如 `USB054c:0ce6.0c275682705e`，长度恒为 25。
- * @note 纯函数，无副作用。
- */
-std::string MakeDeviceId(const std::string& station_id);
 
 /**
  * @brief 把本站虚拟 USB 声卡的硬件身份写进节点属性字典。
