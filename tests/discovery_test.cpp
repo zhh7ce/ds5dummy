@@ -77,8 +77,10 @@ TEST_F(DiscoveryTest, FindsBothVidPidPairsAndSortsByMac) {
   // 结果按 MAC 升序，且 MAC 统一成大写。
   EXPECT_EQ(found[0].mac, "11:22:33:44:55:66");
   EXPECT_EQ(found[0].node, "hidraw1");
+  EXPECT_EQ(found[0].model, core::device::ControllerModel::kDualSense);
   EXPECT_EQ(found[1].mac, "AA:BB:CC:DD:EE:FF");
   EXPECT_EQ(found[1].node, "hidraw0");
+  EXPECT_EQ(found[1].model, core::device::ControllerModel::kDualSense);
 }
 
 TEST_F(DiscoveryTest, FindsDualSenseEdgeIdentities) {
@@ -95,7 +97,9 @@ TEST_F(DiscoveryTest, FindsDualSenseEdgeIdentities) {
 
   ASSERT_EQ(found.size(), 2u);
   EXPECT_EQ(found[0].node, "hidraw0");
+  EXPECT_EQ(found[0].model, core::device::ControllerModel::kEdge);
   EXPECT_EQ(found[1].node, "hidraw1");
+  EXPECT_EQ(found[1].model, core::device::ControllerModel::kEdge);
 }
 
 TEST_F(DiscoveryTest, SkipsUsbWiredControllers) {

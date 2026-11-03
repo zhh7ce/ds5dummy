@@ -94,7 +94,7 @@ bool IsOurController(const NodeIdentity& id) {
 std::vector<DiscoveredController> ScanControllers(const std::string& sysfs_base) {
   // 用 map 收集：MAC 是天然的去重键，顺便让输出按 MAC 升序，调用方与测试
   // 都不依赖目录遍历顺序。
-  std::map<std::string, std::string> by_mac;
+  std::map<std::string, DiscoveredController> by_mac;
 
   std::error_code ec;
   for (const auto& entry : fs::directory_iterator(sysfs_base, ec)) {
@@ -105,18 +105,19 @@ std::vector<DiscoveredController> ScanControllers(const std::string& sysfs_base)
     // 实例名），跳过而不是拿空串去起站。
     if (!IsValidBtAddr(id.uniq)) continue;
 
-    const std::string mac = CanonicalBtAddr(id.uniq);
-    const std::string node = entry.path().filename().string();
+    DiscoveredController found{CanonicalBtAddr(id.uniq),
+                               entry.path().filename().string(),
+                               core::device::ModelForHidIdentity(id.vid, id.pid)};
     // 同一只手柄理论上只有一个 HID 节点；真出现两个时保留节点名最小的，
     // 让每轮扫描对同一份 sysfs 给出同一个答案。
-    const auto [it, inserted] = by_mac.emplace(mac, node);
-    if (!inserted && node < it->second) it->second = node;
+    const auto [it, inserted] = by_mac.emplace(found.mac, found);
+    if (!inserted && found.node < it->second.node) it->second = std::move(found);
   }
 
   std::vector<DiscoveredController> result;
   result.reserve(by_mac.size());
-  for (auto& [mac, node] : by_mac) {
-    result.push_back(DiscoveredController{mac, std::move(node)});
+  for (auto& [mac, found] : by_mac) {
+    result.push_back(std::move(found));
   }
   return result;
 }

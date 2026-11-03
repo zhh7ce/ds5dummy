@@ -42,6 +42,23 @@ namespace {
 constexpr std::size_t kMaxConfigBytes = 65536;
 
 /**
+ * @brief usb_model 的文本 ↔ 型号映射，解析与横幅回显共用这一张表。
+ * @details std::nullopt 代表 auto：不覆盖，由发现阶段按真手柄的 HID VID/PID
+ *          定型号。
+ */
+struct UsbModelChoice {
+  const char* text;  ///< 配置文本里的取值
+  std::optional<core::device::ControllerModel> model;  ///< 对应型号
+};
+
+/// usb_model 的三个合法取值；顺序即 UsbModelChoices 的输出顺序。
+constexpr UsbModelChoice kUsbModelChoices[] = {
+    {"auto", std::nullopt},
+    {"dualsense", core::device::ControllerModel::kDualSense},
+    {"edge", core::device::ControllerModel::kEdge},
+};
+
+/**
  * @brief 文件描述符的 RAII 持有者。
  * @details 读取路径上有多个提前返回点（非普通文件、属主不符、读失败），用析构
  *          统一关闭，避免每条分支手写 close。所有权独占，因此禁止拷贝。
@@ -299,6 +316,34 @@ bool ReadUsbReportInterval(const YAML::Node& node, const std::string& where,
 }
 
 /**
+ * @brief 读虚拟 USB 设备的型号：auto（跟随发现结果）、dualsense 或 edge。
+ * @param node 已确认存在的节点。
+ * @param where 错误定位。
+ * @param key 键名，只用于错误文本。
+ * @param out 成功时写入型号；auto 写 std::nullopt。
+ * @param why 失败时的原因。
+ * @return 成功 true；容器或表外取值 false。
+ * @details 取值表是 kUsbModelChoices。型号不是自由字符串：PID、产品串与
+ *          report descriptor 是三个必须同源的量，只接受这两份编译期档案。
+ */
+bool ReadUsbModel(const YAML::Node& node, const std::string& where,
+                  const char* key,
+                  std::optional<core::device::ControllerModel>& out,
+                  std::string& why) {
+  std::string text;
+  if (!ReadString(node, where, key, text, why)) return false;
+  for (const UsbModelChoice& choice : kUsbModelChoices) {
+    if (text == choice.text) {
+      out = choice.model;
+      return true;
+    }
+  }
+  why = At(where, std::string("key '") + key + "' must be " +
+                      UsbModelChoices() + ", got '" + text + "'");
+  return false;
+}
+
+/**
  * @brief 在一个配置层之上应用手柄级键块（global: 或 controllers.<MAC>）。
  * @param node 键块节点；调用方保证非 Null。
  * @param where 错误定位（"user config: global" 或 "user config: controllers.<MAC>"）。
@@ -306,7 +351,8 @@ bool ReadUsbReportInterval(const YAML::Node& node, const std::string& where,
  * @param why 失败时的原因。
  * @return 成功 true。
  * @details 只写出现的键，未出现的键保留入参里的值——三层叠加就是这样逐层
- *          覆盖出来的。允许的键与 worker 的交接参数一一对应。
+ *          覆盖出来的。允许的键与 worker 的交接参数一一对应，usb_model 例外：
+ *          它在 Manager 里叠加成型号，再折成 `--usb-edge`。
  */
 bool ApplyControllerKeys(const YAML::Node& node, const std::string& where,
                          ControllerConfig& cfg, std::string& why) {
@@ -316,7 +362,7 @@ bool ApplyControllerKeys(const YAML::Node& node, const std::string& where,
   }
   if (!CheckKeys(node,
                  {"bt_wait_s", "audio", "haptics_gain", "speaker_gain",
-                  "usb_report_interval_ms"},
+                  "usb_report_interval_ms", "usb_model"},
                  where, why)) {
     return false;
   }
@@ -344,6 +390,11 @@ bool ApplyControllerKeys(const YAML::Node& node, const std::string& where,
       !ReadUsbReportInterval(usb_report_interval, where,
                              "usb_report_interval_ms",
                              cfg.usb_report_interval_ms, why)) {
+    return false;
+  }
+  const YAML::Node usb_model = node["usb_model"];
+  if (usb_model &&
+      !ReadUsbModel(usb_model, where, "usb_model", cfg.usb_model, why)) {
     return false;
   }
   return true;
@@ -754,6 +805,26 @@ std::string UsbReportIntervalChoices() {
   return text;
 }
 
+std::string UsbModelChoices() {
+  std::string text;
+  for (std::size_t i = 0; i < std::size(kUsbModelChoices); ++i) {
+    if (i != 0) {
+      text += i + 1 == std::size(kUsbModelChoices) ? " or " : ", ";
+    }
+    text += kUsbModelChoices[i].text;
+  }
+  return text;
+}
+
+const char* UsbModelName(
+    const std::optional<core::device::ControllerModel>& model) {
+  for (const UsbModelChoice& choice : kUsbModelChoices) {
+    if (choice.model == model) return choice.text;
+  }
+  // 表里一定有 auto（std::nullopt）；到这里说明表被改坏了。
+  return kUsbModelChoices[0].text;
+}
+
 std::string CanonicalBtAddr(const std::string& addr) {
   std::string out = addr;
   for (char& c : out) {
@@ -845,7 +916,7 @@ bool ParseSystemConfig(const std::string& text, SystemConfig& out,
  * @return 成功 true。
  * @details root 级键（ffs_path、uid、gid 等）在这份 schema 里不存在，
  *          一律按未知键拒绝。bt_addr 取 auto/list/XX:XX:XX:XX:XX:XX 三者之一，
- *          缺省 auto；global 与 controllers.<MAC> 只接受五个手柄级键，且逐层
+ *          缺省 auto；global 与 controllers.<MAC> 只接受六个手柄级键，且逐层
  *          叠加成每只手柄的最终值。bt_addr: list 要求 controllers 非空；
  *          bt_addr: <MAC> 时 controllers 里不能出现别的 MAC——那些条目永远
  *          不会生效，静默忽略等于让用户以为自己配上了。

@@ -64,6 +64,7 @@ constexpr int kHostEnumPollMs = 50;
 /**
  * @brief 带预算地反复尝试解析本站的主机侧接口目录，直到拿到结果或预算用尽。
  * @param gadget 本站坐标。
+ * @param profile 本站型号档案，提供枚举时要匹配的 VID/PID。
  * @return 相对 /sys 的接口目录路径；预算内没等到返回空串。
  * @note 阻塞调用：只睡 sysfs 读取的轮询间隔，不碰端点 fd，所以此时数据面
  *       线程还没起也没关系（描述符已由内核 f_fs 就位，枚举不需要用户态应答）。
@@ -71,11 +72,12 @@ constexpr int kHostEnumPollMs = 50;
  *       两者——等不到接口目录就等于等不到本站。
  * @see detail::FindHostDevicePath。
  */
-std::string WaitForHostDevicePath(const GadgetId& gadget) {
+std::string WaitForHostDevicePath(const GadgetId& gadget,
+                                  const core::device::DeviceProfile& profile) {
   for (int waited = 0; waited < kHostEnumBudgetMs; waited += kHostEnumPollMs) {
-    const std::string path = detail::FindHostDevicePath(
-        gadget.instance, core::device::kDualSenseIdentity.vendor_id,
-        core::device::kDualSenseIdentity.product_id);
+    const std::string path =
+        detail::FindHostDevicePath(gadget.instance, profile.identity.vendor_id,
+                                   profile.identity.product_id);
     if (!path.empty()) return path;
     std::this_thread::sleep_for(std::chrono::milliseconds(kHostEnumPollMs));
   }
@@ -105,19 +107,22 @@ GadgetId ResolveGadgetId(const std::string& mac, const std::string& ffs_base) {
   return GadgetId{"ds5dummy-" + digits, ffs_base + "." + digits, digits};
 }
 
-bool Provision(Station& out, const GadgetId& gadget, uint8_t interval_ms) {
+bool Provision(Station& out, const GadgetId& gadget,
+               const core::device::DeviceProfile& profile,
+               uint8_t interval_ms) {
   // 端点句柄是本轮的局部值而不是 plane 里的常驻成员：Manager 会并发持有
   // 多个 gadget，每个 slot 的 fd 都归自己的 Provision 调用产出。FfsDevice
   // 析构不关 fd（见 ffs_device.h），所以成功后三份 fd 直接交给调用方。
   detail::FfsDevice device;
   // 顺序即依赖：configfs 就位 → 描述符进内核 → 内核才接受 bind。
-  if (!detail::GadgetSetup(gadget.ffs_path, gadget.instance, gadget.serial)) {
+  if (!detail::GadgetSetup(gadget.ffs_path, gadget.instance, profile,
+                           gadget.serial)) {
     DS5DUMMY_LOG(ERROR, "[usb] GadgetSetup failed (instance {})",
                  gadget.instance.c_str());
     AbortProvision(device, gadget);
     return false;
   }
-  if (!device.Open(gadget.ffs_path, gadget.serial, interval_ms)) {
+  if (!device.Open(gadget.ffs_path, profile, gadget.serial, interval_ms)) {
     DS5DUMMY_LOG(ERROR, "[usb] FunctionFS open failed");
     AbortProvision(device, gadget);
     return false;
@@ -131,7 +136,7 @@ bool Provision(Station& out, const GadgetId& gadget, uint8_t interval_ms) {
   out.endpoints = Endpoints{device.Ep0Fd(), device.EpInFd(), device.EpOutFd()};
   // bind 成功站点就可用了，接口目录只是可选的关联线索：等不到留空并降级成
   // WARNING，绝不因此拆站（消费者只有音频 sink 的属性，缺它只是少一个键）。
-  out.host_sysfs_path = WaitForHostDevicePath(gadget);
+  out.host_sysfs_path = WaitForHostDevicePath(gadget, profile);
   if (out.host_sysfs_path.empty()) {
     DS5DUMMY_LOG(WARNING, "[usb] {} bound but host interface dir not found",
                  gadget.instance.c_str());
@@ -147,9 +152,13 @@ bool HasDummyUdc() { return !detail::FindDummyUdc().empty(); }
 
 // ---- worker 半边 ----
 
-bool Adopt(const Endpoints& inherited) {
-  return plane::Get().device.Adopt(inherited.ep0, inherited.ep_in,
-                                   inherited.ep_out);
+bool Adopt(const Endpoints& inherited,
+           const core::device::DeviceProfile& profile) {
+  plane::DataPlane& state = plane::Get();
+  // ep0 应答的 report descriptor 取决于型号；在起线程之前落下，之后只读。
+  state.profile = &profile;
+  return state.device.Adopt(inherited.ep0, inherited.ep_in,
+                            inherited.ep_out);
 }
 
 void Close() { plane::Get().device.Close(); }

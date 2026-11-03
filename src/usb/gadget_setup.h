@@ -2,10 +2,10 @@
  * @file gadget_setup.h
  * @brief configfs 装配的虚拟 USB gadget（dummy_hcd 总线上的 bring-up）
  *
- * 在 dummy_hcd 提供的虚拟 USB 总线上创建一个 DualSense 伪装 gadget：建
- * configfs 树、挂 FunctionFS、绑/解 UDC、拆机清理。属于 usb 模块的 root 侧
- * 机制层，收在 namespace usb::detail 里：生产调用方只有门面 usb.cpp 的
- * Provision/Teardown，tools/ 下的诊断程序是有意绕过门面直接驱动本文件的。
+ * 在 dummy_hcd 提供的虚拟 USB 总线上创建一个 DualSense / DualSense Edge
+ * 伪装 gadget：建 configfs 树、挂 FunctionFS、绑/解 UDC、拆机清理。属于
+ * usb 模块的 root 侧机制层，收在 namespace usb::detail 里：生产调用方只有门面
+ * usb.cpp 的 Provision/Teardown，tools/ 下的诊断程序是有意绕过门面直接驱动本文件的。
  *
  * @note 这些函数只在 root 权限下有效（写 configfs、mount）；worker 侧认领
  *       交接来的端点 fd 即可，不碰本文件任何接口。
@@ -20,6 +20,8 @@
 
 #include <cstdint>
 #include <string>
+
+#include "core/device/descriptors.h"
 
 namespace usb {
 namespace detail {
@@ -55,6 +57,9 @@ inline constexpr const char* kGadgetInstance = "ds5dummy";
  *                 （functions/ffs.<instance>）与 FunctionFS 的挂载源。调用方
  *                 保证它在所有活跃 gadget 之间唯一；字符集须能过
  *                 IsSafeGadgetPath。
+ * @param profile 本站型号档案，提供 idVendor/idProduct 与厂商/产品字符串。
+ *                与交给 FfsDevice 的必须是同一份：configfs 的属性与 ep0 描述符
+ *                分属两处，混搭会让主机按错的布局解析。
  * @param serial 写进 `strings/0x409/serialnumber` 的 iSerialNumber 内容。主机
  *               侧把它当作设备的实例标识，所以多站必须各用不同值（生产路径由
  *               ResolveGadgetId 按 MAC 派生）；空串会让内核在 bind 时拒绝缺
@@ -64,6 +69,7 @@ inline constexpr const char* kGadgetInstance = "ds5dummy";
  * @see GadgetBind —— 描述符就位后才允许的下一步。
  */
 bool GadgetSetup(const std::string& ffs_path, const std::string& instance,
+                 const core::device::DeviceProfile& profile,
                  const std::string& serial);
 
 /**

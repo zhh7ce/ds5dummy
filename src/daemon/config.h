@@ -5,8 +5,9 @@
  *          决定 FunctionFS 路径、发现轮询间隔、系统日志级别与降权身份策略；
  *          用户配置
  *          （<home>/.config/ds5dummy/config.yaml）属于目标用户，只决定服务哪些
- *          手柄以及每只手柄的等待秒数、音频开关、音频/触觉增益、USB 轮询上限
- *          与个人日志级别。用户级设置按"内置默认 ← global ← controllers.<MAC>"
+ *          手柄以及每只手柄的等待秒数、音频开关、音频/触觉增益、USB 轮询上限、
+ *          虚拟设备的型号与个人日志级别。用户级设置按"内置默认 ← global ←
+ *          controllers.<MAC>"
  *          三层叠加，解析完即每只手柄的最终值。这份文件是可选的：家目录里没有
  *          它，Manager 就按内置默认层启动（取值同发布的
  *          pkg/user-config.example.yaml），只有显式 `enabled: false` 才等于不启用。
@@ -29,6 +30,8 @@
 #include <optional>
 #include <string>
 #include <vector>
+
+#include "core/device/identity.h"
 
 namespace ds5::daemon {
 
@@ -110,8 +113,9 @@ enum class BtTargetMode {
 
 /**
  * @brief 一只手柄的生效设置，同时也是 global: 默认层的载体。
- * @details 字段与 worker 的交接参数一一对应（log_level 与 bt_addr 不在这里：
- *          前者只作用于 Manager 进程，后者决定服务哪只手柄）。
+ * @details 字段与 worker 的交接参数一一对应；usb_model 是例外——Manager 先把它
+ *          叠加成"本站型号"，再折成 worker 的 `--usb-edge` 开关。log_level 与
+ *          bt_addr 也不在这里：前者只作用于 Manager 进程，后者决定服务哪只手柄。
  * @note 纯数据，无行为；拷贝即配置快照。
  */
 struct ControllerConfig {
@@ -129,6 +133,10 @@ struct ControllerConfig {
   /// 线程只在收到新的蓝牙样本时写一份，不重发。蓝牙侧的上报节奏由手柄固件
   /// 固定，这里调的是主机取报告的节拍与重复份数。
   int usb_report_interval_ms = 1;
+  /// 虚拟 USB 设备呈现的型号。std::nullopt = auto：跟随真手柄的 HID VID/PID
+  /// （见 core::device::ModelForHidIdentity）；写出型号则强制本站按它呈现，
+  /// 不受发现结果影响。它同时决定 PID、产品串与 report descriptor。
+  std::optional<core::device::ControllerModel> usb_model;
 };
 
 /**
@@ -172,6 +180,24 @@ bool IsValidBtAddr(const std::string& addr);
  *      --usb-report-interval-ms。
  */
 std::string UsbReportIntervalChoices();
+
+/**
+ * @brief 把 usb_model 的三个取值写成面向用户的清单。
+ * @return 形如 "auto, dualsense or edge" 的单行文本。
+ * @details 配置解析的"取值非法"错误文本由它生成，新增取值不会再多出一处
+ *          手写文案。
+ * @see ReadUsbModel（config.cpp）、UsbModelName。
+ */
+std::string UsbModelChoices();
+
+/**
+ * @brief 把手柄设置里的 usb_model 转回配置文本。
+ * @param model std::nullopt（auto，跟随发现结果）或一个明确型号。
+ * @return "auto"、"dualsense" 或 "edge"；与 UsbModelChoices 同一张表。
+ * @details 启动横幅用它回显生效值，与用户在配置文件里写的写法一致。
+ */
+const char* UsbModelName(
+    const std::optional<core::device::ControllerModel>& model);
 
 /**
  * @brief 把 MAC 文本规范成大写形式，作为 controllers 的键与手柄身份的比对口径。
@@ -222,11 +248,11 @@ bool ParseSystemConfig(const std::string& text, SystemConfig& out,
  * @details 严格模式：只接受 enabled/bt_addr/log_level/global/controllers 五个
  *          根键，ffs_path、uid、gid 等 root 级键在这里一律按未知键拒绝。
  *          global 与每个 controllers.<MAC> 条目都只接受 bt_wait_s/audio/
- *          haptics_gain/speaker_gain/usb_report_interval_ms 五个键。enabled 缺省 true，
- *          bt_addr 缺省 auto；bt_addr: list 要求 controllers 非空，
- *          bt_addr: <MAC> 要求 controllers 至多只有这一个键。
+ *          haptics_gain/speaker_gain/usb_report_interval_ms/usb_model 六个键。
+ *          enabled 缺省 true，bt_addr 缺省 auto；bt_addr: list 要求 controllers
+ *          非空，bt_addr: <MAC> 要求 controllers 至多只有这一个键。
  *          两个增益按各自区间收口，usb_report_interval_ms 只接受 0/1/2/4
- *          （0 = real-time）。
+ *          （0 = real-time），usb_model 只接受 auto/dualsense/edge。
  * @note 纯函数：不碰文件系统、不写日志，可在任意线程调用。
  * @see LoadUserConfig —— 加固读取 + 本函数的组合。
  */

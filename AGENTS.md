@@ -18,9 +18,13 @@
                     [audio] 下行：PipeWire sink → Opus/触觉 → 0x36 报告 → 手柄
 ```
 
-主机看到的设备身份是 `054c:0ce6` "Sony Interactive Entertainment / DualSense
-Wireless Controller"（`src/core/device/identity.h`，编译期常量，不是配置项）；
-序列号不在那一处——它是每站一个、由手柄 MAC 派生的值（见 §7）。
+主机看到的设备身份随手柄型号变：普通 DualSense 是 `054c:0ce6` "Sony Interactive
+Entertainment / DualSense Wireless Controller"，DualSense Edge 是 `054c:0df2`
+"DualSense Edge Wireless Controller"，HID report descriptor 也跟着换（337 / 453
+字节）。型号默认在发现阶段按蓝牙 HID 的 VID/PID 判定，用户配置里的
+`usb_model: auto|dualsense|edge` 可以逐手柄覆盖它；两个型号的档案冻在
+`src/core/device/`（`DeviceProfile`）；序列号不在那里——它是每站一个、
+由手柄 MAC 派生的值（见 §7）。
 麦克风开关走 HID 通道（0x32 状态报告），不走音频通道：主机打开虚拟麦克风开始
 录音时程序才让手柄开麦。
 
@@ -72,7 +76,9 @@ systemd 每 2 秒重拉；0 = 当前用户不启用本服务（用户配置里 `
 
 监督循环 `ManagerSupervisor::Run()` 以系统配置的 `discovery_interval_s`（秒，缺省
 3）为节拍，每轮先补建站（`discovery` 扫描 `/sys/class/hidraw`，认出蓝牙总线上的
-`054c:0ce6`/`054c:0df2` 与合成的 `1998:1221`/`1998:1103`，MAC 取自 `HID_UNIQ`），再 `waitpid(-1, WNOHANG)`
+`054c:0ce6`/`054c:0df2` 与合成的 `1998:1221`/`1998:1103`，MAC 取自 `HID_UNIQ`，
+VID/PID 同时定出型号——Edge 与普通 DualSense 的虚拟呈现由此分岔，配置里的
+`usb_model` 不是 `auto` 时按配置覆盖它），再 `waitpid(-1, WNOHANG)`
 回收退出的 worker。节拍同时决定两件事的最坏延迟：新手柄被认出来、以及 worker 死后
 被重新拉起（后者还要再加一段退避）。
 每站的生命周期：provision → fork+execv worker → 回收 → `usb::Teardown(挂载点,
@@ -115,7 +121,9 @@ passwd 主组，`list` 用配置条目里的 gid（省略时等于 uid）），`
 
 worker（`src/daemon/worker.cpp`）认领 fd（`usb::Adopt`）、建蓝牙链路、起全部数据面
 线程、跑 100 ms 主循环直到退出。它不读配置文件：`bt_addr`、`bt_wait_s`、`no_audio`、
-`haptics_gain`、`speaker_gain`、`verbosity` 由 Manager 从两份配置读出后写进交接 argv，
+`haptics_gain`、`speaker_gain`、`verbosity`、`usb_edge`（本站在 USB 上呈现为 Edge：
+最终型号由发现结果与配置里的 `usb_model` 叠加后折成这个开关）由 Manager 从两份配置与
+发现结果读出后写进交接 argv，
 `host_sysfs_path`（`--sysfs-path`）由 Manager 建站时从 sysfs 解析出本站的 USB 接口目录后
 写入，worker 只转交给音频的 sink 与 source——它已降权，也不认识 configfs 坐标，自己查不到；`usb_report_interval_ms` 的数值整个进 argv（`--usb-report-interval-ms`），因为 IN 线程的发送节拍要靠它在 worker 侧自己排，描述符里那个 `bInterval` 不构成节奏。它连 PipeWire 用的是桌面用户的身份，所以需要
 `XDG_RUNTIME_DIR`；`RestoreXdgRuntimeDir()` 在环境变量丢了的时候按当前 uid（或
@@ -314,11 +322,16 @@ configfs 的 `UDC` 属性反查本站：`/sys/class/udc/dummy_udc.N` canonical �
 可选信息：等不到只留空并记 WARNING，站点照常可用。
 换算只认 `dummy_udc` 前缀（真实控制器的名字换不出配对目录，返回空而不是猜）。
 
-描述符块 `core::device::kFfsFsDescriptors` 是冻结的，唯一在装配期被改写的字节是两个
-中断端点的 `bInterval`：`Provision()` 收到的就是 `usb_report_interval_ms` 这个数本身
+描述符块 `core::device::kFfsFsDescriptors` 是冻结的，装配期被改写的字节有两处：两个
+中断端点的 `bInterval`，和 HID class descriptor 的 `wDescriptorLength`（按本站的
+`DeviceProfile` 取 337 或 453）。`Provision()` 收到的间隔就是
+`usb_report_interval_ms` 这个数本身
 （full-speed 下 bInterval 的单位恰是 1 ms，不做任何换算；real-time 档取 1），
 `FfsDevice::WriteFfsDescriptors()` 拷一份再按
-`kFfsEpInIntervalOffset`/`kFfsEpOutIntervalOffset` 覆写。它是**给主机看的声明**：
+`kFfsEpInIntervalOffset`/`kFfsEpOutIntervalOffset` 覆写，同时按
+`kFfsWDescLenOffset` 把长度两字节改成档案值；worker 的 ep0 应答
+`GET_DESCRIPTOR(HID)` 时对那份 9 字节副本做同样的覆写。`bInterval` 是**给主机看的
+声明**：
 dummy_hcd 不按它轮询（见上面那段），所以它既不限制也不产生实际节拍——真实节奏
 在 worker 的 IN 线程里。蓝牙侧的上报节奏由手柄固件固定，USB 侧调多快都不会让
 手柄多报。
@@ -518,7 +531,7 @@ configure 失败是设计选择**——静默退化成 HID-only 会让除了在�
 ## 12. 测试
 
 `tests/CMakeLists.txt` 把被测源文件直接编进一个 `ds5dummy_tests` 二进制，
-`gtest_discover_tests` 让 ctest 看到逐个用例（当前 246 个，两个后端各跑一遍）。
+`gtest_discover_tests` 让 ctest 看到逐个用例（当前 254 个，两个后端各跑一遍）。
 **硬性约束：全部测试必须能在无 root、无手柄的环境下跑** —— 需要特权或硬件的验证是人工
 清单，不进 CI/单测。因此 bt 的测试只覆盖门面到后端的纯转发契约、`tx` 的入队/seq/CRC/
 背压、feature 缓存策略，硬件往返一律不测；`daemon/discovery` 与 `usb` 的测试自己搭临时

@@ -132,6 +132,7 @@ bt_addr: auto          # auto | list | "AA:BB:CC:DD:EE:FF"
 #   haptics_gain: 1.0
 #   speaker_gain: 2
 #   usb_report_interval_ms: 1   # 0 = real-time：只在蓝牙新样本到达时发一份
+#   usb_model: auto             # auto | dualsense | edge
 
 # controllers:         # 按 MAC 覆盖单只手柄；键必须是合法 BD_ADDR
 #   "AA:BB:CC:DD:EE:FF":
@@ -146,7 +147,7 @@ bt_addr: auto          # auto | list | "AA:BB:CC:DD:EE:FF"
 | `controllers` | 无 | 以 MAC 为键的覆盖子树；`bt_addr: list` 时它同时是白名单，至少要有一项 |
 | `log_level` | 继承系统值 | 覆盖系统级别；写法同上。顶层键，不参与分层 |
 
-下面五个键既可以写在 `global:` 下，也可以写在 `controllers.<MAC>:` 下。生效顺序是
+下面六个键既可以写在 `global:` 下，也可以写在 `controllers.<MAC>:` 下。生效顺序是
 内置默认 ← `global` ← `controllers.<MAC>`，每层只覆盖写出来的键：
 
 | 键 | 默认 | 说明 |
@@ -156,6 +157,7 @@ bt_addr: auto          # auto | list | "AA:BB:CC:DD:EE:FF"
 | `haptics_gain` | `1.0` | 触觉振幅倍率，`0.0`..`2.0`；`0` 静音，`1.0` 原样，`2.0` 两倍。只影响震动，不碰声音 |
 | `speaker_gain` | `2` | 手柄侧扬声器前置增益，`0`..`7`。加大是让**手柄自己**放大，编码与音量数据不变 |
 | `usb_report_interval_ms` | `1` | 虚拟手柄两份输入报告之间的间隔：`1`/`2`/`4` ms（1000/500/250 Hz）由程序按这个间隔自己排发送时刻，两次蓝牙样本之间会把持有的那一份原样重发；`0` = real-time，只在收到新的蓝牙样本时发一份。这是 USB 侧行为；手柄经蓝牙上报的节奏由固件固定，不受此影响 |
+| `usb_model` | `auto` | 虚拟 USB 设备呈现的型号：`auto` 跟随真手柄的 HID 身份（Edge 呈现为 Edge，其余呈现为普通 DualSense）；`dualsense` / `edge` 强制按该型号呈现。型号同时决定 USB PID、产品串与 report descriptor，三者始终一起换。单 MAC 模式下手柄启动时不在线、发现不到型号时，用它固定呈现最省事 |
 
 Manager 每 `discovery_interval_s` 秒（默认 3 秒）扫描一次 `/sys/class/hidraw/`：只认蓝牙总线
 （`HID_ID` 的 bus 为 `0005`）且 VID/PID 属于受支持组合的设备——真机 `054c:0ce6`

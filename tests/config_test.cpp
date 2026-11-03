@@ -18,6 +18,7 @@
 #include <fstream>
 #include <iterator>
 #include <limits>
+#include <optional>
 #include <string>
 
 namespace {
@@ -299,6 +300,7 @@ TEST(UserConfigParse, EmptyDocumentDefaultsToAuto) {
   EXPECT_FLOAT_EQ(cfg.defaults.haptics_gain, 1.0f);
   EXPECT_EQ(cfg.defaults.speaker_gain, 2);  // 固件初值，不是"中立"的 0
   EXPECT_EQ(cfg.defaults.usb_report_interval_ms, 1);
+  EXPECT_FALSE(cfg.defaults.usb_model.has_value());  // auto：跟随发现结果
   EXPECT_TRUE(cfg.controllers.empty());
   EXPECT_FALSE(cfg.log_level.has_value());
 }
@@ -330,6 +332,7 @@ TEST(UserConfigParse, ShippedTemplateMatchesBuiltinDefaults) {
   EXPECT_EQ(parsed.defaults.speaker_gain, builtin.defaults.speaker_gain);
   EXPECT_EQ(parsed.defaults.usb_report_interval_ms,
             builtin.defaults.usb_report_interval_ms);
+  EXPECT_EQ(parsed.defaults.usb_model, builtin.defaults.usb_model);
 }
 
 TEST(UserConfigParse, DisabledWithoutAddressIsFine) {
@@ -576,6 +579,67 @@ TEST(UserConfigParse, ZeroReportIntervalSelectsRealTime) {
   std::string why;
   ASSERT_TRUE(ds5::daemon::ParseUserConfig(text, cfg, why)) << why;
   EXPECT_EQ(cfg.defaults.usb_report_interval_ms, 0);
+}
+
+// usb_model：auto 是不覆盖（std::nullopt），另两档钉死一个型号；横幅回显
+// UsbModelName 必须与这三种写法一致。
+TEST(UserConfigParse, UsbModelAcceptsAutoDualSenseAndEdge) {
+  using core::device::ControllerModel;
+  struct Case {
+    const char* text;
+    std::optional<ControllerModel> want;
+  };
+  const Case cases[] = {
+      {"auto", std::nullopt},
+      {"dualsense", ControllerModel::kDualSense},
+      {"edge", ControllerModel::kEdge},
+  };
+  for (const Case& c : cases) {
+    const std::string text = std::string("global:\n  usb_model: ") + c.text;
+    UserConfig cfg;
+    std::string why;
+    ASSERT_TRUE(ds5::daemon::ParseUserConfig(text, cfg, why))
+        << text << ": " << why;
+    EXPECT_EQ(cfg.defaults.usb_model, c.want) << c.text;
+    EXPECT_STREQ(ds5::daemon::UsbModelName(cfg.defaults.usb_model), c.text);
+  }
+}
+
+TEST(UserConfigParse, UsbModelLayersPerController) {
+  using core::device::ControllerModel;
+  const std::string text =
+      "global:\n"
+      "  usb_model: edge\n"
+      "controllers:\n"
+      "  \"AA:BB:CC:DD:EE:01\":\n"
+      "    usb_model: dualsense\n"
+      "  \"AA:BB:CC:DD:EE:02\": {}\n";
+  UserConfig cfg;
+  std::string why;
+  ASSERT_TRUE(ds5::daemon::ParseUserConfig(text, cfg, why)) << why;
+  ASSERT_TRUE(cfg.defaults.usb_model.has_value());
+  EXPECT_EQ(*cfg.defaults.usb_model, ControllerModel::kEdge);
+  ASSERT_TRUE(cfg.controllers["AA:BB:CC:DD:EE:01"].usb_model.has_value());
+  EXPECT_EQ(*cfg.controllers["AA:BB:CC:DD:EE:01"].usb_model,
+            ControllerModel::kDualSense);
+  // 空条目完全继承 global。
+  ASSERT_TRUE(cfg.controllers["AA:BB:CC:DD:EE:02"].usb_model.has_value());
+  EXPECT_EQ(*cfg.controllers["AA:BB:CC:DD:EE:02"].usb_model,
+            ControllerModel::kEdge);
+}
+
+TEST(UserConfigParse, RejectsUnknownUsbModel) {
+  for (const char* text :
+       {"global:\n  usb_model: duel\n",
+        "global:\n  usb_model: Edge\n",   // 取值区分大小写，与 auto/list 一致
+        "global:\n  usb_model: 1\n",
+        "global:\n  usb_model: [edge]\n",
+        "controllers:\n  \"AA:BB:CC:DD:EE:FF\":\n    usb_model: ps5\n"}) {
+    UserConfig cfg;
+    std::string why;
+    EXPECT_FALSE(ds5::daemon::ParseUserConfig(text, cfg, why)) << text;
+    EXPECT_NE(why.find("usb_model"), std::string::npos) << why;
+  }
 }
 
 TEST(UserConfigParse, RejectsInvalidMac) {

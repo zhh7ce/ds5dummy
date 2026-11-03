@@ -28,7 +28,8 @@
 namespace usb {
 namespace detail {
 
-bool FfsDevice::WriteFfsDescriptors(const std::string& serial,
+bool FfsDevice::WriteFfsDescriptors(const core::device::DeviceProfile& profile,
+                                    const std::string& serial,
                                     uint8_t interval_ms) {
   // 段 1 头：V2 magic + 声明只有 full-speed 一块描述符。
   struct {
@@ -47,11 +48,17 @@ bool FfsDevice::WriteFfsDescriptors(const std::string& serial,
   memcpy(desc_buf, &header, sizeof(header));
   memcpy(desc_buf + sizeof(header), core::device::kFfsFsDescriptors,
          sizeof(core::device::kFfsFsDescriptors));
-  // 两个 bInterval 是描述符里唯一随配置变化的字节；偏移由 descriptors.h
-  // 的常量给出，并在那里用 static_assert 钉在端点描述符内。
+  // 两个 bInterval 与 wDescriptorLength 是描述符里唯二随配置/型号变化的字段；
+  // 偏移由 descriptors.h 的常量给出，并在那里用 static_assert 钉在对应的
+  // 描述符内。wDescriptorLength 是 LE16，取 profile 的实际字节数。
   desc_buf[sizeof(header) + core::device::kFfsEpInIntervalOffset] = interval_ms;
   desc_buf[sizeof(header) + core::device::kFfsEpOutIntervalOffset] =
       interval_ms;
+  const uint16_t w_desc_len = profile.report_descriptor_size;
+  desc_buf[sizeof(header) + core::device::kFfsWDescLenOffset] =
+      w_desc_len & 0xFF;
+  desc_buf[sizeof(header) + core::device::kFfsWDescLenOffset + 1] =
+      (w_desc_len >> 8) & 0xFF;
 
   // 描述符先于任何 setup 到达 ep0，主机 enumeration 才看得见 function。
   ssize_t written = ::write(ep0_fd_, desc_buf, sizeof(desc_buf));
@@ -66,8 +73,8 @@ bool FfsDevice::WriteFfsDescriptors(const std::string& serial,
   // 形式要求；设备真字符串走 configfs（gadget_setup），不在此处生效。
   // 三个条目的形状与 configfs 侧一一对应（厂商/产品/序列号），序列号按站
   // 传入而不是取常量——两处取值一致，读 f_fs 事件的工具才不会看到错位。
-  const char* strings[] = {core::device::kManufacturer, core::device::kProduct,
-                           serial.c_str()};
+  const char* strings[] = {profile.identity.manufacturer,
+                           profile.identity.product, serial.c_str()};
   uint16_t langid = 0x0409;  // en-US，与 configfs strings/0x409 目录一致。
 
   struct {
@@ -110,8 +117,9 @@ bool FfsDevice::WriteFfsDescriptors(const std::string& serial,
   return true;
 }
 
-bool FfsDevice::Open(const std::string& ffs_path, const std::string& serial,
-                     uint8_t interval_ms) {
+bool FfsDevice::Open(const std::string& ffs_path,
+                     const core::device::DeviceProfile& profile,
+                     const std::string& serial, uint8_t interval_ms) {
   std::string ep0_path = ffs_path + "/ep0";
   std::string ep_in_path = ffs_path + "/ep1";
   std::string ep_out_path = ffs_path + "/ep2";
@@ -129,7 +137,7 @@ bool FfsDevice::Open(const std::string& ffs_path, const std::string& serial,
   }
 
   // 描述符与字符串必须在 bind 之前就位。
-  if (!WriteFfsDescriptors(serial, interval_ms)) {
+  if (!WriteFfsDescriptors(profile, serial, interval_ms)) {
     Close();
     return false;
   }

@@ -49,6 +49,7 @@ const OptDef kOpts[] = {
     {"--ep-in", Kind::Value},
     {"--ep-out", Kind::Value},
     {"--no-audio", Kind::Switch},
+    {"--usb-edge", Kind::Switch},
     {"--usb-report-interval-ms", Kind::Value},
     {"--haptics-gain", Kind::Value},
     {"--speaker-gain", Kind::Value},
@@ -181,6 +182,8 @@ Options internal::ParseArgv(const std::vector<std::string>& args) {
       o.worker = true;
     } else if (name == "--no-audio") {
       o.no_audio = true;
+    } else if (name == "--usb-edge") {
+      o.usb_edge = true;
     } else if (name == "--usb-report-interval-ms") {
       // 与 YAML 那一侧同一张取值表：worker 拿到的是配置校验过的同一个值。
       int interval = 0;
@@ -273,6 +276,7 @@ std::vector<std::string> BuildWorkerArgv(const Options& o,
   }
   av.insert(av.end(), {"-v", std::to_string(o.verbosity)});
   if (o.no_audio) av.push_back("--no-audio");
+  if (o.usb_edge) av.push_back("--usb-edge");
   if (o.usb_report_interval_ms != 1) {
     av.insert(av.end(), {"--usb-report-interval-ms",
                          std::to_string(o.usb_report_interval_ms)});

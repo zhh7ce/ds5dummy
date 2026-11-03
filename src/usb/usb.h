@@ -30,6 +30,7 @@
 #include <string>
 
 #include "core/debug.h"
+#include "core/device/descriptors.h"
 
 namespace usb {
 
@@ -111,6 +112,9 @@ GadgetId ResolveGadgetId(const std::string& mac, const std::string& ffs_base);
  *            保存副本）与主机侧枚举出来的设备 sysfs 路径。失败时内容不保证。
  * @param gadget 本站坐标（实例名、挂载点、序列号），必须是同一次
  *               ResolveGadgetId 的产物；三者缺一即与本站不对应，会拆到别站。
+ * @param profile 本站型号档案：configfs 里的 VID/PID/产品串与写进 ep0 的 report
+ *                descriptor 都取自它，两处必须同源，否则主机按错的布局解析。
+ *                型号由发现阶段的 HID VID/PID 判定（core::device::ProfileFor）。
  * @param interval_ms 两个中断端点的 bInterval（毫秒），直接取配置的
  *                    usb_report_interval_ms（1/2/4）。它只是描述符里的声明：
  *                    dummy_hcd 不照它轮询（见 StartThreads），实际发送节拍
@@ -127,7 +131,9 @@ GadgetId ResolveGadgetId(const std::string& mac, const std::string& ffs_base);
  *       本身是好的，缺的只是一个可选的关联线索。
  * @see Teardown —— 对称的整站拆除，坐标必须与本次调用一致。
  */
-bool Provision(Station& out, const GadgetId& gadget, uint8_t interval_ms);
+bool Provision(Station& out, const GadgetId& gadget,
+               const core::device::DeviceProfile& profile,
+               uint8_t interval_ms);
 
 /**
  * @brief 单个 gadget 的整站拆除：unbind + 清 configfs + detach 挂载。
@@ -160,9 +166,13 @@ bool IsSafeGadgetPath(const std::string& path);
 /**
  * @brief 认领交接来的三个端点 fd：只校验可用且互不相同，不 open、不写描述符。
  * @param inherited 交接后的 fd 三元组（worker 侧即 3/4/5）。
+ * @param profile 本站型号档案：ep0 线程据此应答 GET_DESCRIPTOR(Report) 与 HID
+ *                class descriptor。必须与 Manager 建站时用的是同一份，所以由
+ *                Manager 经交接参数（--usb-edge）传下来。
  * @return 合法 true；任一 fd 不可用或彼此相同 false。
  */
-bool Adopt(const Endpoints& inherited);
+bool Adopt(const Endpoints& inherited,
+           const core::device::DeviceProfile& profile);
 
 /**
  * @brief 关闭本进程持有的三个 fd 副本。

@@ -148,9 +148,12 @@ TEST(UsbInputCache, InputWritesIsZeroWithoutWriterThread) {
 TEST(UsbAdopt, RejectsUnsetEndpointFds) {
   // 认领的门面校验走 usb::detail::FfsDevice::Adopt：fd<0 在 fcntl 之前短路判负，
   // 不涉及真实端点，因此可在无硬件环境验证。
-  EXPECT_FALSE(usb::Adopt(usb::Endpoints{-1, -1, -1}));
-  EXPECT_FALSE(usb::Adopt(usb::Endpoints{5, -1, 6}));
-  EXPECT_FALSE(usb::Adopt(usb::Endpoints{5, 6, -1}));
+  EXPECT_FALSE(
+      usb::Adopt(usb::Endpoints{-1, -1, -1}, core::device::kDualSenseProfile));
+  EXPECT_FALSE(
+      usb::Adopt(usb::Endpoints{5, -1, 6}, core::device::kDualSenseProfile));
+  EXPECT_FALSE(
+      usb::Adopt(usb::Endpoints{5, 6, -1}, core::device::kDualSenseProfile));
 }
 
 TEST(UsbPathSafety, AcceptsPlainDeviceAndConfigPaths) {

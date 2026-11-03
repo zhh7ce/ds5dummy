@@ -23,6 +23,8 @@
 #include <cstdint>
 #include <string>
 
+#include "core/device/descriptors.h"
+
 namespace usb {
 namespace detail {
 
@@ -38,6 +40,7 @@ class FfsDevice {
   /**
    * @brief 打开 ffs_path 下的三个端点并向 ep0 写入描述符与字符串表。
    * @param ffs_path FunctionFS 挂载目录（GadgetSetup 已 mount 好）。
+   * @param profile 本站型号档案，决定 wDescriptorLength 与字符串表里的产品串。
    * @param serial 本站的 USB 序列号，只用作 ep0 字符串表的第三个条目以填满
    *               内核要求的格式；主机实际读到的 iSerialNumber 来自 configfs
    *               （见 GadgetSetup）。传本站坐标里的同一个值，别让两处不一致。
@@ -47,9 +50,12 @@ class FfsDevice {
    *               dummy_hcd 不照它轮询，见 usb::StartThreads。
    * @return 成功 true；任一步失败时已 Close() 回收本次打开的 fd。
    * @note 仅 root 半边调用；写描述符必须先于内核接受 gadget bind。
+   * @note 与 GadgetSetup 必须收同一个 profile：configfs 里的 VID/PID/产品串
+   *       和这里的描述符分属两处，配对错了主机就按错的布局解析。
    */
-  bool Open(const std::string& ffs_path, const std::string& serial,
-            uint8_t interval_ms);
+  bool Open(const std::string& ffs_path,
+            const core::device::DeviceProfile& profile,
+            const std::string& serial, uint8_t interval_ms);
 
   /**
    * @brief 关闭全部已持有的端点 fd 并复位为 -1；可重复调用。
@@ -98,15 +104,18 @@ class FfsDevice {
 
   /**
    * @brief 把 FunctionFS 两段载荷（描述符块 + 字符串表）先后写进 ep0。
+   * @param profile 本站型号档案，提供 wDescriptorLength 与产品字符串。
    * @param serial 本站序列号，字符串表的第三个条目。
    * @param interval_ms 写进 EP1 IN / EP2 OUT 两处 bInterval 的毫秒数。
    * @return 两段都完整写入 true；失败已记日志。
    * @details 冻结在 core::device::kFfsFsDescriptors 里的字节先拷进局部缓冲，
-   *          再按 core::device::kFfsEpIn/OutIntervalOffset 覆写这两个字节——
+   *          再按 core::device::kFfsEpIn/OutIntervalOffset 覆写这两个字节，按
+   *          core::device::kFfsWDescLenOffset 覆写 wDescriptorLength 两个字节——
    *          除它们之外整块描述符与常量逐字节相同。
    * @note 仅由 Open() 在 ep0 打开后调用一次。
    */
-  bool WriteFfsDescriptors(const std::string& serial, uint8_t interval_ms);
+  bool WriteFfsDescriptors(const core::device::DeviceProfile& profile,
+                           const std::string& serial, uint8_t interval_ms);
 };
 
 }  // namespace detail

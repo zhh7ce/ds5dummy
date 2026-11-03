@@ -32,6 +32,7 @@
 #include <vector>
 
 #include "core/debug.h"
+#include "core/device/descriptors.h"
 #include "daemon/config.h"
 #include "daemon/discovery.h"
 #include "daemon/handoff.h"
@@ -140,10 +141,11 @@ void PrintControllerSettings(const std::string& label,
     std::snprintf(interval_text, sizeof interval_text, "%d ms",
                   settings.usb_report_interval_ms);
   }
-  printf("  %s: audio %s, haptics %.2f, speaker %d, USB %s, bt_wait %d s\n",
+  printf("  %s: audio %s, haptics %.2f, speaker %d, USB %s, model %s, "
+         "bt_wait %d s\n",
          label.c_str(), settings.audio ? "on" : "off",
          static_cast<double>(settings.haptics_gain), settings.speaker_gain,
-         interval_text, settings.bt_wait_s);
+         interval_text, UsbModelName(settings.usb_model), settings.bt_wait_s);
 }
 
 /**
@@ -260,14 +262,31 @@ class ManagerSupervisor {
 
   /**
    * @brief 单手柄模式：没有在跑的站就按配置里的固定 MAC 建一站。
-   * @details 不扫描 sysfs——老语义是"站先起来，worker 用 bt_wait_s 等手柄
-   *          连上"，对只服务一只手柄的用户最直接。
+   * @details 起站依据仍是配置而不是扫描结果（老语义是"站先起来，worker 用
+   *          bt_wait_s 等手柄连上"），但型号默认从 HID 身份读出来，所以这里为
+   *          那只 MAC 做一次窄查询：查得到就按它的型号建站，查不到（手柄还没
+   *          连上）先按普通 DualSense 建站——这一站的呈现方式此后不再改。
+   *          配置里写了 usb_model（非 auto）时，查询结果与回落都不影响呈现。
    */
   void EnsureSingleSlot() {
     if (!slots_.empty()) return;
     const std::string& mac = user_.bt_addr;
     if (!RetryDue(mac)) return;
-    StartSlot(mac);
+    StartSlot(mac, ModelForMac(mac));
+  }
+
+  /**
+   * @brief 在发现结果里查一只手柄的型号。
+   * @param mac 规范大写 BD_ADDR。
+   * @return 该 MAC 的型号；它不在 sysfs 里时按普通 DualSense 处理。
+   * @note 这只是"发现结果"：配置里的 usb_model 不是 auto 时，StartSlot 会用
+   *       它覆盖这里给出的型号。
+   */
+  static core::device::ControllerModel ModelForMac(const std::string& mac) {
+    for (const DiscoveredController& found : ScanControllers(kHidrawSysfsBase)) {
+      if (found.mac == mac) return found.model;
+    }
+    return core::device::ControllerModel::kDualSense;
   }
 
   /**
@@ -286,7 +305,7 @@ class ManagerSupervisor {
       if (!RetryDue(found.mac)) continue;
       DS5DUMMY_LOG(INFO, "[manager] discovered DualSense {} at {}",
                    found.mac.c_str(), found.node.c_str());
-      StartSlot(found.mac);
+      StartSlot(found.mac, found.model);
     }
   }
 
@@ -294,11 +313,14 @@ class ManagerSupervisor {
    * @brief 为一只手柄建站并把 worker 拉起来。
    * @param mac 规范大写的 BD_ADDR，同时决定 gadget 实例名、挂载点与 worker 的
    *            目标地址。
+   * @param detected 发现阶段从真手柄 HID VID/PID 读出的型号；配置里的
+   *                 usb_model 不是 auto 时会被它覆盖。
    * @details 三步依序：Provision（失败自带回滚）→ fork+exec → 父进程关掉自己
    *          的 fd 副本。任何一步失败都记退避并留给下一轮重试；失败的站点自己
    *          清干净，不影响别的站。
    */
-  void StartSlot(const std::string& mac) {
+  void StartSlot(const std::string& mac,
+                 core::device::ControllerModel detected) {
     const usb::GadgetId gadget = usb::ResolveGadgetId(mac, ffs_base_);
     if (gadget.instance.empty()) {
       DS5DUMMY_LOG(ERROR, "[manager] '{}' cannot name a gadget", mac.c_str());
@@ -307,6 +329,10 @@ class ManagerSupervisor {
     }
 
     const ControllerConfig settings = EffectiveSettings(mac);
+    // usb_model 的 auto 就是"用发现结果"；写了型号则本站一律按它呈现，
+    // 单 MAC 模式下手柄还没连上（发现不到型号）时也照样生效。
+    const core::device::ControllerModel model =
+        settings.usb_model.value_or(detected);
     // 配置层已把间隔收口到 0/1/2/4 毫秒。0 是 real-time：描述符仍用最快的
     // 1 ms，但 worker 只在收到新蓝牙样本时才写；其余档位的数值本身就是
     // bInterval 的字节值（全速一帧 1 ms），不需要换算。这个字节是站点自己的
@@ -318,7 +344,8 @@ class ManagerSupervisor {
                                              : settings.usb_report_interval_ms);
 
     usb::Station station;
-    if (!usb::Provision(station, gadget, interval_ms)) {
+    if (!usb::Provision(station, gadget, core::device::ProfileFor(model),
+                        interval_ms)) {
       DS5DUMMY_LOG(WARNING, "[manager] Build failed for {}, retrying in {} ms",
                    mac.c_str(), kRestartBackoffMs);
       ScheduleRetry(mac);
@@ -326,7 +353,7 @@ class ManagerSupervisor {
     }
 
     pid_t pid = -1;
-    if (!StartWorker(station, mac, settings, gadget.instance, pid)) {
+    if (!StartWorker(station, mac, settings, gadget.instance, model, pid)) {
       // worker 没起来：关掉父侧 fd 并把刚建好的站拆掉，坐标只属于这一站。
       CloseEndpoints(station.endpoints);
       usb::Teardown(gadget.ffs_path, gadget.instance);
@@ -345,6 +372,7 @@ class ManagerSupervisor {
    * @param mac 目标手柄 MAC，写进 worker 的交接参数。
    * @param settings 本站的手柄级设置，覆盖 worker 配置骨架。
    * @param instance gadget 实例名，只用于日志。
+   * @param model 该手柄的型号，写进 worker 的交接参数。
    * @param out_pid 成功时写入子进程号；失败时不动。
    * @return 子进程已起来 true（不代表它成功 execv）；任何准备失败 false。
    * @details 顺序上有两个硬约束：argv 与 char* 数组必须在 fork 之前构造好
@@ -355,12 +383,16 @@ class ManagerSupervisor {
    */
   bool StartWorker(usb::Station& station, const std::string& mac,
                    const ControllerConfig& settings,
-                   const std::string& instance, pid_t& out_pid) {
+                   const std::string& instance,
+                   core::device::ControllerModel model, pid_t& out_pid) {
     Options worker_options = base_options_;
     worker_options.worker = true;
     worker_options.bt_addr = mac;
     worker_options.bt_wait_s = settings.bt_wait_s;
     worker_options.no_audio = !settings.audio;
+    // worker 的 ep0 要应答与自己身份相符的 report descriptor：型号必须跟着
+    // 这一站走，不能像默认值那样一律按普通 DualSense。
+    worker_options.usb_edge = model == core::device::ControllerModel::kEdge;
     worker_options.haptics_gain = settings.haptics_gain;
     worker_options.speaker_gain = settings.speaker_gain;
     // 间隔整个交下去：IN 线程要按它自己排发送时刻，描述符里那个 bInterval

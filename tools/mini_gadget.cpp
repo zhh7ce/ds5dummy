@@ -336,7 +336,8 @@ int main(int argc, char** argv) {
     const std::string path = "/dev/ffs-ds5";
     const std::string instance = kGadgetInstance;
 
-    if (!GadgetSetup(path, instance, MINI_SERIAL)) {
+    if (!GadgetSetup(path, instance, core::device::kDualSenseProfile,
+                     MINI_SERIAL)) {
         fprintf(stderr, "[mini] GadgetSetup failed\n");
         return 1;
     }

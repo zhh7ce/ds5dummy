@@ -38,6 +38,10 @@ struct Options {
   bool worker = false;  ///< --worker：降权子进程入口，不建 gadget
   bool show_help = false;  ///< --help：只打印用法，不进入任何流程
   bool no_audio = false;   ///< --no-audio：不建 PipeWire sink，只桥接 HID
+  /// --usb-edge：虚拟 USB 设备按 DualSense Edge 呈现（054c:0df2 + 453 字节
+  /// report descriptor）。Manager 按发现阶段判出的型号置位；worker 侧只用来选
+  /// ep0 应答的描述符，默认 false 即普通 DualSense。
+  bool usb_edge = false;
   std::string bt_addr;     ///< --bt-addr：桥接必需的控制器 BD_ADDR，空=未指定
   /// -v：解析后的 loguru stderr 级别（越大越啰嗦）。刻意自己解析而不是让
   /// loguru::init 扫 argv——它遇到不认识的值是 CHECK_F 失败直接 abort 进程，

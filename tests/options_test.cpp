@@ -20,6 +20,7 @@ TEST(Options, Defaults) {
   EXPECT_FALSE(o.worker);
   EXPECT_FALSE(o.show_help);
   EXPECT_FALSE(o.no_audio);
+  EXPECT_FALSE(o.usb_edge);
   EXPECT_TRUE(o.bt_addr.empty());
   // 设备目录是可选交接项：默认（Manager 没解析到）就是空串，worker 据此不写属性。
   EXPECT_TRUE(o.host_sysfs_path.empty());
@@ -35,7 +36,7 @@ TEST(Options, ParsesAllInternalFlags) {
   ds5::daemon::Options o = ds5::daemon::internal::ParseArgv(
       {"--worker", "--ep0", "3", "--ep-in", "4", "--ep-out", "5", "--bt-addr",
        "AA:BB:CC:DD:EE:FF", "--bt-wait", "5", "-v", "DEBUG", "--no-audio",
-       "--usb-report-interval-ms", "0"});
+       "--usb-edge", "--usb-report-interval-ms", "0"});
   EXPECT_TRUE(o.error.empty()) << o.error;
   EXPECT_TRUE(o.worker);
   EXPECT_EQ(o.ep0_fd, 3);
@@ -45,6 +46,7 @@ TEST(Options, ParsesAllInternalFlags) {
   EXPECT_EQ(o.bt_wait_s, 5);
   EXPECT_EQ(o.verbosity, 1);  // -v DEBUG 解析成 loguru 的 1
   EXPECT_TRUE(o.no_audio);
+  EXPECT_TRUE(o.usb_edge);
   // 0 是 real-time 档：IN 线程只在新样本到达时写一份。
   EXPECT_EQ(o.usb_report_interval_ms, 0);
 }
@@ -198,6 +200,7 @@ TEST(Options, WorkerArgvRoundTripsWithOptionalFields) {
   src.verbosity = 1;
   src.bt_wait_s = 42;
   src.no_audio = true;
+  src.usb_edge = true;
   src.usb_report_interval_ms = 4;
   // 0.123456789f 是 std::to_string 往返会失真的值：固定 6 位小数写回后不是
   // 同一个 float，这里用它钉住 format_gain 的最短表示契约。
@@ -228,6 +231,7 @@ TEST(Options, WorkerArgvRoundTripsWithOptionalFields) {
   EXPECT_EQ(got.verbosity, src.verbosity);
   EXPECT_EQ(got.bt_wait_s, src.bt_wait_s);
   EXPECT_EQ(got.no_audio, src.no_audio);
+  EXPECT_EQ(got.usb_edge, src.usb_edge);
   EXPECT_EQ(got.usb_report_interval_ms, src.usb_report_interval_ms);
   EXPECT_FLOAT_EQ(got.haptics_gain, src.haptics_gain);
   EXPECT_EQ(got.speaker_gain, src.speaker_gain);
@@ -248,6 +252,7 @@ TEST(Options, WorkerArgvRoundTripsDefaults) {
   for (const std::string& arg : tail) {
     EXPECT_NE(arg, "--bt-addr") << "空 bt_addr 不应出现在 argv 里";
     EXPECT_NE(arg, "--no-audio") << "默认的 no_audio 不应出现在 argv 里";
+    EXPECT_NE(arg, "--usb-edge") << "普通 DualSense 站不应写出该参数";
     EXPECT_NE(arg, "--usb-report-interval-ms") << "默认间隔不应写出该参数";
     EXPECT_NE(arg, "--haptics-gain") << "默认增益 1.0 不应出现在 argv 里";
     EXPECT_NE(arg, "--speaker-gain") << "默认增益 2 不应出现在 argv 里";
@@ -261,6 +266,7 @@ TEST(Options, WorkerArgvRoundTripsDefaults) {
   EXPECT_TRUE(got.host_sysfs_path.empty());
   EXPECT_EQ(got.bt_wait_s, 60);
   EXPECT_FALSE(got.no_audio);
+  EXPECT_FALSE(got.usb_edge);
   EXPECT_EQ(got.usb_report_interval_ms, 1);
   EXPECT_FLOAT_EQ(got.haptics_gain, 1.0f);
   EXPECT_EQ(got.speaker_gain, 2);

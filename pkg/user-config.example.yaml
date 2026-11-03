@@ -41,6 +41,17 @@ bt_addr: auto
 #   # This is the USB side only — the controller's own report rate over
 #   # Bluetooth is fixed by its firmware and cannot be changed from here.
 #   usb_report_interval_ms: 1
+#   # Which model the virtual USB device presents:
+#   #   auto       follow the real pad's HID identity (default): a DualSense
+#   #              Edge is presented as an Edge, anything else as a plain
+#   #              DualSense
+#   #   dualsense  always present as a plain DualSense (054c:0ce6)
+#   #   edge       always present as a DualSense Edge (054c:0df2)
+#   # The model decides the USB PID, the product string and the HID report
+#   # descriptor; they always change together. Useful when the pad is offline
+#   # at startup (bt_addr with a single MAC) or when the host should see a
+#   # different model on purpose.
+#   usb_model: auto
 #
 # Per-controller overrides. Keys are the controller's BD_ADDR in uppercase
 # XX:XX:XX:XX:XX:XX; only the keys you write are overridden. With

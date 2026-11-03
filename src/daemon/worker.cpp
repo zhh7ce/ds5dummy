@@ -28,6 +28,7 @@
 #include "bridge/bridge.h"
 #include "bt/bt.h"
 #include "core/debug.h"
+#include "core/device/descriptors.h"
 #include "daemon/config.h"
 #include "daemon/shutdown.h"
 #include "loguru.hpp"
@@ -137,7 +138,10 @@ class WorkerSession {
    * @note 副作用：起线程、开 socket、连 PipeWire；全部在本函数内成对回收。
    */
   int Run() {
-    if (!usb::Adopt(endpoints_)) {
+    const core::device::ControllerModel model =
+        options_.usb_edge ? core::device::ControllerModel::kEdge
+                          : core::device::ControllerModel::kDualSense;
+    if (!usb::Adopt(endpoints_, core::device::ProfileFor(model))) {
       DS5DUMMY_LOG(ERROR,
             "[worker] Cannot adopt inherited FunctionFS fds — this process "
             "must be started by the root Manager "

@@ -36,6 +36,7 @@
 #include <thread>
 
 #include "core/debug.h"
+#include "core/device/descriptors.h"
 #include "core/protocol/report.h"
 #include "usb/ffs_device.h"
 #include "usb/usb.h"
@@ -45,6 +46,10 @@ namespace usb::plane {
 /** @brief 数据面共用的全部状态；一个 worker 进程只服务一只手柄，单实例。 */
 struct DataPlane {
   detail::FfsDevice device;  ///< 三个端点 fd 的持有者（worker 侧认领得到）。
+  /// 本站型号档案：ep0 线程据此应答 GET_DESCRIPTOR(Report) 与 HID class
+  /// descriptor。worker 侧由 Adopt 在起线程之前写入，之后只读（相位约定同
+  /// handlers）；默认指向普通 DualSense。
+  const core::device::DeviceProfile* profile = &core::device::kDualSenseProfile;
 
   std::atomic<bool> running{false};  ///< 数据面线程的存活标志。
   std::mutex input_mutex;  ///< 保护 input_report 与 link_up。

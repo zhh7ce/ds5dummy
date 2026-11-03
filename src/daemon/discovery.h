@@ -19,20 +19,27 @@
 #include <string>
 #include <vector>
 
+#include "core/device/identity.h"
+
 namespace ds5::daemon {
 
 /// sysfs 里 hidraw 类的挂载点。测试传入一个临时目录来跑同一套解析。
 inline constexpr const char* kHidrawSysfsBase = "/sys/class/hidraw";
 
 /**
- * @brief 一次发现的结果：一只手柄的身份与它的节点名。
+ * @brief 一次发现的结果：一只手柄的身份、型号与它的节点名。
  * @note hidraw 节点名只用于日志；worker 自己按 MAC 重新找节点，不做 fd 交接。
+ * @note 型号在这里定下而不是让 worker 自己再判一次：虚拟 USB 设备呈现成普通
+ *       DualSense 还是 Edge，取决于真手柄的 HID VID/PID（见
+ *       core::device::ModelForHidIdentity），而那是本模块唯一解析得到的东西。
  */
 struct DiscoveredController {
   /// 规范大写 BD_ADDR（如 "AA:BB:CC:DD:EE:FF"）。
   std::string mac;
   /// hidraw 节点名（如 "hidraw3"），不带目录。
   std::string node;
+  /// 手柄型号，决定虚拟设备的 PID 与 report descriptor。
+  core::device::ControllerModel model;
 };
 
 /**

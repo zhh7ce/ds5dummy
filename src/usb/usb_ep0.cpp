@@ -81,14 +81,26 @@ bool HandleEp0Event() {
         const uint8_t desc_type = static_cast<uint8_t>(request.wValue >> 8);
         const uint8_t* desc = nullptr;
         size_t desc_len = 0;
+        // HID class descriptor 里唯一随型号变化的是 wDescriptorLength；reply 按
+        // 冻结块切片后在栈上覆写这两个字节，与 FfsDevice 写给 f_fs 的那份同源。
+        uint8_t hid_desc[core::device::kFfsHidDescLength];
 
         if (desc_type == core::device::kDescriptorTypeHid) {
-          desc =
-              core::device::kFfsFsDescriptors + core::device::kFfsHidDescOffset;
-          desc_len = core::device::kFfsHidDescLength;
+          memcpy(hid_desc,
+                 core::device::kFfsFsDescriptors +
+                     core::device::kFfsHidDescOffset,
+                 sizeof(hid_desc));
+          const uint16_t w_desc_len = state.profile->report_descriptor_size;
+          constexpr uint32_t kLenField =
+              core::device::kFfsWDescLenOffset -
+              core::device::kFfsHidDescOffset;
+          hid_desc[kLenField] = w_desc_len & 0xFF;
+          hid_desc[kLenField + 1] = (w_desc_len >> 8) & 0xFF;
+          desc = hid_desc;
+          desc_len = sizeof(hid_desc);
         } else if (desc_type == core::device::kDescriptorTypeReport) {
-          desc = core::device::kHidReportDescriptor;
-          desc_len = sizeof(core::device::kHidReportDescriptor);
+          desc = state.profile->report_descriptor;
+          desc_len = state.profile->report_descriptor_size;
         }
 
         if (!desc) {

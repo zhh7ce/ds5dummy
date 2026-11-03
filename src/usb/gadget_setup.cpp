@@ -246,6 +246,7 @@ std::string FindDummyUdc() {
 }
 
 bool GadgetSetup(const std::string& ffs_path, const std::string& instance,
+                 const core::device::DeviceProfile& profile,
                  const std::string& serial) {
   // 这两个字符串直接进 mkdir/mount/symlink，绝不能来自任何外部输入；生产路径上
   // 实例名由 MAC 派生、挂载点来自系统配置（经门面传入），这里按白名单再挡一遍。
@@ -289,10 +290,14 @@ bool GadgetSetup(const std::string& ffs_path, const std::string& instance,
   }
 
   // 设备描述符属性：idVendor/idProduct 被拒是致命的——那会以内核默认身份
-  // 枚举上总线，而不是 DualSense。数值与 core::device 的常量对应。
+  // 枚举上总线，而不是本站的型号。数值取自 profile，与写入 ep0 的 report
+  // descriptor 同源（同一个 DeviceProfile），不会出现身份与布局错配。
+  const core::device::DeviceIdentity& identity = profile.identity;
   if (!write_attr(gadget_dir / "bcdUSB", "0x0200") ||
-      !write_attr(gadget_dir / "idVendor", "0x054c") ||
-      !write_attr(gadget_dir / "idProduct", "0x0ce6") ||
+      !write_attr(gadget_dir / "idVendor",
+                  std::format("0x{:04x}", identity.vendor_id)) ||
+      !write_attr(gadget_dir / "idProduct",
+                  std::format("0x{:04x}", identity.product_id)) ||
       !write_attr(gadget_dir / "bcdDevice", "0x0100") ||
       !write_attr(gadget_dir / "bMaxPacketSize0", "64")) {
     return false;
@@ -304,8 +309,8 @@ bool GadgetSetup(const std::string& ffs_path, const std::string& instance,
   if (!make_configfs_dir(strings_dir)) {
     return false;
   }
-  if (!write_attr(strings_dir / "manufacturer", core::device::kManufacturer) ||
-      !write_attr(strings_dir / "product", core::device::kProduct) ||
+  if (!write_attr(strings_dir / "manufacturer", identity.manufacturer) ||
+      !write_attr(strings_dir / "product", identity.product) ||
       !write_attr(strings_dir / "serialnumber", serial)) {
     return false;
   }

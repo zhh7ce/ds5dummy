@@ -270,7 +270,8 @@ class Ep0Loop : public ::testing::Test {
     ASSERT_EQ(::socketpair(AF_UNIX, SOCK_SEQPACKET, 0, ep0_), 0);
     ASSERT_EQ(::socketpair(AF_UNIX, SOCK_SEQPACKET, 0, in_), 0);
     ASSERT_EQ(::socketpair(AF_UNIX, SOCK_SEQPACKET, 0, out_), 0);
-    ASSERT_TRUE(usb::Adopt({ep0_[0], in_[0], out_[0]}));
+    ASSERT_TRUE(usb::Adopt({ep0_[0], in_[0], out_[0]},
+                           core::device::kDualSenseProfile));
     State().handlers = {};
     State().running = false;
     {
@@ -384,6 +385,43 @@ TEST_F(Ep0Loop, DelegatesClassRequestsAndServesHidDescriptors) {
   EXPECT_EQ(ep0_closed, 1);
   std::lock_guard<std::mutex> lock(State().input_mutex);
   EXPECT_FALSE(State().link_up);
+}
+
+// Edge 站点的 ep0 必须按自己的档案应答：HID class descriptor 的
+// wDescriptorLength 改成 453，report descriptor 换成 Edge 那份。
+TEST_F(Ep0Loop, ServesEdgeDescriptorsForAnEdgeProfile) {
+  State().profile = &core::device::kDualSenseEdgeProfile;
+
+  Push(SetupEvent(MakeRequest(kStandardIn, USB_REQ_GET_DESCRIPTOR, 0x2100, 64)));
+  Push(SetupEvent(
+      MakeRequest(kStandardIn, USB_REQ_GET_DESCRIPTOR, 0x2200, 4096)));
+  FinishEvents();
+  RunLoop();
+
+  std::array<uint8_t, 4096> out{};
+
+  const ssize_t hid_len = Receive(out.data(), out.size());
+  ASSERT_EQ(hid_len, static_cast<ssize_t>(core::device::kFfsHidDescLength));
+  // 只有长度两字节被改写，其余字节与冻结块逐字节相同。
+  const size_t len_field =
+      core::device::kFfsWDescLenOffset - core::device::kFfsHidDescOffset;
+  for (size_t i = 0; i < core::device::kFfsHidDescLength; ++i) {
+    if (i == len_field || i == len_field + 1) continue;
+    EXPECT_EQ(out[i], core::device::kFfsFsDescriptors[
+                          core::device::kFfsHidDescOffset + i])
+        << "byte " << i;
+  }
+  EXPECT_EQ(static_cast<uint32_t>(out[len_field]) |
+                (static_cast<uint32_t>(out[len_field + 1]) << 8),
+            sizeof(core::device::kHidReportDescriptorEdge));
+
+  const ssize_t report_len = Receive(out.data(), out.size());
+  ASSERT_EQ(
+      report_len,
+      static_cast<ssize_t>(sizeof(core::device::kHidReportDescriptorEdge)));
+  EXPECT_EQ(std::memcmp(out.data(), core::device::kHidReportDescriptorEdge,
+                        sizeof(core::device::kHidReportDescriptorEdge)),
+            0);
 }
 
 // ENABLE/DISABLE/UNBIND 是链路状态的唯一来源；BIND/SUSPEND/RESUME 不改变它，
