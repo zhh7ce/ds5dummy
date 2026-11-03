@@ -27,7 +27,7 @@ namespace detail {
  * @note 纯填充：不发送、不读模块状态，跑在调用方线程上。与
  *       BuildAudioReport() 分列两条链路各自的出站布局，两者都不碰帧头。
  * @see bridge::OnBtInput() —— 运行时调用方：校验过 BT 报告后取其状态体。
- * @see bridge::Init() —— 发布第一份空闲报告，占住 usb 的槽位。
+ * @see bridge::Init() —— 发布第一份空闲报告，作为 usb 持有的那份状态。
  */
 void BuildUsbInputReport(uint8_t* out, const uint8_t* state);
 

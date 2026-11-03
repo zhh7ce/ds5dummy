@@ -12,6 +12,7 @@
 
 #include "daemon/options.h"
 
+#include <algorithm>
 #include <cerrno>
 #include <charconv>
 #include <cmath>
@@ -48,6 +49,7 @@ const OptDef kOpts[] = {
     {"--ep-in", Kind::Value},
     {"--ep-out", Kind::Value},
     {"--no-audio", Kind::Switch},
+    {"--usb-report-interval-ms", Kind::Value},
     {"--haptics-gain", Kind::Value},
     {"--speaker-gain", Kind::Value},
     {"--sysfs-path", Kind::Value},
@@ -59,7 +61,7 @@ const OptDef kOpts[] = {
  * @brief 在 kOpts 里查名字对应的定义。
  * @param name 已含 "--"/"-" 前缀的选项字符串，逐字比较，不做缩写或大小写折叠。
  * @return 命中则指向表项（静态存储），否则 nullptr。
- * @note 纯查找，无副作用；线性扫描，表长 12，够用。
+ * @note 纯查找，无副作用；表很短，线性扫描够用。
  */
 const OptDef* find_opt(const std::string& name) {
   for (const OptDef& d : kOpts) {
@@ -179,6 +181,17 @@ Options internal::ParseArgv(const std::vector<std::string>& args) {
       o.worker = true;
     } else if (name == "--no-audio") {
       o.no_audio = true;
+    } else if (name == "--usb-report-interval-ms") {
+      // 与 YAML 那一侧同一张取值表：worker 拿到的是配置校验过的同一个值。
+      int interval = 0;
+      if (!parse_number(value, interval) ||
+          std::ranges::find(kUsbReportIntervals, interval) ==
+              std::ranges::end(kUsbReportIntervals)) {
+        o.error = "Option --usb-report-interval-ms needs " +
+                  UsbReportIntervalChoices() + ", got: " + value;
+        return o;
+      }
+      o.usb_report_interval_ms = interval;
     } else if (name == "--haptics-gain") {
       float gain = 0.0f;
       if (!parse_gain(value, gain)) {
@@ -260,6 +273,10 @@ std::vector<std::string> BuildWorkerArgv(const Options& o,
   }
   av.insert(av.end(), {"-v", std::to_string(o.verbosity)});
   if (o.no_audio) av.push_back("--no-audio");
+  if (o.usb_report_interval_ms != 1) {
+    av.insert(av.end(), {"--usb-report-interval-ms",
+                         std::to_string(o.usb_report_interval_ms)});
+  }
   if (o.haptics_gain != 1.0f) {
     av.insert(av.end(), {"--haptics-gain", format_gain(o.haptics_gain)});
   }

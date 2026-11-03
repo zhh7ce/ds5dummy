@@ -36,11 +36,11 @@ Wireless Controller"（`src/core/device/identity.h`，编译期常量，不是�
 | `src/usb/` | `gadget_setup`（configfs 装配 + mount）、`ffs_device`（端点 fd 机制）、`usb`（门面 + 线程起停）、`usb_plane`（共享运行状态）、`usb_inout`（IN/OUT 两条循环）、`usb_ep0`（ep0 循环 + Ep0Responder 实现） |
 | `src/bt/` | `bt`（门面）、`bt_link`（生命周期/缓存策略/线程起停）、`bt_plane`（共享运行状态）、`bt_rx`/`bt_tx`（两条传输线程）、`bt_detail`（后端接缝）、`bt_l2cap`/`bt_hidraw`（二选一的后端 TU） |
 | `src/bridge/` | `bridge`（转发策略）、`state_report`（63 字节输出状态影子）、`fake_mac`（0x09 合成）、`usb_report`/`audio_report`/`mic_report`（三种报告的字节布局） |
-| `src/audio/` | 双向音频链：`audio`（门面）、`audio_identity`（sink/source 共用的节点名与 `device.*` 硬件身份）、`audio_sink`（PipeWire 4 通道 sink + 断线重连）、`audio_encoder`（SRC + Opus + 编码线程）、`audio_decoder`（Opus 解码线程）、`audio_source`（单声道虚拟麦克风 Source） |
+| `src/audio/` | 双向音频链：`audio`（门面）、`audio_identity`（sink/source 共用的节点名与 `device.*` 硬件身份）、`audio_port`（sink/source 共用的建流骨架与断线退避重建）、`audio_sink`（PipeWire 4 通道 sink）、`audio_encoder`（SRC + Opus + 编码线程）、`audio_decoder`（Opus 解码线程）、`audio_source`（单声道虚拟麦克风 Source） |
 | `tests/` | googletest 单测（`ctest`，无 root、无硬件） |
-| `tools/` | 诊断程序：`spike_l2cap`、`spike_rumble`、`mini_gadget`、`audio_dump`(+`dump_sink.*`)、几个 `spike_*` 特权/交接探针 |
+| `tools/` | 诊断程序：`spike_l2cap`、`spike_rumble`、`mini_gadget`、`audio_dump`(+`dump_sink.*`)、几个 `spike_*` 特权/交接探针；`win_audio_probe.cpp` 是唯一的 Windows 侧探针（mingw 交叉编译，在 Wine/Proton 前缀里读 MMDevice 与 setupapi，不参与 Linux 构建） |
 | `pkg/ds5dummy_hidraw`、`pkg/ds5dummy_l2cap` | 两个互斥的 Arch 包：systemd 单元、`/etc/ds5dummy/config.yaml`、`/usr/share/doc/ds5dummy/user-config.example.yaml`、modprobe/modules-load 配置、install 钩子 |
-| `hid-playstation-ds5dummy/` | 内核 `hid-playstation` 的 DKMS 补丁（hidraw 后端用），合成 VID/PID `1998:1221` |
+| `hid-playstation-ds5dummy/` | 内核 `hid-playstation` 的 DKMS 补丁（hidraw 后端用），只接管蓝牙 DualSense/Edge，合成 VID/PID（`1998:1221`/`1998:1103`）；DualShock 4 与所有 USB 设备走原驱动路径 |
 | `scripts/` | `setup.sh`/`teardown.sh`（整站准备/清理；teardown 扫 `ds5dummy*` 整族并卸载每个 `ffs-ds5*` 挂载）、`setup-dummy-hcd.sh`/`teardown-dummy-hcd.sh`（只喂 `tools/mini_gadget` 的最小版） |
 | `third_party/` | loguru（vendored，不改注释不格式化） |
 
@@ -72,7 +72,7 @@ systemd 每 2 秒重拉；0 = 当前用户不启用本服务（用户配置里 `
 
 监督循环 `ManagerSupervisor::Run()` 以系统配置的 `discovery_interval_s`（秒，缺省
 3）为节拍，每轮先补建站（`discovery` 扫描 `/sys/class/hidraw`，认出蓝牙总线上的
-`054c:0ce6` 与合成的 `1998:1221`，MAC 取自 `HID_UNIQ`），再 `waitpid(-1, WNOHANG)`
+`054c:0ce6`/`054c:0df2` 与合成的 `1998:1221`/`1998:1103`，MAC 取自 `HID_UNIQ`），再 `waitpid(-1, WNOHANG)`
 回收退出的 worker。节拍同时决定两件事的最坏延迟：新手柄被认出来、以及 worker 死后
 被重新拉起（后者还要再加一段退避）。
 每站的生命周期：provision → fork+execv worker → 回收 → `usb::Teardown(挂载点,
@@ -117,8 +117,7 @@ worker（`src/daemon/worker.cpp`）认领 fd（`usb::Adopt`）、建蓝牙链路
 线程、跑 100 ms 主循环直到退出。它不读配置文件：`bt_addr`、`bt_wait_s`、`no_audio`、
 `haptics_gain`、`speaker_gain`、`verbosity` 由 Manager 从两份配置读出后写进交接 argv，
 `host_sysfs_path`（`--sysfs-path`）由 Manager 建站时从 sysfs 解析出本站的 USB 接口目录后
-写入，worker 只转交给音频的 sink 与 source——它已降权，也不认识 configfs 坐标，自己查不到；`usb_report_rate` 不进 argv，
-它只影响 Manager 建站时写进描述符的 `bInterval`。它连 PipeWire 用的是桌面用户的身份，所以需要
+写入，worker 只转交给音频的 sink 与 source——它已降权，也不认识 configfs 坐标，自己查不到；`usb_report_interval_ms` 的数值整个进 argv（`--usb-report-interval-ms`），因为 IN 线程的发送节拍要靠它在 worker 侧自己排，描述符里那个 `bInterval` 不构成节奏。它连 PipeWire 用的是桌面用户的身份，所以需要
 `XDG_RUNTIME_DIR`；`RestoreXdgRuntimeDir()` 在环境变量丢了的时候按当前 uid（或
 `SUDO_UID`）回落到 `/run/user/<uid>`。
 
@@ -150,8 +149,8 @@ worker（`src/daemon/worker.cpp`）认领 fd（`usb::Adopt`）、建蓝牙链路
 
 ## 5. 线程清单
 
-worker 进程里本仓库起的 11 条线程，加上 libpipewire 自己为两条 RT 流各起的
-data-loop 线程一共 13 条（loguru 的日志线程不计）：
+worker 进程里本仓库起的 12 条线程，加上 libpipewire 自己为两条 RT 流各起的
+data-loop 线程一共 14 条（loguru 的日志线程不计）：
 
 | 线程 | 归属 | 干什么 | 阻塞性约束 |
 |---|---|---|---|
@@ -159,21 +158,24 @@ data-loop 线程一共 13 条（loguru 的日志线程不计）：
 | bt 读线程 | `bt/bt_rx.cpp` | poll 链路 fd + `stop_fd`，100 ms tick；把裸输入报告交给 `on_input` | 静默 1 s 打 WARNING，5 s 判死；回调里不许阻塞 |
 | bt 写线程 | `bt/bt_tx.cpp` | 队列空时 poll `wake_fd`/`stop_fd` 睡等；有活时 poll `stop_fd` + 链路 POLLOUT（无超时），排空 ≤8 份的发送队列 | 手上一份没发出去就原地重试同一份字节，不退回队列 |
 | ep0 线程 | `src/usb/usb_ep0.cpp` | 阻塞读 ep0 setup 包，标准请求自己答，class 请求交给 `on_class_request` | `GET_REPORT(FEATURE)` 缓存未命中时会在**这条线程上**同步等手柄回复（L2CAP 预算 2 s） |
-| IN 线程 | `src/usb/usb_inout.cpp` | 覆盖式槽位有最新输入报告就写 ep_in | 靠 SIGUSR1 打断阻塞 |
+| IN 线程 | `src/usb/usb_inout.cpp` | 持有最新一份输入报告：重发档链路 up 后按 `usb_report_interval_ms` 自排墙上时钟，到点就把这份重复写进 ep_in（主机不照 bInterval 轮询，§7）；real-time 档每份新发布只写一次 | 靠 SIGUSR1 打断阻塞 |
 | OUT 线程 | 同上 | 阻塞读 ep_out，交给 `on_output_report` | 同上 |
 | 编码线程 | `audio/audio_encoder.cpp` | 攒够一段就 SRC + Opus 编码，经 sink 直接调进 `bridge::OnAudioOutput` | — |
 | 解码线程 | `audio/audio_decoder.cpp` | 从有界包队列取一帧，`opus_decode_float` 出 480 帧 PCM，交给 `source::PushSamples` | bt 读线程经 `bridge::OnBtInput` 只入队，不在读线程上解码 |
-| sink 主循环线程 | `audio/audio_sink.cpp` | 驱动播放 sink 的 PipeWire 事件与断线重建 | — |
-| source 主循环线程 | `audio/audio_source.cpp` | 驱动虚拟麦克风的 PipeWire 事件；`STREAMING ↔ PAUSED` 翻成 `bridge::OnMicOpen` | 回调里只做一次链路入队，不许阻塞 |
-| 恢复 monitor 线程 | `audio/audio_sink.cpp` | 等断线 → 指数退避重建 pipeline | `on_lost` 在这条线程上；**不得在里面调 `audio::Stop()`**（Stop 要 join 的就是它） |
+| sink 主循环线程 | `audio/audio_port.cpp` | 驱动播放 sink 的 PipeWire 事件（回调在 `audio_sink.cpp`） | — |
+| source 主循环线程 | `audio/audio_port.cpp` | 驱动虚拟麦克风的 PipeWire 事件；`STREAMING ↔ PAUSED` 翻成 `bridge::OnMicOpen`（回调在 `audio_source.cpp`） | 回调里只做一次链路入队，不许阻塞 |
+| sink 恢复 monitor 线程 | `audio/audio_port.cpp` | 等 sink 断线 → 指数退避重建 pipeline | `on_lost` 在这条线程上；**不得在里面调 `audio::Stop()`**（Stop 要 join 的就是它） |
+| source 恢复 monitor 线程 | `audio/audio_port.cpp` | 等 source 断线 → 指数退避重建 pipeline；重建前清空 PCM 环 | 同上的 `on_lost` 约束 |
 | PipeWire RT data-loop 线程 | libpipewire | 执行两个 `process` 回调：sink 侧 → `encoder::ProcessFrame`，source 侧 → 从 PCM 环填缓冲 | 不许日志、不许分配 |
 
 Manager 进程只有主线程（+loguru）。
 
 锁的分布：`bt::tx::queue_mutex`（发送队列）、`usb::plane` 的 `input_mutex`+`input_cv`
-（输入槽）、`bridge/state_report.cpp` 的 `state_mutex`、`audio_encoder` 的
-`input_mutex`+`queue_cv`、`audio_decoder` 的 `mutex`+`queue_cv`、`audio_sink` 与
-`audio_source` 各自的 mutex+cv。`bt::plane` 一个锁都没有：运行标志与计数是 atomic，
+（持有的输入报告与链路标志）、`bridge/state_report.cpp` 的 `state_mutex`、
+`audio_encoder` 的 `input_mutex`+`queue_cv`、`audio_decoder` 的 `mutex`+`queue_cv`、`audio::port` 每条流
+一套 `Monitor` mutex+cv（sink 与 source 各一份，护断线位与闸门）、`audio_source` 的
+`ring_mutex`。`Pipeline::running` 是 atomic，状态回调、`PushSamples` 与 `SetOpen` 在锁外读它。
+`bt::plane` 一个锁都没有：运行标志与计数是 atomic，
 两个 eventfd 的建立/关闭都落在没有线程在跑的时刻（`Start()` 早于起线程、`Finish()`
 晚于 join）。feature 缓存同样无锁，靠的是"只在传输线程之前/之后动"的线程相位约定；
 `bridge` 的 `mic_open` 是 atomic（PipeWire 主循环线程写，bt 读线程与音频编码线程读）。
@@ -219,7 +221,7 @@ Manager 进程只有主线程（+loguru）。
 | 链路 | 裸 `AF_BLUETOOTH` L2CAP，自己走 HIDP 组帧：让 BlueZ 拉起 ACL → 释放 HID profile → 抢 PSM 0x11（控制）/0x13（中断）→ 切 report protocol | 内核 hidp/hidraw 建好的 session，打开 `/sys/class/hidraw` 节点 |
 | 开链唤醒 | 末尾补发 142 字节 0x32（冻结数组，`WaitWritable` 5×10 ms 重试） | 无（内核驱动建节点时已初始化过手柄） |
 | feature 取值 | 控制通道 `GET_REPORT`，整段预算 2 s | `HIDIOCGFEATURE` ioctl |
-| 手柄识别 | MAC（BD_ADDR） | VID/PID 匹配真 `054C:0CE6` 或 DKMS 合成的 `1998:1221`，MAC 可选 |
+| 手柄识别 | MAC（BD_ADDR） | VID/PID 匹配真 `054C:0CE6`/`054C:0DF2` 或 DKMS 合成的 `1998:1221`/`1998:1103`，MAC 可选 |
 | MTU/尺寸 | `kWantMtu = 672`、音频帧 `kHidpAudioFrameBytes = 399` | 由内核决定 |
 | 额外依赖 | `pkg_check_modules(BLUEZ)`、`gdbus`（`--timeout 5`）调用 | 无 |
 
@@ -256,9 +258,23 @@ OUT 读缓冲按端点的 `wMaxPacketSize`（`core::device::kUsbEpMaxPacketSize`
 不会踩中——那不是短包，会被拆成 48 + 16 两份请求。`descriptors.h` 里两条
 `static_assert` 把这个常量钉在描述符的 wMaxPacketSize 字节上。
 
-输入侧是**覆盖式槽位**（`PostInputReport`）：只保留最新一份，发布快于消费就覆盖而非
-排队，所以主机读到的永远是"当前状态"而不是历史序列。槽位内容不在 usb 里播种（它不认识
-报告格式），第一份由 `bridge::Init()` 发布，`usb::StartThreads()` 不会冲掉它。
+输入侧是**单份覆盖 + 两种发送节奏**（`PostInputReport`）：usb 只持有一份最新输入
+报告，手柄每来一份状态就覆盖一次，不排队、不补发。`usb_report_interval_ms` 为
+1/2/4 时 IN 线程在链路 up 后按这个毫秒数把这份状态写进 ep_in，两次蓝牙样本之间
+主机收到的是逐字节相同的重复（seq 与 `sensor_timestamp` 都不变）。**节奏由
+IN 线程按墙上时钟自己排**（`wait_until` 到下一格发送时刻）：dummy_hcd 不兑现中断
+端点的 `urb->interval`——它的 `scan_urb` 对 `PIPE_INTERRUPT` 就写着 "this almost
+certainly polls too fast"——主机取完一份立刻重新排队请求，阻塞写几乎不等待，靠它
+定节奏会把一份状态以几千帧每秒灌出去（实测 7288 帧/s 对 102 个蓝牙样本/s）。
+**回报率完全由这一档决定**：真手柄的 USB 回报率由自己的固件定，主机只能接受；虚拟
+节点的回报率是我们写进 ep_in 的频次，所以主机侧看到的一切传感器行为都挂在这一个数
+值上。踩错的后果不是"日志难看"，而是消费者直接被灌坏——实测几千帧每秒时游戏卡死/
+崩溃，表现出的症状是陀螺仪读数异常。落后超过一格时以现在重排，不连发补欠下的帧；
+发布不提前叫醒重发档。为 0（real-time）时只在 `PublishInput` 之后写一份，bInterval
+仍取 1 ms，新样本到达的延迟最小。两档的主机滞后上限都是一个蓝牙上报周期，而不是
+一串历史帧。持有的状态不在 usb 里播种（它不认识报告格式），第一份由
+`bridge::Init()` 发布；`usb::StartThreads()` 不动它，ep0 的 `GET_REPORT(INPUT)`
+与 IN 线程读同一份。
 
 转发策略（class 请求怎么答、OUT 报告送去哪）全部由调用方以 `Handlers` 回调注入：
 class 请求的应答经回调参数里的 `Ep0Responder` 完成（f_fs 的应答怪癖——无数据 OUT
@@ -299,10 +315,13 @@ configfs 的 `UDC` 属性反查本站：`/sys/class/udc/dummy_udc.N` canonical �
 换算只认 `dummy_udc` 前缀（真实控制器的名字换不出配对目录，返回空而不是猜）。
 
 描述符块 `core::device::kFfsFsDescriptors` 是冻结的，唯一在装配期被改写的字节是两个
-中断端点的 `bInterval`：`Provision()` 收到 Manager 按 `usb_report_rate` 算出的
-毫秒数（1000/500/250 Hz → 1/2/4），`FfsDevice::WriteFfsDescriptors()` 拷一份再按
-`kFfsEpInIntervalOffset`/`kFfsEpOutIntervalOffset` 覆写。它只限制**主机取报告的
-上限**；蓝牙侧的上报节奏由手柄固件固定，USB 侧调多快都不会让手柄多报。
+中断端点的 `bInterval`：`Provision()` 收到的就是 `usb_report_interval_ms` 这个数本身
+（full-speed 下 bInterval 的单位恰是 1 ms，不做任何换算；real-time 档取 1），
+`FfsDevice::WriteFfsDescriptors()` 拷一份再按
+`kFfsEpInIntervalOffset`/`kFfsEpOutIntervalOffset` 覆写。它是**给主机看的声明**：
+dummy_hcd 不按它轮询（见上面那段），所以它既不限制也不产生实际节拍——真实节奏
+在 worker 的 IN 线程里。蓝牙侧的上报节奏由手柄固件固定，USB 侧调多快都不会让
+手柄多报。
 
 ---
 
@@ -356,8 +375,10 @@ configfs 的 `UDC` 属性反查本站：`/sys/class/udc/dummy_udc.N` canonical �
     12 位 MAC 十六进制（真机那个位置是 USB function 号 `-00`），两站并发靠它不撞名。
     这条判据只在游戏进程带 `PROTON_DUALSENSE_SPLIT_AUDIO=1` 时才走全套 split 路径，那是
     启动器侧的环境变量，本程序不设置它。
-    昵称/描述仍用 `USB054c:0ce6.<mac 12 位>`（`MakeDeviceId`），让两只 dongle 在
-    `wpctl`/`pavucontrol` 里可读地可分辨。
+    昵称/描述以 `DualSense Wireless Controller` 开头、以本站的 12 位 MAC 十六进制结尾，
+    让两只 dongle 在 `wpctl`/`pavucontrol` 里可读地可分辨。描述整串必须留在 62 字节以内
+    （主机侧 Wine 的 `MAX_DEVICE_NAME_LEN`，超了它就丢掉描述改用 `device.product.name`），
+    sink 与 source 各有一条 `static_assert` 把这条外部约束钉在编译期。
   - **`device.*` 键**（`ApplyHardwareIdentity`）：`device.bus=usb`、`device.vendor.id=0x054c`、
     `device.product.id=0x0ce6`、`device.product.name`（数值取自 `core/device/identity.h`，与
     gadget 描述符同源）、`device.class=sound`、`device.form-factor=controller`、
@@ -397,11 +418,13 @@ configfs 的 `UDC` 属性反查本站：`/sys/class/udc/dummy_udc.N` canonical �
   不是投递到别的线程：`bridge::OnAudioOutput` 的取快照、拼 398 B、进 `bt::PostOutput` 全部
   发生在 PipeWire 侧驱动的这条链上，代价是 sink 实现必须非阻塞、不自起线程、不长时间持锁。
   背压点只有一个，就是 bt 的有界队列。
-- 断线重建：指数退避 500 ms × 2^attempt，上限 5 s，连续 5 次失败经 `on_lost` 通知调用方；
-  worker 收到后 `audio::Stop()`，再由自己每 30 s（`kAudioRetrySeconds`）重新 `audio::Start()`
-  一次直到成功或这一轮退出——期间 HID 一直在线，音频缺席不会拖 worker 重启。启动时音频
-  就没起来也走同一条重试路径。重连成功会 `ResetInputBuffer()` 丢掉
-  跨会话残留样本。
+- 断线重建：两条流共用 `audio::port` 的恢复状态机——建流（main loop → context → core →
+  stream）、断线判定与拆建顺序只有一处实现，`audio::Start` 把同一份 `on_lost` 交给两边。
+  退避为指数 500 ms × 2^attempt、上限 5 s，一条流连续 5 次重建失败就经 `on_lost` 通知
+  调用方；worker 收到后 `audio::Stop()`，再由自己每 30 s（`kAudioRetrySeconds`）重新
+  `audio::Start()` 一次直到成功或这一轮退出——期间 HID 一直在线，音频缺席不会拖 worker
+  重启。启动时音频就没起来也走同一条重试路径。重建前 sink 调
+  `encoder::ResetInputBuffer()`、source 清空自己的 PCM 环：跨会话残留样本不会进新流。
 - 上行（`audio_source` / `audio_decoder`）：`Start()` 给了 `MicOpenHandler` 才建。Source 是
   单声道 f32 @48 kHz 的 `Audio/Source`（`PW_DIRECTION_OUTPUT`），节点名与 `device.*` 那
   一组硬件身份都出自 `audio::identity`、与同名 sink 同一族（名字换 `alsa_input...` 前缀与
@@ -411,7 +434,8 @@ configfs 的 `UDC` 属性反查本站：`/sys/class/udc/dummy_udc.N` canonical �
   挂起，所以 source 上也写 `node.pause-on-idle=true`）；解码器是单声道
   Opus，71 字节包解出 480 帧（10 ms），经 `source::PushSamples` 写进 2048 帧
   （≈43 ms）的 PCM 环，RT 回调欠载补静音。包队列深度 8（≈80 ms），满了丢最旧。
-- `OnMicPacket` 由 `bridge` 在 bt 读线程上调用：只做一次 71 字节拷贝入队。Source 不重连，
+- `OnMicPacket` 由 `bridge` 在 bt 读线程上调用：只做一次 71 字节拷贝入队。Source 与 sink
+  走同一套 `audio::port` 恢复策略（断线自愈，彻底失败经同一个 `on_lost` 交回 worker），
   解码不重采样——时钟漂移由 PCM 环的"满覆盖、空补静音"兜底。
 - `pw_init/pw_deinit` 是进程级的，只由 `audio.cpp` 成对调用：sink 与 source 共享同一套
   PipeWire 全局状态，子模块各自 init/deinit 会在拆一条流时把另一条拆死。
@@ -455,6 +479,9 @@ cmake --build build
 ctest --test-dir build
 ```
 
+发布前跑 `./scripts/verify.sh`：双后端 `-Werror` 构建 + ctest，再用 HIDRAW 跑一遍
+ASan+UBSan；构建树在 `build/verify-{hidraw,l2cap,asan}`，无需 root、手柄或 PipeWire 设备。
+
 | 变量 | 默认 | 说明 |
 |---|---|---|
 | `BT_BACKEND` | `HIDRAW` | `HIDRAW` 或 `L2CAP`，链接期二选一；L2CAP 额外 `pkg_check_modules(BLUEZ REQUIRED bluez)` |
@@ -491,7 +518,7 @@ configure 失败是设计选择**——静默退化成 HID-only 会让除了在�
 ## 12. 测试
 
 `tests/CMakeLists.txt` 把被测源文件直接编进一个 `ds5dummy_tests` 二进制，
-`gtest_discover_tests` 让 ctest 看到逐个用例（当前 225 个，两个后端各跑一遍）。
+`gtest_discover_tests` 让 ctest 看到逐个用例（当前 246 个，两个后端各跑一遍）。
 **硬性约束：全部测试必须能在无 root、无手柄的环境下跑** —— 需要特权或硬件的验证是人工
 清单，不进 CI/单测。因此 bt 的测试只覆盖门面到后端的纯转发契约、`tx` 的入队/seq/CRC/
 背压、feature 缓存策略，硬件往返一律不测；`daemon/discovery` 与 `usb` 的测试自己搭临时
@@ -516,6 +543,15 @@ sysfs 树（假 `uevent` 文件、假 `dummy_udc.N/udc/dummy_udc.N` 与同索引
 `-DCMAKE_BUILD_TYPE=Release -DBT_BACKEND=<对应后端> -DDS5DUMMY_STRICT=ON
 -DDS5DUMMY_DEBUG=OFF -DDS5DUMMY_DEBUG_LOG=OFF -DCMAKE_INSTALL_PREFIX=/usr`。
 
+版本号不手写：三个 PKGBUILD 都用 `pkgver()`，在其中用 `git -C "$_srcdir" describe
+--tags --long` 现查，生成 `<tag>.r<距 tag 的提交数>.g<短哈希>`（无 tag 时 tag 段为 `0`、
+提交数取 `rev-list --count HEAD`）。makepkg 会把结果写回 PKGBUILD 并把 `pkgrel` 重置
+为 1，所以文件里留 `pkgver=0` 占位；重新 `git checkout -- <PKGBUILD>` 即可恢复。
+生成值不带 `.dirty`：`git describe --dirty` 会把 makepkg 自己的写回当成改动，下一次
+构建版本号就会永远多出 `.dirty`。
+DKMS 包的 `package()` 用这个版本号覆写 `dkms.conf` 的 `PACKAGE_VERSION`，
+安装钩子从 pacman 传入的 `$1`（新版本）与 `$2`（被替换的旧版本）取版本，不硬编码。
+
 systemd 单元以 root 跑（Manager 必须 root），`ExecStart=/usr/bin/ds5dummyd` 不带任何
 参数与环境变量：降权目标由 Manager 从活跃图形会话推导，用户级生效值来自两份 YAML。
 `Restart=on-failure`、`RestartSec=2`，stdout 与 stderr 都进 journal——启动横幅（目标
@@ -531,7 +567,7 @@ worker 退出）；恢复后见标记就 `systemctl start`。留在 `/run` 的�
 跑 full-speed，因为本项目提供的是 FS 描述符；`num_dummy` 是同时能服务的手柄数上限，
 多手柄要调大）。差别在 HID 侧：
 - `pkg/ds5dummy_hidraw` 的 modules-load 里装的是 `hid_playstation_ds5dummy`（DKMS 补丁，
-  把真蓝牙手柄留在 hidraw-only 并合成 `1998:1221`），`hidp` **必须**可用、不能 blacklist；
+  把真蓝牙 DualSense/Edge 留在 hidraw-only 并合成 `1998:1221`/`1998:1103`，其余机型与 USB 设备不受影响），`hidp` **必须**可用、不能 blacklist；
 - `pkg/ds5dummy_l2cap` 装的是 in-tree `hid_playstation`，让 BlueZ 先建 HID session 再交接
   PSM。
 
@@ -569,21 +605,26 @@ worker 退出）；恢复后见标记就 `systemctl start`。留在 `/run` 的�
 5. `src/daemon/worker.cpp` 的 5 秒统计行里，USB tx 一栏打印的是累计值、括号里却是窗口
    速率（`usb_tx` 对 `usb_tx_delta`），与同一行 BT rx 的"窗口值 + 窗口速率"口径不一致，
    读日志时容易把累计值当成 5 秒计数。
-6. 手柄实机上的 0x36 播放会在一到十几秒内断链（读侧报链路已死），编码半段单独验证是好的；
-   断链根因尚未定位。
+6. 0x36 播放的实机表现随主机不同：台式机上正常；笔记本上音质明显变差，链路不断。
+   另有"一到十几秒断链"（读侧报链路已死）的观测，怀疑与蓝牙射频/信号有关，未做对照
+   实验定位；编码半段单独验证是好的，不能排除编码侧。
 7. `identity.mode: list` 只认 active 会话：名单内用户的图形会话不活跃（切走 VT）而另一个
    名单外用户 active 时，`SelectWorkerIdentity` 会因为没有匹配的候选返回 `kDisabled`，
    服务停在 inactive。这是"只认 active 会话"的设计结果，不是名单写错。
-8. `audio_source` 不重连：只有 Source 这条流坏掉而下行 sink 仍健康时，上行麦克风会一直
-   静默——worker 的 30 s 重试要等 `on_lost` 把整条音频链拆掉才触发。PipeWire 整体重启会
-   连 sink 一起打掉，那种情况能在重试里恢复。
-9. 麦克风开关报告与音频共用 bt 的 8 槽发送队列，队列满时按"丢最新"丢掉；手柄状态要等
+8. 麦克风开关报告与音频共用 bt 的 8 槽发送队列，队列满时按"丢最新"丢掉；手柄状态要等
    下一次开/关录音才纠正。这条只记 ERROR，没有重发。
-10. 上行链路没有实机验证过：开关包与 71 字节帧长照上游实现，但"主机打开录音 → 手柄
-    开始上行"的端到端时序尚未在手柄上跑过。
-11. 多手柄路径只有单测级证据：`daemon/discovery` 的解析有测试，但"发现 → 多站并发 →
+9. 上行链路没有实机验证过：开关包与 71 字节帧长照上游实现，但"主机打开录音 → 手柄
+   开始上行"的端到端时序尚未在手柄上跑过；source 的断线自愈也只验证到编译与状态机
+   层面，没有在 PipeWire 重启下实跑过。
+10. 多手柄路径只有单测级证据：`daemon/discovery` 的解析有测试，但"发现 → 多站并发 →
     各自重试 → 整族拆除"没有在多只手柄（或多适配器）上跑过；`num_dummy` 不够时看到的是
     单站 Provision 失败加 2 s 退避，而不是启动期报错。
-12. 发现依据是 hidraw 节点。L2CAP 后端拿到 PSM 后内核 HIDP 会话不复存在，节点随之消失；
+11. 发现依据是 hidraw 节点。L2CAP 后端拿到 PSM 后内核 HIDP 会话不复存在，节点随之消失；
     此时 worker 若死掉，Manager 已从 `slots_` 里删掉该 MAC，要等 BlueZ 重新建出节点才会
     再服务它。hidraw 后端没有这一步。这条只按代码路径推断，未在实机上验证。
+12. 重发档的发送时刻表只在 IN 线程这一侧排，`usb::StartThreads()` 收下这个间隔之后
+    不再有第二次校准：主机侧的枚举速率、`dummy_hcd` 的排队请求都跟它无关，所以
+    这一档报出的帧数是"我们发的"，不是"主机取的"。真实 USB DualSense 有线实测
+    ~253 帧/s，与这里任何一档都不严格对应；要对齐真机取
+    `usb_report_interval_ms: 4`，而"到点时端点正忙导致某一格没发出去"的情形没有
+    实测过。

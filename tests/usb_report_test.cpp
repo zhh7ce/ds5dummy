@@ -19,7 +19,7 @@ namespace {
 TEST(UsbReportLayout, PlacesIdByteThenStateBodyByteForByte) {
   std::array<uint8_t, core::protocol::kUsbInputStateSize> state{};
   // 从 0x20 起的递增序列：每字节互不相同且都不为 0，位移错一格或漏写一节
-  // 都会撞见不相等的邻居，全零槽混进来也一眼可见。
+  // 都会撞见不相等的邻居，全零字节混进来也一眼可见。
   for (size_t i = 0; i < state.size(); ++i) {
     state[i] = static_cast<uint8_t>(0x20 + i);
   }
@@ -34,8 +34,8 @@ TEST(UsbReportLayout, PlacesIdByteThenStateBodyByteForByte) {
   }
 }
 
-// 空闲报告（bridge::Init 占槽用）的形态：除 ID 外全零且铺满整帧——主机在
-// 第一批 BT 输入到达之前也能读到结构合法的一帧。
+// 空闲报告（bridge::Init 发布、在蓝牙报告到达前由 usb 持有）的形态：除 ID
+// 外全零且铺满整帧——主机在第一批 BT 输入到达之前也能读到结构合法的一帧。
 TEST(UsbReportLayout, IdleReportIsIdPlusZeroState) {
   std::array<uint8_t, core::protocol::kUsbInputStateSize> zeros{};
   std::array<uint8_t, core::protocol::kUsbInputReportSize> report{};

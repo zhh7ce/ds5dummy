@@ -13,6 +13,7 @@
 
 #include <array>
 #include <cerrno>
+#include <chrono>
 #include <cstring>
 #include <mutex>
 
@@ -26,27 +27,57 @@ namespace {
 /**
  * @brief IN 写线程主循环：全进程唯一允许阻塞式 FunctionFS 数据写的地方。
  *
- * 等待条件把"链路 up"和"有新值"合取：interface 未启用时发布只覆盖槽位、
- * 不写端点，避免把报告写进没有消费者的管道。醒来后先在锁内整槽拷贝并
- * 清 pending，再解锁去做最长可达毫秒级的阻塞写——写期间新发布照常进槽，
- * 下一轮被消费，锁不跨越阻塞调用。
+ * interface 未启用时发布只覆盖持有的状态、不碰端点，避免把报告写进没有消费者
+ * 的管道，所以两种节奏都以"链路 up"为前提。
+ *
+ * 重发档（resend_interval 非零）按墙上时钟自己排发送时刻，醒来后把持有的那
+ * 一份再阻塞写一次，两次蓝牙样本之间主机收到的是逐字节相同的重复。不能靠
+ * "写要等主机取走一份"来定节奏：dummy_hcd 不兑现描述符里中断端点的 bInterval
+ * （它的 scan_urb 对 PIPE_INTERRUPT 自己就写着 polls too fast），主机取完一份
+ * 立刻重新排队请求，阻塞写几乎不等待，不排时刻表就会把一份状态以几千帧每秒
+ * 灌出去。发布也不提前叫醒这一档——真 USB 设备不会因为内部状态变了就多送一帧。
+ *
+ * real-time 档（resend_interval 为 0）只在 pending_ready 置位时写一份，写期间
+ * 新样本照常覆盖持有状态，下一轮再取最新一份。
+ *
+ * 两档都在锁内拷走报告、解锁后阻塞写，锁不跨越阻塞调用。
  */
 void InWriterLoop() {
   plane::DataPlane& state = plane::Get();
   std::array<uint8_t, core::protocol::kUsbInputReportSize> report{};
 
   std::unique_lock<std::mutex> lock(state.input_mutex);
+  // 重发档下一份报告的发送时刻：只在锁内读写，初值是线程起来的这一刻。
+  auto next_send = std::chrono::steady_clock::now();
   while (state.running) {
+    // real-time 档没有自己的时钟，必须有上次写完之后的新发布；重发档只看链路。
     // 谓词含 !running：StopThreads 的 notify_all 也必须能叫醒睡死的循环。
-    state.input_cv.wait(lock, [&state] {
-      return !state.running || (state.link_up && state.pending_ready);
+    const bool realtime = state.resend_interval.count() == 0;
+    state.input_cv.wait(lock, [&state, realtime] {
+      return !state.running ||
+             (state.link_up && (realtime ? state.pending_ready : true));
     });
     if (!state.running) break;
-    report = state.latest_input;
+
+    if (!realtime) {
+      // 睡到发送时刻；被 stop 或链路掉下去才提前醒。
+      state.input_cv.wait_until(lock, next_send, [&state] {
+        return !state.running || !state.link_up;
+      });
+      if (!state.running) break;
+      if (!state.link_up) continue;  // 链路断了：回去等它重新起来。
+      const auto due = next_send + state.resend_interval;
+      const auto now = std::chrono::steady_clock::now();
+      // 落后超过一格（阻塞写、唤醒抖动）就从现在重排，不连发补欠下的帧。
+      next_send = due < now ? now + state.resend_interval : due;
+    }
+
+    report = state.LatestInput();
     state.pending_ready = false;
     lock.unlock();
 
-    // 短写/中断只丢这一帧，不退出：下一份发布永远是最新状态。
+    // 写失败（EINTR/ESHUTDOWN/短写）不退出：链路若仍在，下一轮按最新持有的
+    // 状态重试；链路已断则由上面的等待谓词让循环睡下。
     if (state.device.WriteInputReport(report.data(), report.size())) {
 #if DS5DUMMY_DEBUG
       ++state.input_writes;

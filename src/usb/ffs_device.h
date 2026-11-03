@@ -42,7 +42,9 @@ class FfsDevice {
    *               内核要求的格式；主机实际读到的 iSerialNumber 来自 configfs
    *               （见 GadgetSetup）。传本站坐标里的同一个值，别让两处不一致。
    * @param interval_ms 两个中断端点的 bInterval（毫秒）；全速总线一帧 1 ms，
-   *               所以它也等于主机轮询上限的倒数。调用方保证是 4/2/1 之一。
+   *               所以配置的毫秒数原样就是这个字节。调用方保证它是非零的
+   *               1/2/4（real-time 档由调用方换成 1 再传进来）。它只是声明——
+   *               dummy_hcd 不照它轮询，见 usb::StartThreads。
    * @return 成功 true；任一步失败时已 Close() 回收本次打开的 fd。
    * @note 仅 root 半边调用；写描述符必须先于内核接受 gadget bind。
    */

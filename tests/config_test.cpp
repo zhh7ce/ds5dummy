@@ -298,7 +298,7 @@ TEST(UserConfigParse, EmptyDocumentDefaultsToAuto) {
   EXPECT_TRUE(cfg.defaults.audio);
   EXPECT_FLOAT_EQ(cfg.defaults.haptics_gain, 1.0f);
   EXPECT_EQ(cfg.defaults.speaker_gain, 2);  // 固件初值，不是"中立"的 0
-  EXPECT_EQ(cfg.defaults.usb_report_rate, 1000);
+  EXPECT_EQ(cfg.defaults.usb_report_interval_ms, 1);
   EXPECT_TRUE(cfg.controllers.empty());
   EXPECT_FALSE(cfg.log_level.has_value());
 }
@@ -328,8 +328,8 @@ TEST(UserConfigParse, ShippedTemplateMatchesBuiltinDefaults) {
   EXPECT_FLOAT_EQ(parsed.defaults.haptics_gain,
                   builtin.defaults.haptics_gain);
   EXPECT_EQ(parsed.defaults.speaker_gain, builtin.defaults.speaker_gain);
-  EXPECT_EQ(parsed.defaults.usb_report_rate,
-            builtin.defaults.usb_report_rate);
+  EXPECT_EQ(parsed.defaults.usb_report_interval_ms,
+            builtin.defaults.usb_report_interval_ms);
 }
 
 TEST(UserConfigParse, DisabledWithoutAddressIsFine) {
@@ -409,7 +409,7 @@ TEST(UserConfigParse, GlobalLayersUnderControllerEntries) {
       "global:\n"
       "  audio: false\n"
       "  haptics_gain: 1.5\n"
-      "  usb_report_rate: 500\n"
+      "  usb_report_interval_ms: 2\n"
       "controllers:\n"
       "  \"AA:BB:CC:DD:EE:01\":\n"
       "    haptics_gain: 0.5\n"
@@ -422,7 +422,7 @@ TEST(UserConfigParse, GlobalLayersUnderControllerEntries) {
   // global 层本身是"内置默认 + global 覆盖"。
   EXPECT_FALSE(cfg.defaults.audio);
   EXPECT_FLOAT_EQ(cfg.defaults.haptics_gain, 1.5f);
-  EXPECT_EQ(cfg.defaults.usb_report_rate, 500);
+  EXPECT_EQ(cfg.defaults.usb_report_interval_ms, 2);
   EXPECT_EQ(cfg.defaults.speaker_gain, 2);  // 没写，保持内置默认
 
   // 条目 1 只覆盖两个键，其余继承 global。
@@ -431,7 +431,7 @@ TEST(UserConfigParse, GlobalLayersUnderControllerEntries) {
   EXPECT_FALSE(first.audio);
   EXPECT_FLOAT_EQ(first.haptics_gain, 0.5f);
   EXPECT_EQ(first.speaker_gain, 5);
-  EXPECT_EQ(first.usb_report_rate, 500);
+  EXPECT_EQ(first.usb_report_interval_ms, 2);
 
   // 空条目（或只写键不写值）等于完全继承 global。
   const ds5::daemon::ControllerConfig& second =
@@ -439,7 +439,7 @@ TEST(UserConfigParse, GlobalLayersUnderControllerEntries) {
   EXPECT_FALSE(second.audio);
   EXPECT_FLOAT_EQ(second.haptics_gain, 1.5f);
   EXPECT_EQ(second.speaker_gain, 2);
-  EXPECT_EQ(second.usb_report_rate, 500);
+  EXPECT_EQ(second.usb_report_interval_ms, 2);
 }
 
 TEST(UserConfigParse, NullGlobalAndNullControllerEntryMeanNoOverrides) {
@@ -512,13 +512,13 @@ TEST(UserConfigParse, AdvancedSettingsRoundTrip) {
       "global:\n"
       "  haptics_gain: 1.5\n"
       "  speaker_gain: 5\n"
-      "  usb_report_rate: 500\n";
+      "  usb_report_interval_ms: 2\n";
   UserConfig cfg;
   std::string why;
   ASSERT_TRUE(ds5::daemon::ParseUserConfig(text, cfg, why)) << why;
   EXPECT_FLOAT_EQ(cfg.defaults.haptics_gain, 1.5f);
   EXPECT_EQ(cfg.defaults.speaker_gain, 5);
-  EXPECT_EQ(cfg.defaults.usb_report_rate, 500);
+  EXPECT_EQ(cfg.defaults.usb_report_interval_ms, 2);
 }
 
 // 边界的两种写法都必须收：整数 2 与 0 是用户最可能手写的形态，不能因为
@@ -554,20 +554,28 @@ TEST(UserConfigParse, RejectsGainsOutsideTheirRange) {
   }
 }
 
-// 报告率不是连续量：任何非 1000 整除数都会让 bInterval 取整后落到别的档位，
-// 所以只认这三个值，而不是"任意正整数"。
-TEST(UserConfigParse, RejectsUnsupportedReportRate) {
+// 间隔不是连续量：1/2/4 ms 是能原样落进 bInterval 的三档，0 是独立的
+// real-time 档，表外的值（3 ms、8 ms）既落不到档位也没有定义，一律报错。
+TEST(UserConfigParse, RejectsUnsupportedReportInterval) {
   for (const char* text :
-       {"global:\n  usb_report_rate: 125\n",
-        "global:\n  usb_report_rate: 0\n",
-        "global:\n  usb_report_rate: 1001\n",
-        "global:\n  usb_report_rate: 500.5\n",
-        "controllers:\n  \"AA:BB:CC:DD:EE:FF\":\n    usb_report_rate: 700\n"}) {
+       {"global:\n  usb_report_interval_ms: 3\n",
+        "global:\n  usb_report_interval_ms: 8\n",
+        "global:\n  usb_report_interval_ms: 2.5\n",
+        "controllers:\n  \"AA:BB:CC:DD:EE:FF\":\n    usb_report_interval_ms: 5\n"}) {
     UserConfig cfg;
     std::string why;
     EXPECT_FALSE(ds5::daemon::ParseUserConfig(text, cfg, why)) << text;
-    EXPECT_NE(why.find("usb_report_rate"), std::string::npos) << why;
+    EXPECT_NE(why.find("usb_report_interval_ms"), std::string::npos) << why;
   }
+}
+
+// 0 是 real-time 档，不是"零毫秒"：IN 线程只在收到新蓝牙样本时发一份。
+TEST(UserConfigParse, ZeroReportIntervalSelectsRealTime) {
+  const std::string text = "global:\n  usb_report_interval_ms: 0\n";
+  UserConfig cfg;
+  std::string why;
+  ASSERT_TRUE(ds5::daemon::ParseUserConfig(text, cfg, why)) << why;
+  EXPECT_EQ(cfg.defaults.usb_report_interval_ms, 0);
 }
 
 TEST(UserConfigParse, RejectsInvalidMac) {

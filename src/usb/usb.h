@@ -23,6 +23,7 @@
 
 #include <linux/usb/ch9.h>
 
+#include <chrono>
 #include <cstddef>
 #include <cstdint>
 #include <functional>
@@ -110,9 +111,13 @@ GadgetId ResolveGadgetId(const std::string& mac, const std::string& ffs_base);
  *            保存副本）与主机侧枚举出来的设备 sysfs 路径。失败时内容不保证。
  * @param gadget 本站坐标（实例名、挂载点、序列号），必须是同一次
  *               ResolveGadgetId 的产物；三者缺一即与本站不对应，会拆到别站。
- * @param interval_ms 两个中断端点的 bInterval（毫秒）：1 = 1000 Hz、
- *                    2 = 500 Hz、4 = 250 Hz。它只约束主机轮询频次；手柄经
- *                    蓝牙上报的节奏由固件决定，本参数改不了。
+ * @param interval_ms 两个中断端点的 bInterval（毫秒），直接取配置的
+ *                    usb_report_interval_ms（1/2/4）。它只是描述符里的声明：
+ *                    dummy_hcd 不照它轮询（见 StartThreads），实际发送节拍
+ *                    由 worker 的 IN 线程保证。手柄经蓝牙上报的节奏由固件
+ *                    决定，本参数改不了。real-time 档传 1：主机仍按 1 ms
+ *                    轮询，新样本到达的延迟最小，只是没有新样本时 worker
+ *                    不排数据。
  * @return 成功 true；false 时已完成回滚（含 detach 本组的 FunctionFS 挂载）。
  * @note 仅 root 权限可调用（写 configfs、mount）。UDC 由 GadgetBind 从空闲的
  *       dummy_udc.N 里挑一个，所以并发 gadget 数受 dummy_hcd 的 num_dummy 限制。
@@ -168,15 +173,18 @@ void Close();
 // ---- 数据面原语 ----
 
 /**
- * @brief 线程安全地发布一份输入报告：覆盖式槽位，只保留最新一份。
+ * @brief 线程安全地覆盖持有的输入报告：新一份替换旧一份，不排队。
  *
- * IN 写线程在链路 up 且槽位有新值时消费；发布快于消费时旧值被覆盖而非
- * 排队，输入报告因此永远反映"最新状态"而不是历史序列。
+ * usb 侧只保留一份最新状态。IN 写线程在链路 up 后把它阻塞写进 ep_in；重发
+ * 档下写完成就立刻重发同一份，一次写要等主机取走一份，所以节奏就是主机轮询
+ * 节奏（bInterval），两次蓝牙样本之间主机收到的是逐字节相同的重复。real-time
+ * 档下每份只写一次。两档都以最新覆盖为准：迟到的旧报告不会被补发，主机的
+ * 滞后上限因此是一个蓝牙上报周期。
  *
  * @param report 整份报告的字节，至少 len 字节可读，首字节即 report ID——报告的
  *               组装归 bridge，本层只搬运字节；nullptr 视为无内容。
- * @param len    @p report 的字节数，超出槽位容量的部分被截断。len 为 0 或
- *               report 为 null 时整次发布作废，槽位保持上一份。
+ * @param len    @p report 的字节数，超出单份容量的部分被截断，不足时尾部清零。
+ *               len 为 0 或 report 为 null 时整次发布作废，持有的状态保持原样。
  */
 void PostInputReport(const uint8_t* report, size_t len);
 
@@ -275,17 +283,27 @@ struct Handlers {
 /**
  * @brief 拉起 IN/ep0/OUT 三条数据面线程。
  *
- * 复位待发布标志、链路状态与诊断计数（报告槽位的内容不由本函数播种，第一份
- * 由 bridge::Init() 发布），再安装 SIGUSR1 空处理函数（StopThreads 靠它打断
- * 三个阻塞点），最后启动线程。
+ * 落下链路状态与发送节奏、复位诊断计数（持有的输入报告不由本函数播种也不
+ * 清空，第一份由 bridge::Init() 发布并一直保留到下一次覆盖），再安装 SIGUSR1
+ * 空处理函数（StopThreads 靠它打断三个阻塞点），最后启动线程。
  *
  * @param handlers 策略回调，按值拷贝保存进模块单例。
+ * @param report_interval IN 线程的发送节拍：两份重发之间的间隔（1/2/4 ms，
+ *        即主机一侧的 1000/500/250 Hz）；0 = real-time 档，只在有新的发布时
+ *        写一份。
+ * @details 重发档的节拍由本模块按墙上时钟自己排：dummy_hcd 不兑现描述符里
+ *        中断端点的 bInterval（它的 scan_urb 对 PIPE_INTERRUPT 就写着"polls
+ *        too fast"），主机取完一份立刻重新排队，所以阻塞写本身不构成节奏，
+ *        不排就会把手柄的一份状态以几千帧每秒灌给主机。
  * @return 全部启动 true；已有数据面在跑或任一线程起不来 false——失败时
  *         已就地调用 StopThreads 收尾。
  * @note 每进程单实例；重复调用被拒绝而不是叠加线程。
+ * @note 合法取值由配置层收口（daemon/config.h 的 kUsbReportIntervals），
+ *       本模块只按"0 或正整数毫秒"解释它。
  * @see StopThreads —— 对称收尾。
  */
-bool StartThreads(const Handlers& handlers);
+bool StartThreads(const Handlers& handlers,
+                  std::chrono::milliseconds report_interval);
 
 /**
  * @brief 停掉三条数据面线程并 join。

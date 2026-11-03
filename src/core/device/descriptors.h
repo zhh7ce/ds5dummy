@@ -49,9 +49,10 @@ static constexpr uint32_t kFfsHidDescOffset = 9;
 /// HID class descriptor 的字节长度，也是主机索取它时的应答上限。
 static constexpr uint32_t kFfsHidDescLength = 9;
 
-// 两个中断端点的 bInterval 是唯一在装配期被改写的字节：usb_report_rate
-// 配置 250/500/1000 Hz 时分别写成 4/2/1（全速总线一帧 = 1 ms）。描述符
-// 数组本身保持 constexpr 不动，FfsDevice 在写 ep0 前拷贝一份再打补丁。
+// 两个中断端点的 bInterval 是唯一在装配期被改写的字节：它就是配置里的
+// usb_report_interval_ms（全速总线一帧 = 1 ms，毫秒数直接落进这个字节，
+// real-time 档写最快的 1）。描述符数组本身保持 constexpr 不动，FfsDevice
+// 在写 ep0 前拷贝一份再打补丁。
 /// EP1 IN 的 bInterval 在 kFfsFsDescriptors 内的字节偏移。
 static constexpr uint32_t kFfsEpInIntervalOffset = 24;
 /// EP2 OUT 的 bInterval 在 kFfsFsDescriptors 内的字节偏移。
@@ -272,8 +273,8 @@ static_assert(sizeof(kHidReportDescriptor) == 337,
  *
  * @note 端点地址 0x81/0x02（EP1 IN / EP2 OUT）与 usb 模块的读写 fd 对应，
  *       wMaxPacketSize=64 是全速中断端点的上限。两处 bInterval 的默认值 1
- *       表示 1 ms（1000 Hz），是最高档；装配期按 usb_report_rate 覆写成
- *       4/2/1，数组本身不改。
+ *       表示 1 ms（1000 Hz），是最高档；装配期原样写进配置的毫秒数
+ *       （1/2/4，real-time 档取 1），数组本身不改。
  */
 static constexpr uint8_t kFfsFsDescriptors[] = {
     // --- Interface 0: HID (9 bytes) ---

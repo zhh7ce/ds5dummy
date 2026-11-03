@@ -131,10 +131,19 @@ void ReportChildExit(int status) {
  */
 void PrintControllerSettings(const std::string& label,
                              const ControllerConfig& settings) {
-  printf("  %s: audio %s, haptics %.2f, speaker %d, USB %d Hz, bt_wait %d s\n",
+  // 0 不是间隔而是"只在新样本到达时发"：横幅写 real-time，避免出现一个会被
+  // 读成 0 ms 的数字。
+  char interval_text[16];
+  if (settings.usb_report_interval_ms == 0) {
+    std::snprintf(interval_text, sizeof interval_text, "real-time");
+  } else {
+    std::snprintf(interval_text, sizeof interval_text, "%d ms",
+                  settings.usb_report_interval_ms);
+  }
+  printf("  %s: audio %s, haptics %.2f, speaker %d, USB %s, bt_wait %d s\n",
          label.c_str(), settings.audio ? "on" : "off",
          static_cast<double>(settings.haptics_gain), settings.speaker_gain,
-         settings.usb_report_rate, settings.bt_wait_s);
+         interval_text, settings.bt_wait_s);
 }
 
 /**
@@ -298,10 +307,15 @@ class ManagerSupervisor {
     }
 
     const ControllerConfig settings = EffectiveSettings(mac);
-    // 配置层已把速率收口到 250/500/1000，整除后只可能是 4/2/1。这个字节是
-    // 站点自己的（两只手柄可以各用不同的轮询率）。
-    const auto interval_ms =
-        static_cast<uint8_t>(1000 / settings.usb_report_rate);
+    // 配置层已把间隔收口到 0/1/2/4 毫秒。0 是 real-time：描述符仍用最快的
+    // 1 ms，但 worker 只在收到新蓝牙样本时才写；其余档位的数值本身就是
+    // bInterval 的字节值（全速一帧 1 ms），不需要换算。这个字节是站点自己的
+    // （两只手柄可以各用不同的节拍）。
+    // bInterval 只是给主机看的声明——dummy_hcd 不兑现它，IN 线程按同一个
+    // 数值自己排发送节拍（见 usb::StartThreads）。
+    const auto interval_ms = static_cast<uint8_t>(
+        settings.usb_report_interval_ms == 0 ? 1
+                                             : settings.usb_report_interval_ms);
 
     usb::Station station;
     if (!usb::Provision(station, gadget, interval_ms)) {
@@ -349,6 +363,10 @@ class ManagerSupervisor {
     worker_options.no_audio = !settings.audio;
     worker_options.haptics_gain = settings.haptics_gain;
     worker_options.speaker_gain = settings.speaker_gain;
+    // 间隔整个交下去：IN 线程要按它自己排发送时刻，描述符里那个 bInterval
+    // 主机并不照它轮询（dummy_hcd 不兑现）；0 是 real-time 档——只在新样本
+    // 到达时写一份。
+    worker_options.usb_report_interval_ms = settings.usb_report_interval_ms;
     // 主机侧 USB 接口目录跟着这一站走：worker 把它写进 PipeWire sink/source 的
     // 节点属性，让按硬件身份找音频端点的消费者（Wine/Proton 的手柄触觉补丁）
     // 认得出这台虚拟手柄。空串表示这一站没解析出来，BuildWorkerArgv 不为它生成

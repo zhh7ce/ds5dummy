@@ -1,11 +1,11 @@
 // DS5Dummy — usb 数据面与站点坐标的单测
 //
-// 覆盖两类不碰 fd 的纯逻辑：PostInputReport / LatestInputReport /
-// InputWrites（纯进程内状态——UsbDataPlane 里 input_mutex 保护的
-// latest_input 槽、pending_ready 标志与 input_writes 原子计数，不需要真实
-// FunctionFS），以及站点坐标派生（ResolveGadgetId）和主机侧 sysfs 反查
-// （detail::FindHostDeviceDir 与 FindHostInterfaceDir，用临时目录搭出的假
-// sysfs 树）。ep0_* /
+// 覆盖三类不碰 fd 的纯逻辑：PostInputReport / LatestInputReport /
+// InputWrites（纯进程内状态——usb::plane 里 input_mutex 保护的那一份输入
+// 报告与 input_writes 原子计数，不需要真实 FunctionFS）、覆盖发布与读取
+// 语义，以及站点坐标派生（ResolveGadgetId）和主机侧
+// sysfs 反查（detail::FindHostDeviceDir 与 FindHostInterfaceDir，用临时目录
+// 搭出的假 sysfs 树）。ep0_* /
 // StartThreads / Provision / Adopt 全部依赖端点 fd，归硬件验证清单，不在
 // 这里调用。
 //
@@ -31,10 +31,10 @@
 
 namespace {
 
-// 缓存槽容量：与数据面的覆盖式槽位同为 USB 输入报告的线尺寸。
+// 单份输入报告的线尺寸：与数据面持有的那份报告相同。
 constexpr size_t kSlot = core::protocol::kUsbInputReportSize;
 
-// 发布→读取的往返：整份报告按字节原样进槽、原样出来，搬运不做任何加工。
+// 发布→读取的往返：整份报告按字节原样存下、原样读出，搬运不做任何加工。
 TEST(UsbInputCache, PostThenLatestRoundTrips) {
   std::array<uint8_t, kSlot> report{};
   for (size_t i = 0; i < report.size(); ++i) {
@@ -49,9 +49,9 @@ TEST(UsbInputCache, PostThenLatestRoundTrips) {
   EXPECT_EQ(report, out);
 }
 
-// 超长发布只截断不报错：槽位是定长缓冲区，截断是它的既定行为。
+// 超长发布只截断不报错：持有的报告是定长缓冲区，截断是它的既定行为。
 TEST(UsbInputCache, PostTruncatesToSlotSize) {
-  // 超过一槽的发布只留前 kSlot 字节，多出来的部分被丢弃。
+  // 超过一份的发布只留前 kSlot 字节，多出来的部分被丢弃。
   std::array<uint8_t, kSlot + 16> oversized{};
   oversized.fill(0xAB);
   for (size_t i = 0; i < kSlot; ++i) {
@@ -62,17 +62,53 @@ TEST(UsbInputCache, PostTruncatesToSlotSize) {
 
   std::array<uint8_t, kSlot> out{};
   usb::LatestInputReport(out.data(), out.size());
-  // 槽里就是来报告的前 kSlot 字节，0xAB 的尾巴没有渗进来。
+  // 持有的报告里就是来报告的前 kSlot 字节，0xAB 的尾巴没有渗进来。
   for (size_t i = 0; i < kSlot; ++i) {
     EXPECT_EQ(out[i], static_cast<uint8_t>(0x10 + i)) << "at " << i;
   }
 }
 
-// 作废式发布（null 指针、零长度）不能碰槽位：主机读到的还是上一份完整报告，
-// 而不是半帧或被清零的空帧。两种无效入参各测一次。
+// 后一份覆盖前一份：usb 只持有最新状态，旧报告不会被补发。
+TEST(UsbInputCache, NewPublishReplacesHeldReport) {
+  std::array<uint8_t, kSlot> first{};
+  first.fill(0x11);
+  std::array<uint8_t, kSlot> second{};
+  second.fill(0x22);
+
+  usb::PostInputReport(first.data(), first.size());
+  usb::PostInputReport(second.data(), second.size());
+
+  std::array<uint8_t, kSlot> out{};
+  usb::LatestInputReport(out.data(), out.size());
+  EXPECT_EQ(out, second);
+}
+
+// 短于一份的发布把尾部清零：IN 线程会反复重发这一份，残留的旧尾巴会被主机
+// 当成这一帧的合法字节。
+TEST(UsbInputCache, ShortPublishClearsTheTail) {
+  std::array<uint8_t, kSlot> full{};
+  full.fill(0x7E);
+  usb::PostInputReport(full.data(), full.size());
+
+  std::array<uint8_t, 8> short_report{};
+  short_report.fill(0x3C);
+  usb::PostInputReport(short_report.data(), short_report.size());
+
+  std::array<uint8_t, kSlot> out{};
+  usb::LatestInputReport(out.data(), out.size());
+  for (size_t i = 0; i < short_report.size(); ++i) {
+    EXPECT_EQ(out[i], 0x3C) << "at " << i;
+  }
+  for (size_t i = short_report.size(); i < kSlot; ++i) {
+    EXPECT_EQ(out[i], 0x00) << "at " << i;
+  }
+}
+
+// 作废式发布（null 指针、零长度）不能碰持有的状态：主机读到的还是上一份完整
+// 报告，而不是半帧或被清零的空帧。两种无效入参各测一次。
 TEST(UsbInputCache, EmptyPublishKeepsPreviousReport) {
   std::array<uint8_t, kSlot> report{};
-  report.fill(0x5C);  // 非零哨兵：槽位若被清零或截断，这里立刻看得出来
+  report.fill(0x5C);  // 非零哨兵：状态若被清零或截断，这里立刻看得出来
   usb::PostInputReport(report.data(), report.size());
 
   // 两次无效入参各一次：有长度无内容（null 指针）、有内容零长度。

@@ -31,10 +31,16 @@ bt_addr: auto
 #   # The firmware default is 2; raising it amplifies on the pad, after our
 #   # encode.
 #   speaker_gain: 2
-#   # Host polling cap for the two USB interrupt endpoints: 250, 500 or 1000 Hz.
+#   # Interval between two USB input reports, in milliseconds: 1, 2 or 4
+#   # (1000/500/250 Hz). The worker paces those reports itself — on dummy_hcd
+#   # the host does not poll according to the descriptor's bInterval, so
+#   # without this interval the held report would be streamed out several
+#   # thousand times per second. Between Bluetooth samples the held report is
+#   # resent verbatim. 0 = real-time: send one report per new Bluetooth
+#   # sample only.
 #   # This is the USB side only — the controller's own report rate over
 #   # Bluetooth is fixed by its firmware and cannot be changed from here.
-#   usb_report_rate: 1000
+#   usb_report_interval_ms: 1
 #
 # Per-controller overrides. Keys are the controller's BD_ADDR in uppercase
 # XX:XX:XX:XX:XX:XX; only the keys you write are overridden. With

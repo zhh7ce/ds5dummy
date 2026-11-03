@@ -58,6 +58,12 @@ makepkg -d
 sudo pacman -U hid-playstation-ds5dummy-dkms-*.pkg.tar.zst
 ```
 
+三个 PKGBUILD 都不手写版本号：`pkgver()` 里用 `git describe` 按当前 checkout 生成
+`<tag>.r<距 tag 的提交数>.g<短哈希>`（没有 tag 时 tag 段为 `0`、提交数取总数）。因此每次
+提交后重新 `makepkg` 都会得到更大的版本号，直接 `pacman -U` 就是升级。注意 makepkg 会把
+算出的版本写回 PKGBUILD 并把 `pkgrel` 重置为 1，这是 `pkgver()` 本身的行为；想回到占位值
+用 `git checkout -- <PKGBUILD>`。
+
 装完包，系统里就有了 `/usr/bin/ds5dummyd`、systemd 服务、内核模块配置与系统配置文件
 `/etc/ds5dummy/config.yaml`（root 属主）；用户配置示例装在
 `/usr/share/doc/ds5dummy/user-config.example.yaml`。重启或执行
@@ -125,7 +131,7 @@ bt_addr: auto          # auto | list | "AA:BB:CC:DD:EE:FF"
 #   audio: true
 #   haptics_gain: 1.0
 #   speaker_gain: 2
-#   usb_report_rate: 1000
+#   usb_report_interval_ms: 1   # 0 = real-time：只在蓝牙新样本到达时发一份
 
 # controllers:         # 按 MAC 覆盖单只手柄；键必须是合法 BD_ADDR
 #   "AA:BB:CC:DD:EE:FF":
@@ -149,11 +155,12 @@ bt_addr: auto          # auto | list | "AA:BB:CC:DD:EE:FF"
 | `audio` | `true` | `false` = 不建音频通道，只桥接按键 |
 | `haptics_gain` | `1.0` | 触觉振幅倍率，`0.0`..`2.0`；`0` 静音，`1.0` 原样，`2.0` 两倍。只影响震动，不碰声音 |
 | `speaker_gain` | `2` | 手柄侧扬声器前置增益，`0`..`7`。加大是让**手柄自己**放大，编码与音量数据不变 |
-| `usb_report_rate` | `1000` | 主机从虚拟手柄取报告的频率上限（`250`/`500`/`1000` Hz）。这是 USB 侧节拍；手柄经蓝牙上报的节奏由固件固定，不受此影响 |
+| `usb_report_interval_ms` | `1` | 虚拟手柄两份输入报告之间的间隔：`1`/`2`/`4` ms（1000/500/250 Hz）由程序按这个间隔自己排发送时刻，两次蓝牙样本之间会把持有的那一份原样重发；`0` = real-time，只在收到新的蓝牙样本时发一份。这是 USB 侧行为；手柄经蓝牙上报的节奏由固件固定，不受此影响 |
 
 Manager 每 `discovery_interval_s` 秒（默认 3 秒）扫描一次 `/sys/class/hidraw/`：只认蓝牙总线
-（`HID_ID` 的 bus 为 `0005`）且 VID/PID 是 `054c:0ce6`（hidraw 后端的 DKMS 驱动会把它合成
-为 `1998:1221`）的设备，MAC 取自 `HID_UNIQ`。发现当前没在服务的新地址，就为它建一站
+（`HID_ID` 的 bus 为 `0005`）且 VID/PID 属于受支持组合的设备——真机 `054c:0ce6`
+（DualSense）或 `054c:0df2`（DualSense Edge），以及 hidraw 后端的 DKMS 驱动合成的
+`1998:1221` / `1998:1103`；MAC 取自 `HID_UNIQ`。发现当前没在服务的新地址，就为它建一站
 独立的虚拟 USB 并起一个 worker；手柄断开由 worker 自己的链路看门狗发现，Manager 拆掉
 那一站，等它重新出现再建。因此多手柄不需要先查地址，也不需要重启服务。要写
 `controllers` 覆盖时需要地址：`bluetoothctl devices` 能列出每只手柄的 MAC。
@@ -238,9 +245,9 @@ sudo ./build/ds5dummyd
 ## 游戏音频与震动
 
 程序会在 PipeWire 里创建一个播放设备，名字类似
-`DualSense Wireless Controller USB054c:0ce6...`（在 `pavucontrol` 或 Steam 的输出设备
-列表里能看到）。**把这个设备的音量保持非静音**，把游戏或系统的输出指到它，手柄的
-耳机口就会出声，触觉信息一并送给手柄。
+`DualSense Wireless Controller (PS5) 0c275682705e`（后半段是这只手柄的 MAC，在
+`pavucontrol` 或 Steam 的输出设备列表里能看到）。**把这个设备的音量保持非静音**，
+把游戏或系统的输出指到它，手柄的耳机口就会出声，触觉信息一并送给手柄。
 
 不需要手柄出声就在用户配置里写 `audio: false`（这个播放设备也不会出现）。音频起不来
 时程序只打一条警告，按键桥接照常工作。
@@ -248,7 +255,7 @@ sudo ./build/ds5dummyd
 ### 麦克风
 
 同一个设备在 PipeWire 里还会有一个录音设备，名字类似
-`DualSense Wireless Controller (PS5) Microphone USB054c:0ce6...`。把它（或系统默认
+`DualSense Wireless Controller (PS5) Microphone 0c275682705e`。把它（或系统默认
 输入）选为麦克风，程序就会让手柄打开麦克风；录音停止时自动关掉。`audio: false` 时
 这个录音设备也不会出现。
 
@@ -324,8 +331,30 @@ worker 以活跃图形会话那个用户的身份运行，`XDG_RUNTIME_DIR` 由�
 
 ## 许可与致谢
 
-GPLv3
+DS5Dummy 以 **GPL-3.0-or-later** 发布，完整许可文本见 [LICENSE](LICENSE)。
 
-本项目的bridge是 [DS5Dongle](https://github.com/awalol/DS5Dongle) 的移植，并同样感谢 [SAxense](https://github.com/egormanga/SAxense) 项目对高级振动的研究。
+本项目的 bridge 是 [DS5Dongle](https://github.com/awalol/DS5Dongle) 的移植；
+DS5Dongle 以 MIT 许可发布（Copyright (c) 2026 awalol），其版权与许可声明见
+[NOTICE](NOTICE)。
+
+并同样感谢 [SAxense](https://github.com/egormanga/SAxense) 项目对高级振动的研究。
+
+### 内核模块（`hid-playstation-ds5dummy/`）
+
+这个目录是 Linux 内核 `drivers/hid/hid-playstation.c` 的修改副本，并附带同一内核的
+`drivers/hid/hid-ids.h`；改动是让**蓝牙** DualSense / DualSense Edge 留在 hidraw-only
+模式，并把合成身份改成 `1998:1221`（DualSense）与 `1998:1103`（DualSense Edge）。
+DualShock 4 与所有 USB 连接的设备不走这条分支，仍由原驱动路径处理。它是**独立作品**，
+不属于上面 GPL-3.0-or-later 的范围，按 **GPL-2.0-or-later** 发布：
+
+- 版权：`hid-playstation.c` 为 Copyright (c) 2020-2022 Sony Interactive
+  Entertainment；`hid-ids.h` 的版权归文件内逐条列出的作者所有。
+- 两个文件头都是 `SPDX-License-Identifier: GPL-2.0-or-later`，模块声明
+  `MODULE_LICENSE("GPL")`。
+- 由它打出的 `hid-playstation-ds5dummy-dkms` 包同样声明 `GPL-2.0-or-later`。
+
+它只与内核链接，与主项目的用户态程序没有代码往来，两者在仓库里只是聚合分发。内核整体
+按 GPL-2.0-only 发布，所以这个模块保持 GPL-2.0 兼容（`-or-later` 允许按 v2 使用），
+不随主项目升到 v3。
 
 感谢 Qoder CN 在这段时间的免费试用，本项目使用 Qwen3.8-Flash 和 DeepSeek-Flash 完成。

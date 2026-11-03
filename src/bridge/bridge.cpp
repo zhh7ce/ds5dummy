@@ -60,9 +60,9 @@ void Init(const std::string& bt_addr, uint8_t speaker_pre_gain) {
   detail::SetFakeMac(bt_addr);
   detail::InitOutputState(speaker_pre_gain);
 
-  // usb 的发布槽先占一份空闲 0x01 报告：第一批 BT 输入到达之前，主机打
-  // GET_REPORT(INPUT) 也拿得到结构合法的报告。Init 在时序上早于
-  // usb::StartThreads()，所以这份内容不会被线程启动冲掉。
+  // usb 侧先持有这份空闲 0x01 报告：第一批 BT 输入到达之前，IN 线程写出的
+  // （重发档会反复重发同一份）和主机打 GET_REPORT(INPUT) 拿到的都是它。
+  // Init 在时序上早于 usb::StartThreads()，后者不清空持有的报告。
   std::array<uint8_t, core::protocol::kUsbInputStateSize> idle_state{};
   uint8_t report[core::protocol::kUsbInputReportSize];
   detail::BuildUsbInputReport(report, idle_state.data());
@@ -175,7 +175,7 @@ void OnClassRequest(const usb_ctrlrequest& request, usb::Ep0Responder& ep0) {
                 report_id, request.wLength);
         }
       } else if (report_type == core::device::kHidReportTypeInput) {
-        // 不上链路：交槽位里最近一份已发布的输入报告——Init 的空闲报告，或
+        // 不上链路：交最近一份已发布的输入报告——Init 的空闲报告，或
         // OnBtInput 换出来的最新版。
         len = core::protocol::kUsbInputReportSize;
         usb::LatestInputReport(out, len);

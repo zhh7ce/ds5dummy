@@ -86,6 +86,15 @@ inline constexpr float kHapticsGainMin = 0.0f;
 inline constexpr float kHapticsGainMax = 2.0f;
 /// 扬声器前置增益的上限（3 位字段）；下限是 0。
 inline constexpr int kSpeakerGainMax = 7;
+/**
+ * @brief usb_report_interval_ms 的合法取值（毫秒）：0 排在最前，它是模式而不是间隔。
+ * @details 配置解析与交接 argv 解析共用这一张表，两处不能各写一份。这个值
+ *          一路直用、全程不做除法：1/2/4 ms 就是全速中断端点 bInterval 的
+ *          字节值，也是 IN 线程两份重发之间的间隔。0 是 real-time 档——只在
+ *          收到新的蓝牙样本时写一份，描述符仍取最快的 1 ms。
+ * @see daemon/config.cpp 的 ReadUsbReportInterval。
+ */
+inline constexpr int kUsbReportIntervals[] = {0, 1, 2, 4};
 
 /**
  * @brief bt_addr 的三种取值形态，决定 Manager 服务哪些手柄。
@@ -114,9 +123,12 @@ struct ControllerConfig {
   /// 控制器侧扬声器前置增益（SetStateData byte[37] 低 3 位），[0, 7]。
   /// 固件初值是 2；字节随每份 0x36 送到手柄，由手柄自己放大喇叭。
   int speaker_gain = 2;
-  /// USB 中断端点的轮询上限（Hz）：250/500/1000 分别映射到 bInterval
-  /// 4/2/1 ms。蓝牙侧的上报节奏由手柄固件固定，这里调的是主机取报告的节拍。
-  int usb_report_rate = 1000;
+  /// 虚拟手柄两份 USB 输入报告之间的间隔（毫秒），见 kUsbReportIntervals：
+  /// 1/2/4 即 1000/500/250 Hz，同一数值既是描述符里的 bInterval 字节，也是
+  /// IN 线程自排的发送节拍。0 = real-time——描述符仍用最快的 1 ms，但 IN
+  /// 线程只在收到新的蓝牙样本时写一份，不重发。蓝牙侧的上报节奏由手柄固件
+  /// 固定，这里调的是主机取报告的节拍与重复份数。
+  int usb_report_interval_ms = 1;
 };
 
 /**
@@ -150,6 +162,16 @@ struct UserConfig {
  *          避免把任意字符串交给 BlueZ。配置解析与 sysfs 发现共用这一条判据。
  */
 bool IsValidBtAddr(const std::string& addr);
+
+/**
+ * @brief 把 kUsbReportIntervals 写成面向用户的取值清单。
+ * @return 形如 "0 (real-time), 1, 2 or 4" 的单行文本。
+ * @details 配置解析与交接 argv 解析的"间隔取值非法"两处错误文本共用它，清单
+ *          由表生成而不是手写，新增档位不会再多出一处要同步的文案。
+ * @see ReadUsbReportInterval（config.cpp）、daemon/options.cpp 的
+ *      --usb-report-interval-ms。
+ */
+std::string UsbReportIntervalChoices();
 
 /**
  * @brief 把 MAC 文本规范成大写形式，作为 controllers 的键与手柄身份的比对口径。
@@ -200,10 +222,11 @@ bool ParseSystemConfig(const std::string& text, SystemConfig& out,
  * @details 严格模式：只接受 enabled/bt_addr/log_level/global/controllers 五个
  *          根键，ffs_path、uid、gid 等 root 级键在这里一律按未知键拒绝。
  *          global 与每个 controllers.<MAC> 条目都只接受 bt_wait_s/audio/
- *          haptics_gain/speaker_gain/usb_report_rate 五个键。enabled 缺省 true，
+ *          haptics_gain/speaker_gain/usb_report_interval_ms 五个键。enabled 缺省 true，
  *          bt_addr 缺省 auto；bt_addr: list 要求 controllers 非空，
  *          bt_addr: <MAC> 要求 controllers 至多只有这一个键。
- *          两个增益按各自区间收口，usb_report_rate 只接受 250/500/1000。
+ *          两个增益按各自区间收口，usb_report_interval_ms 只接受 0/1/2/4
+ *          （0 = real-time）。
  * @note 纯函数：不碰文件系统、不写日志，可在任意线程调用。
  * @see LoadUserConfig —— 加固读取 + 本函数的组合。
  */

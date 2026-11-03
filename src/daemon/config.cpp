@@ -18,12 +18,14 @@
 #include <sys/stat.h>
 #include <unistd.h>
 
+#include <algorithm>
 #include <cerrno>
 #include <cmath>
 #include <cstdlib>
 #include <cstring>
 #include <exception>
 #include <initializer_list>
+#include <iterator>
 #include <limits>
 #include <string_view>
 #include <utility>
@@ -269,22 +271,27 @@ bool ReadSpeakerGain(const YAML::Node& node, const std::string& where,
 }
 
 /**
- * @brief 读 USB 中断端点轮询上限：只接受 250/500/1000 Hz。
+ * @brief 读两份 USB 输入报告之间的间隔：0（real-time）或 1/2/4 毫秒。
  * @param node 已确认存在的节点。
  * @param where 错误定位。
  * @param key 键名，只用于错误文本。
- * @param out 成功时写入 Hz 值。
+ * @param out 成功时写入间隔；0 表示 real-time。
  * @param why 失败时的原因。
- * @return 成功 true；容器、非整数或不在三个档位内 false。
- * @details 每个档位对应一个整数 bInterval（1000/rate = 4/2/1），三个值之外
- *          在线上除不尽，不做就近取整——写错就报错。
+ * @return 成功 true；容器、非整数或不在四个取值内 false。
+ * @details 取值表是 config.h 的 kUsbReportIntervals。这个毫秒数全程直用、
+ *          不做换算：它既是全速中断端点 bInterval 的字节值，也是 IN 线程
+ *          两份重发之间的间隔。0 不是间隔，是"只在收到新蓝牙样本时发一份"
+ *          的模式，描述符仍取最快的 1 ms。表外的值要么落不到整数 bInterval
+ *          上、要么语义未定义，不做就近取整——写错就报错。
  */
-bool ReadUsbReportRate(const YAML::Node& node, const std::string& where,
-                       const char* key, int& out, std::string& why) {
+bool ReadUsbReportInterval(const YAML::Node& node, const std::string& where,
+                           const char* key, int& out, std::string& why) {
   long long value = 0;
   if (!ReadInt(node, where, key, value, why)) return false;
-  if (value != 250 && value != 500 && value != 1000) {
-    why = At(where, std::string("key '") + key + "' must be 250, 500 or 1000");
+  if (std::ranges::find(kUsbReportIntervals, value) ==
+      std::ranges::end(kUsbReportIntervals)) {
+    why = At(where, std::string("key '") + key + "' must be " +
+                        UsbReportIntervalChoices());
     return false;
   }
   out = static_cast<int>(value);
@@ -309,7 +316,7 @@ bool ApplyControllerKeys(const YAML::Node& node, const std::string& where,
   }
   if (!CheckKeys(node,
                  {"bt_wait_s", "audio", "haptics_gain", "speaker_gain",
-                  "usb_report_rate"},
+                  "usb_report_interval_ms"},
                  where, why)) {
     return false;
   }
@@ -332,10 +339,11 @@ bool ApplyControllerKeys(const YAML::Node& node, const std::string& where,
                        why)) {
     return false;
   }
-  const YAML::Node usb_report_rate = node["usb_report_rate"];
-  if (usb_report_rate &&
-      !ReadUsbReportRate(usb_report_rate, where, "usb_report_rate",
-                         cfg.usb_report_rate, why)) {
+  const YAML::Node usb_report_interval = node["usb_report_interval_ms"];
+  if (usb_report_interval &&
+      !ReadUsbReportInterval(usb_report_interval, where,
+                             "usb_report_interval_ms",
+                             cfg.usb_report_interval_ms, why)) {
     return false;
   }
   return true;
@@ -734,6 +742,16 @@ bool IsValidBtAddr(const std::string& addr) {
     if (!digit && !lower && !upper) return false;
   }
   return true;
+}
+
+std::string UsbReportIntervalChoices() {
+  // 0 是模式不是间隔，因此带括注；其余档位是纯毫秒数，末项用 "or" 连接。
+  std::string text = "0 (real-time)";
+  for (std::size_t i = 1; i < std::size(kUsbReportIntervals); ++i) {
+    text += i + 1 == std::size(kUsbReportIntervals) ? " or " : ", ";
+    text += std::to_string(kUsbReportIntervals[i]);
+  }
+  return text;
 }
 
 std::string CanonicalBtAddr(const std::string& addr) {

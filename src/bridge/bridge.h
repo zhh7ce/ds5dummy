@@ -43,9 +43,11 @@ namespace bridge {
  * 输出状态初值里 byte[4]/byte[5]（耳机/扬声器音量）必须非零——缺了这一步，
  * 控制器会把每一份 0x36 音频报告静音。
  *
- * USB 侧发布的是 63 字节状态体全零的空闲报告，用来占住 usb 的覆盖式槽位：
- * 槽位内容不在 usb 里播种（它不认识报告格式），而 usb::StartThreads() 不会
- * 冲掉这份已发布的内容。
+ * USB 侧发布的是 63 字节状态体全零的空闲报告：报告格式只在 bridge 里组，
+ * usb 不认识它，所以持有的状态不由 usb 播种；这份空闲报告既是 IN 线程在
+ * 蓝牙报告到达前的首份内容（重发档会重复写它），也供 ep0 的
+ * GET_REPORT(INPUT) 应答。
+ * usb::StartThreads() 不清空它。
  *
  * @param bt_addr 合成 0x09 feature 报告用的 BD_ADDR，形如
  *                "AA:BB:CC:DD:EE:FF"；解析失败时 MAC 保持全零。
@@ -95,7 +97,8 @@ void OnUsbOutput(const uint8_t* data, size_t len);
  *
  * 收到的布局是 [0]=0x31、[1]=flags、[2..64]=63 字节状态体；取状态体交给
  * detail::BuildUsbInputReport 摆成 [0x01][状态体]，再经 usb::PostInputReport
- * 覆盖式发布，由 usb 的 IN 写线程消费。
+ * 覆盖 usb 持有的那份状态（不排队），由 usb 的 IN 写线程按配置的节奏写出
+ * （重发档按主机轮询重发，real-time 档每份只写一次）。
  *
  * flags bit1 置位时这份 0x31 装的不是状态体，而是一帧麦克风 Opus：此时不再
  * 发布 USB 输入报告，改成把从 [3] 起的 core::protocol::kMicOpusSize 字节

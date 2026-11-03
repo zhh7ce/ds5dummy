@@ -186,8 +186,8 @@ TEST_F(BridgeMic, StateReportStillPublishedWhileMicOpen) {
   }
 }
 
-// mic 帧不是状态报告：它不能顶掉 USB 槽位里最近的一份输入状态。
-TEST_F(BridgeMic, MicFrameDoesNotTouchUsbSlot) {
+// mic 帧不是状态报告：它不能顶掉 USB 侧最近的一份输入状态。
+TEST_F(BridgeMic, MicFrameDoesNotTouchLatestInput) {
   // 先发一份可识别状态，再发一帧麦克风。
   const std::vector<uint8_t> state = make_state_report();
   bridge::OnBtInput(state.data(), state.size());

@@ -28,7 +28,8 @@ namespace ds5::daemon {
  *          配置文件读出后写进这里交接，worker 自己不读配置文件。另有一个
  *          不来自配置、只来自本运行时刻的字段 host_sysfs_path：Manager 建站
  *          时从 sysfs 解析到的 USB 接口目录，同样经 argv 单向传给 worker。USB
- *          轮询上限不在这里：它只影响 Manager 写描述符，worker 用不到。
+ *          报告的发送间隔整个交下去：worker 的 IN 线程要靠它自己按这个间隔发，
+ *          描述符里的 bInterval 只是给主机看的声明。
  * @note 纯数据，无行为；拷贝即配置快照。error 非空表示解析失败，其余字段不应
  *       被使用。
  * @see ParseArgs, BuildWorkerArgv。
@@ -49,6 +50,12 @@ struct Options {
   /// --speaker-gain：控制器侧扬声器前置增益，[0, config::kSpeakerGainMax]；
   /// 2 是固件初值。写进 SetStateData 的 byte[37] 低 3 位，由手柄放大。
   int speaker_gain = 2;
+  /// --usb-report-interval-ms：虚拟手柄两份 USB 输入报告之间的间隔（毫秒），
+  /// 取值只能是 config.h 的 kUsbReportIntervals。1/2/4 是重发档——IN 线程按
+  /// 这个间隔把持有的那一份反复发出去；0 是 real-time 档，只在新的蓝牙样本
+  /// 到达时写一份。同一个数值在 Manager 建站时还写进描述符的 bInterval，
+  /// 但那个字节不构成节奏——dummy_hcd 不兑现它，真实节奏只能由 worker 保证。
+  int usb_report_interval_ms = 1;
   /// --sysfs-path：本站在主机侧被枚举出来的 USB 接口目录，相对 /sys（形如
   /// `/devices/platform/dummy_hcd.0/usb9/9-1/9-1:1.0`）。Manager 建站时解析，
   /// worker 只把它写进 PipeWire sink 的 device.sysfs.path；空 = 没解析出来，

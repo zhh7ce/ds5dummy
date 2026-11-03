@@ -157,18 +157,13 @@ void Close() { plane::Get().device.Close(); }
 // ---- 数据面原语 ----
 
 void PostInputReport(const uint8_t* report, size_t len) {
-  // 空指针或零长度没有可发布的内容：整次调用作废，槽位保持上一份。
+  // 空指针或零长度没有可发布的内容：整次调用作废，持有的状态保持原样。
   if (report == nullptr || len == 0) return;
 
   plane::DataPlane& state = plane::Get();
-  // 槽位是一份定长报告：超过线尺寸的部分截断，容量即 kUsbInputReportSize。
-  const size_t copied = len < core::protocol::kUsbInputReportSize
-                            ? len
-                            : core::protocol::kUsbInputReportSize;
   {
     std::lock_guard<std::mutex> lock(state.input_mutex);
-    memcpy(state.latest_input.data(), report, copied);
-    state.pending_ready = true;
+    state.PublishInput(report, len);
   }
   state.input_cv.notify_one();
 }
@@ -180,7 +175,7 @@ void LatestInputReport(uint8_t* out, size_t cap) {
           ? cap
           : core::protocol::kUsbInputReportSize;
   std::lock_guard<std::mutex> lock(state.input_mutex);
-  memcpy(out, state.latest_input.data(), n);
+  memcpy(out, state.LatestInput().data(), n);
 }
 
 #if DS5DUMMY_DEBUG
@@ -189,7 +184,8 @@ uint64_t InputWrites() { return plane::Get().input_writes.load(); }
 
 // ---- 三条阻塞线程 ----
 
-bool StartThreads(const Handlers& handlers) {
+bool StartThreads(const Handlers& handlers,
+                  std::chrono::milliseconds report_interval) {
   plane::DataPlane& state = plane::Get();
   if (state.running) {
     DS5DUMMY_LOG(ERROR, "[usb] data plane already running");
@@ -198,10 +194,16 @@ bool StartThreads(const Handlers& handlers) {
 
   state.handlers = handlers;
 
-  // 槽位内容不在这里播种：报告格式是 bridge 的知识，第一份（空闲 0x01 报告）
-  // 由 bridge::Init() 发布，时序上早于本函数。这里只复位标志与计数。
-  state.pending_ready = false;
-  state.link_up = false;
+  // 持有的状态不在这里播种：报告格式是 bridge 的知识，第一份（空闲 0x01
+  // 报告）由 bridge::Init() 发布，时序上早于本函数。这里只落下发送节奏与
+  // 链路标志，最近一份仍原样保留，IN 线程与 ep0 的 GET_REPORT 照常读得到。
+  // 间隔原样存下——它与描述符 bInterval 是同一个毫秒数，不需要换算；
+  // 0 就是 real-time 档。
+  {
+    std::lock_guard<std::mutex> lock(state.input_mutex);
+    state.link_up = false;
+    state.resend_interval = report_interval;
+  }
 #if DS5DUMMY_DEBUG
   state.input_writes = 0;
 #endif

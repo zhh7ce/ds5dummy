@@ -238,6 +238,7 @@ class WorkerSession {
         DS5DUMMY_LOG(INFO,
               "[worker] Shutdown requested before the controller appeared");
       } else {
+#if defined(BT_BACKEND_L2CAP)
         // 三类成因各对应一条可执行命令，按实测出现频率排列。
         DS5DUMMY_LOG(ERROR, "[worker] No L2CAP channel to {} within {} s.",
               options_.bt_addr.c_str(), options_.bt_wait_s);
@@ -246,11 +247,25 @@ class WorkerSession {
               "[worker]   - Controller has an active LE link: 'bluetoothctl "
               "disconnect' first");
         DS5DUMMY_LOG(ERROR,
-              "[worker]   - hidp kernel module is loaded: 'echo blacklist hidp "
-              "| sudo tee /etc/modprobe.d/ds5dummy.conf'");
+              "[worker]   - hidp must stay loaded: this backend releases the "
+              "BlueZ HID session and then claims the PSM");
         DS5DUMMY_LOG(ERROR,
               "[worker]   - Link key missing: re-pair with 'bluetoothctl' "
               "(agent on)");
+#else
+        DS5DUMMY_LOG(ERROR, "[worker] No hidraw node for {} within {} s.",
+              options_.bt_addr.c_str(), options_.bt_wait_s);
+        DS5DUMMY_LOG(ERROR, "[worker] Common causes:");
+        DS5DUMMY_LOG(ERROR,
+              "[worker]   - Controller is connected: 'bluetoothctl connect "
+              "{}'", options_.bt_addr.c_str());
+        DS5DUMMY_LOG(ERROR,
+              "[worker]   - DKMS module is loaded: 'sudo modprobe "
+              "hid_playstation_ds5dummy'");
+        DS5DUMMY_LOG(ERROR,
+              "[worker]   - Node visible with HID_ID bus 0005: check "
+              "/sys/class/hidraw/*/device/uevent");
+#endif
       }
       return false;
     }
@@ -295,7 +310,9 @@ class WorkerSession {
     // 端点文件被关闭 = 主机侧解绑，fd 已不可用：请求整轮退出，由 Manager 重建。
     usb_handlers.on_ep0_closed = [this] { stop_all_ = true; };
     usb_handlers.on_output_closed = [this] { stop_all_ = true; };
-    if (!usb::StartThreads(usb_handlers)) {
+    if (!usb::StartThreads(
+            usb_handlers,
+            std::chrono::milliseconds(options_.usb_report_interval_ms))) {
       DS5DUMMY_LOG(ERROR, "[worker] Cannot start USB data-plane threads");
       return false;
     }
@@ -412,8 +429,9 @@ class WorkerSession {
 
     DS5DUMMY_LOG(INFO,
           "[worker] BT rx: {} ({:.0f}/s) | USB tx: {} ({:.0f}/s) | USB rx: {}",
-          bt_rx_delta, static_cast<double>(bt_rx_delta) / elapsed_s, usb_tx,
-          static_cast<double>(usb_tx_delta) / elapsed_s, usb_rx_count_.load());
+          bt_rx_delta, static_cast<double>(bt_rx_delta) / elapsed_s,
+          usb_tx_delta, static_cast<double>(usb_tx_delta) / elapsed_s,
+          usb_rx_count_.load());
     DS5DUMMY_LOG(INFO,
           "[worker] BT tx 0x31: {} 0x36: {} | dropped: {} | truncated: {}",
           bt_stats.tx_31, bt_stats.tx_36, bt_stats.dropped, bt_stats.truncated);
