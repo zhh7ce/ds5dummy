@@ -5,17 +5,21 @@
 # Install: sudo pacman -U ds5dummy_hidraw-*.pkg.tar.zst
 
 pkgname=ds5dummy_hidraw
-pkgver=0.1.0
+# Project source lives two directories up from this PKGBUILD.
+_srcdir="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+# 版本跟随 checkout，由下面的 pkgver() 现查。makepkg 会把结果写回本文件并把
+# pkgrel 重置为 1，所以这里留占位值；改动提交后重新 makepkg 就是升级。
+pkgver=0
 pkgrel=2
 pkgdesc="Bridge a BT DualSense to a virtual USB device (BlueZ HIDRAW backend)"
 arch=('x86_64')
-url="https://github.com/awalol/DS5Dongle"
-license=('MIT')
+url="https://github.com/zhh7ce/ds5dummy"
+license=('GPL-3.0-or-later')
 provides=('ds5dummy')
 conflicts=('ds5dummy' 'ds5dummy_l2cap')
 replaces=('ds5dummy')
 depends=('bluez' 'pipewire' 'fmt' 'opus' 'libsamplerate' 'yaml-cpp' 'systemd-libs')
-makedepends=('cmake' 'pkgconf' 'boost')
+makedepends=('cmake' 'pkgconf' 'boost' 'git')
 optdepends=(
   'dummy_hcd: kernel module (CONFIG_USB_DUMMY_HCD=m)'
   'hid-playstation-ds5dummy-dkms: hidraw-only Bluetooth DualSense support'
@@ -34,8 +38,18 @@ source=(
 )
 b2sums=('SKIP' 'SKIP' 'SKIP' 'SKIP')
 
-# Project source lives two directories up from this PKGBUILD.
-_srcdir="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+# <tag>.r<距 tag 的提交数>.g<短哈希>；还没打 tag 时 tag 段为 0、提交数取总数。
+# pkgver 里不能有 "-"，所以把 git 输出里的分隔符换成点。
+pkgver() {
+  local ver
+  if ver=$(git -C "$_srcdir" describe --tags --long --abbrev=7 2>/dev/null); then
+    printf '%s\n' "$ver" | sed -E 's/^v//; s/-([0-9]+)-(g[0-9a-f]+)/.r\1.\2/'
+  else
+    printf '0.r%s.g%s\n' \
+      "$(git -C "$_srcdir" rev-list --count HEAD)" \
+      "$(git -C "$_srcdir" rev-parse --short=7 HEAD)"
+  fi
+}
 
 build() {
   cmake -B "$srcdir/build-hidraw" -S "$_srcdir" \
@@ -69,4 +83,9 @@ package() {
     "$pkgdir/etc/ds5dummy/config.yaml"
   install -Dm644 "$_srcdir/pkg/user-config.example.yaml" \
     "$pkgdir/usr/share/doc/ds5dummy/user-config.example.yaml"
+
+  install -Dm644 "$_srcdir/LICENSE" \
+    "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
+  install -Dm644 "$_srcdir/NOTICE" \
+    "$pkgdir/usr/share/licenses/$pkgname/NOTICE"
 }

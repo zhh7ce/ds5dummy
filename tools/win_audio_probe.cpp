@@ -15,15 +15,19 @@
  * 任何项目代码，只用 Win32/COM API。因此它不参与 Linux 侧构建，交叉编译命令写在下面。
  *
  * 编译（Linux 主机，mingw-w64 交叉工具链）：
- *   x86_64-w64-mingw32-g++ -std=c++20 -O1 -Wall -Wextra -municode \
+ *   x86_64-w64-mingw32-g++ -std=c++20 -O1 -Wall -Wextra -municode -static \
  *     -o win_audio_probe.exe tools/win_audio_probe.cpp \
- *     -lole32 -loleaut32 -lsetupapi -luuid
+ *     -lole32 -loleaut32 -lsetupapi -luuid -lksuser
+ * `-static` 把 libstdc++/libgcc 链进来：exe 要单独扔进 Proton 前缀，前缀里没有
+ * mingw 的运行时 DLL。`-lksuser` 提供 `KSCATEGORY_*` 与 `KSDATAFORMAT_SUBTYPE_*`
+ * 这批 GUID 的定义（mingw 把它们放在同名库里，和真机的 ksuser.lib 同源）。
  * 运行：
  *   WINEDEBUG=-all wine ./win_audio_probe.exe                       # 只读快照
  *   WINEDEBUG=-all wine ./win_audio_probe.exe --write "<id 子串>" --ch 4 --secs 3
- * 其中 `--write` 的子串直接抄上面 "=== Render 端点 ===" 那节打出来的完整 id（末尾的
- * `,{guid}` 部分不必带），`--ch` 是 1 起的通道号，只有该通道有能量。
- * 在 Proton 前缀里用对应的 `proton run win_audio_probe.exe`（前缀由环境变量给出）。
+ * `--write` 的子串直接抄枚举里 `[n] {0.0.0.00000000}.{GUID}` 那行，带 GUID 就够了；
+ * `--ch` 是 1 起的通道号，只有该通道有能量，其余通道写 0。
+ * 在 Proton 前缀里则用 `proton run win_audio_probe.exe`，`STEAM_COMPAT_DATA_PATH` 与
+ * `STEAM_COMPAT_CLIENT_INSTALL_PATH` 指向目标前缀。
  *
  * 线程模型：单线程，STA（`COINIT_APARTMENTTHREADED`）——和用 event-driven 渲染的游戏
  * 进程同一形态，`--write` 的推送循环也在这条线程上用 `Sleep` 让出。
@@ -39,8 +43,7 @@
 #include <functiondiscoverykeys_devpkey.h>
 #include <ks.h>
 #include <ksmedia.h>
-#include <ksproxy.h>
-#include <ksuuids.h>
+#include <hidclass.h>
 #include <mmdeviceapi.h>
 #include <audioclient.h>
 #include <setupapi.h>
@@ -69,6 +72,23 @@ constexpr int kWriteTickMs = 10;
 
 /// blob 属性最多打前多少个字节：混音格式之类的 blob 头部就够判读，全打会刷屏。
 constexpr size_t kMaxBlobBytes = 24;
+
+/**
+ * `VT_VECTOR | VT_LPWSTR` 的数值 = 0x101f；mingw 的 VARTYPE 枚举里没有这个组合名
+ * （只有分开的 VT_VECTOR 与 VT_LPWSTR），`case` 标签必须是编译期常量，所以在此拼好。
+ */
+constexpr VARTYPE kVtVectorLpWstr =
+    static_cast<VARTYPE>(VT_VECTOR | VT_LPWSTR);
+
+/**
+ * Wine 内部属性键 `{B3F8FA53-…}-2`（SDK 里没有名字，`devenum.c` 叫它
+ * `devicepath_key`）：winepulse 在这里交出设备实例路径，值是
+ * `{1}.USB\VID_054C&PID_0CE6\<PA 索引>&<端点 GUID 尾 8 位>` 这类串。
+ * `PKEY_Device_InstanceId` 在 Wine 上恒为空，所以判读实例身份只能看这一项。
+ */
+constexpr PROPERTYKEY kWineDevicePathKey = {
+    {0xb3f8fa53, 0x0004, 0x438e, {0x90, 0x03, 0x51, 0xa4, 0x6e, 0x13, 0x9b, 0xfc}},
+    2};
 
 /**
  * @brief 往 stdout 写一行 UTF-8 文本。
@@ -106,33 +126,12 @@ std::string ToUtf8(LPCWSTR text) {
 }
 
 /**
- * @brief 把 UTF-8 窄串转成宽串，供需要 `LPCWSTR` 的 API 使用。
- *
- * @param text 窄串，允许为空串。
- * @return 转换结果；转换失败返回空串（调用方据此判"没有匹配目标"）。
- * @note 纯函数，无副作用。命令行进来的本来就是宽串，这个方向只服务于把常量写在
- *       源码里的 UTF-8 字面量喂给 Win32 API。
- */
-std::wstring ToWide(const std::string& text) {
-  if (text.empty()) return L"";
-  const int need = MultiByteToWideChar(CP_UTF8, 0, text.c_str(), -1, nullptr, 0);
-  if (need <= 0) return L"";
-  std::wstring out(static_cast<size_t>(need), L'\0');
-  // 缓冲区按含终止符的长度开，返回值把终止符一起算，因此整串刚好填满。
-  if (MultiByteToWideChar(CP_UTF8, 0, text.c_str(), -1, out.data(), need) == 0) {
-    return L"";
-  }
-  out.pop_back();  // 去掉尾部 L'\0'：wstring 自己维护长度，留着会让 == 比较永远失配。
-  return out;
-}
-
-/**
  * @brief 把 GUID 打成 Windows 习惯的 `{8-4-4-4-12}` 大写形态。
  *
  * @param guid 要打的 GUID，按值取（调用方可以传 `*puuid`）。
  * @return 形如 `{00000000-0000-0000-0000-000000000000}` 的串，长度恒为 38。
- * @note 保留大写字面：DEVPKEY_Device_ContainerId 落到注册表时 GE 的 0005 补丁会转
- *       小写，这里打出大写才能看出 Wine 侧到底做没做那次转换。
+ * @note 统一大写（`StringFromGUID2` 的输出形态）：字符串比较是大小写敏感的，判读
+ *       容器 id 那几行时两边必须同一口径。
  */
 std::string GuidToString(const GUID& guid) {
   OLECHAR buf[64] = {0};
@@ -154,6 +153,90 @@ std::string PropertyKeyToString(const PROPERTYKEY& key) {
 }
 
 /**
+ * @brief 把 KSAUDIO_SPEAKER 通道掩码翻成通道名列表。
+ *
+ * @param mask `WAVEFORMATEXTENSIBLE::dwChannelMask`。
+ * @return 形如 "FL+FR+BL+BR" 的串；掩码为 0 时打 "<mask 0>"。
+ * @note 位序与名字照 Windows 的 SPEAKER_* 定义（0..17 有效，18..30 是保留位，
+ *       31 是 SPEAKER_ALL）：`KSAUDIO_SPEAKER_QUAD` = FL+FR+BL+BR = 0x33，
+ *       也就是 Pulse 侧 `rear-left/rear-right` 那两路在 Windows 上的叫法。
+ */
+std::string ChannelMaskToString(DWORD mask) {
+  static constexpr const char* kNames[] = {
+      "FL",  "FR",  "FC", "LFE", "BL",  "BR",  "FLC", "FRC", "BC",
+      "SL",  "SR",  "TC", "TFL", "TFC", "TFR", "TBL", "TBC", "TBR"};
+  if (mask == 0) return "<mask 0>";
+  std::string out;
+  for (size_t bit = 0; bit < std::size(kNames); ++bit) {
+    if (mask & (1UL << bit)) {
+      if (!out.empty()) out += "+";
+      out += kNames[bit];
+    }
+  }
+  // 高位（18..31）不是合法通道位：真出现就说明上游构造掩码时用错了口径。
+  if (mask & 0xFFFC0000UL) out += "+<高位 0x" + [&] {
+    char buf[9] = {0};
+    std::snprintf(buf, sizeof(buf), "%x", static_cast<unsigned>(mask & 0xFFFC0000UL));
+    return std::string(buf);
+  }();
+  return out;
+}
+
+/**
+ * @brief 把一段 `WAVEFORMATEX`/`WAVEFORMATEXTENSIBLE` 字节解成一行可读格式。
+ *
+ * @param data 属性 blob 的原始字节。
+ * @param size 字节数；小于 `sizeof(WAVEFORMATEX)` 时无法解码。
+ * @return 形如 `4ch/48000Hz/32bit 掩码 FL+FR+BL+BR subformat {...}` 的串；不能解码时
+ *         返回空串（调用方据此只打十六进制）。
+ * @note `PKEY_AudioEngine_DeviceFormat` 等处存的就是这个结构，长度 18（PCM）或 40
+ *       （EXTENSIBLE）。EXTENSIBLE 才带通道掩码与子格式 GUID，这两项是判读
+ *       "winepulse 把这台设备认成几声道的什么格式"的全部依据。
+ */
+std::string FormatWaveFormat(const BYTE* data, size_t size) {
+  if (!data || size < sizeof(WAVEFORMATEX)) return "";
+  WAVEFORMATEX fmt{};
+  std::memcpy(&fmt, data, sizeof(fmt));
+  std::string out = std::to_string(fmt.nChannels) + "ch/" +
+                    std::to_string(fmt.nSamplesPerSec) + "Hz/" +
+                    std::to_string(fmt.wBitsPerSample) + "bit" +
+                    " blockAlign=" + std::to_string(fmt.nBlockAlign);
+  // 0xFFFE = WAVE_FORMAT_EXTENSIBLE：只有这种形态在 WAVEFORMATEX 之后还有掩码与
+  // 子格式，长度不足时按普通 PCM 处理，不越界读。
+  if (fmt.wFormatTag == WAVE_FORMAT_EXTENSIBLE &&
+      size >= sizeof(WAVEFORMATEXTENSIBLE)) {
+    WAVEFORMATEXTENSIBLE ext{};
+    std::memcpy(&ext, data, sizeof(ext));
+    out += " 掩码 " + ChannelMaskToString(ext.dwChannelMask) + " 有效位 " +
+           std::to_string(ext.Samples.wValidBitsPerSample) + " subformat " +
+           GuidToString(ext.SubFormat);
+  }
+  return out;
+}
+
+/**
+ * @brief 判断一个波形格式的采样类型是不是 32 位 float。
+ *
+ * @param fmt 混音格式或请求格式；调用方保证非 null。
+ * @return true = 送缓冲时要写 float 样本。
+ * @note 两种合法形态都要认：普通 `WAVE_FORMAT_IEEE_FLOAT`，以及
+ *       `WAVE_FORMAT_EXTENSIBLE` + `KSDATAFORMAT_SUBTYPE_IEEE_FLOAT` 子格式——本项目
+ *       4 通道 sink 报出来的就是后者，只看 `wFormatTag` 会把它误判成整形。
+ */
+bool IsFloat32Format(const WAVEFORMATEX* fmt) {
+  if (fmt->wFormatTag == WAVE_FORMAT_IEEE_FLOAT) {
+    return fmt->wBitsPerSample == 32;
+  }
+  if (fmt->wFormatTag != WAVE_FORMAT_EXTENSIBLE ||
+      fmt->cbSize < sizeof(WAVEFORMATEXTENSIBLE) - sizeof(WAVEFORMATEX)) {
+    return false;
+  }
+  const auto* ext = reinterpret_cast<const WAVEFORMATEXTENSIBLE*>(fmt);
+  return fmt->wBitsPerSample == 32 &&
+         IsEqualGUID(ext->SubFormat, KSDATAFORMAT_SUBTYPE_IEEE_FLOAT);
+}
+
+/**
  * @brief 按 VARTYPE 把 PROPVARIANT 的值打成可读文本。
  *
  * @param var 属性值，调用方从 `IPropertyStore::Get` 取回。
@@ -170,29 +253,35 @@ std::string FormatPropVariant(const PROPVARIANT& var) {
     case VT_BSTR:
       return "\"" + ToUtf8(var.bstrVal) + "\"";
     case VT_UI4:
-    case VT_I4:
       return std::to_string(var.ulVal);
+    case VT_I4:
+      return std::to_string(var.lVal);
     case VT_BOOL:
       return var.boolVal ? "true" : "false";
     case VT_CLSID:
-    case VT_UUID:
-      // 属性存储把 GUID 存成指针，null 指针不是"没有值"就是坏数据，两种都打出来。
-      return var.puuidVal ? GuidToString(*var.puuidVal) : "<null GUID ptr>";
-    case VT_VECTOR_LPWSTR: {
+      // 属性存储里 GUID 类的值（容器 id、子格式 id）用的就是 VT_CLSID = 0x48；
+      // SDK 的另一个名字 VT_UUID 同值，mingw 头里没有它。存的是指针，null 指针
+      // 既可能是"这项没有值"也可能是坏数据，两种都原样打出来。
+      return var.puuid ? GuidToString(*var.puuid) : "<null GUID ptr>";
+    case kVtVectorLpWstr: {
       std::string out = "[";
-      for (ULONG i = 0; i < var.caubc.cElems; ++i) {
+      for (ULONG i = 0; i < var.calpwstr.cElems; ++i) {
         if (i) out += ", ";
         out += ToUtf8(var.calpwstr.pElems[i]);
       }
       return out + "]";
     }
     case VT_BLOB: {
-      // blob 是格式类属性（PKEY_AudioEndpoint_Supports_Event_Mode 等）的载体，
-      // 头几个字节能判出形态，再多的按长度截掉。
+      // blob 是格式类属性的载体：既可能是设备格式（WAVEFORMATEX 家族），也可能是
+      // 标志位表。先试按波形格式解码，解不出就只打长度与前几个字节。
+      char hex[8] = {0};
+      std::string out = "len=" + std::to_string(var.blob.cbSize);
+      const std::string decoded =
+          FormatWaveFormat(var.blob.pBlobData, var.blob.cbSize);
+      if (!decoded.empty()) return out + " " + decoded;
       const size_t n = var.blob.cbSize < kMaxBlobBytes ? var.blob.cbSize
                                                        : kMaxBlobBytes;
-      char hex[8] = {0};
-      std::string out = "len=" + std::to_string(var.blob.cbSize) + " bytes=";
+      out += " bytes=";
       for (size_t i = 0; i < n; ++i) {
         std::snprintf(hex, sizeof(hex), "%02x", var.blob.pBlobData[i]);
         out += hex;
@@ -205,35 +294,6 @@ std::string FormatPropVariant(const PROPVARIANT& var) {
       std::snprintf(buf, sizeof(buf), "<VT 0x%04x 未译>", var.vt);
       return buf;
   }
-}
-
-/**
- * @brief 把 KSAUDIO_SPEAKER 通道掩码翻成通道名列表。
- *
- * @param mask `WAVEFORMATEXTENSIBLE::dwChannelMask`。
- * @return 形如 "FL+FR+RL+RR" 的串；掩码为 0 时打 "<mask 0>"。
- * @note 位序按 Windows 的 SPEAKER_* 定义（0..17 有效，18 是填充位），只打置位的那些，
- *       所以掩码里出现未定义位会表现为缺项而不是错名。
- */
-std::string ChannelMaskToString(DWORD mask) {
-  static constexpr const char* kNames[] = {
-      "FL", "FR", "FC", "LFE", "RL", "RR", "RC", "SLC", "SRC", "FLC", "FRC",
-      "BACKL", "BACKR", "SIDEL", "SIDER", "TC", "LFE2"};
-  if (mask == 0) return "<mask 0>";
-  std::string out;
-  for (size_t bit = 0; bit < std::size(kNames); ++bit) {
-    if (mask & (1UL << bit)) {
-      if (!out.empty()) out += "+";
-      out += kNames[bit];
-    }
-  }
-  // 高位（18..31）不是合法通道位：真出现就说明上游构造掩码时用错了口径。
-  if (mask & 0xFFFC0000UL) out += "+<高位 0x" + [&] {
-    char buf[9] = {0};
-    std::snprintf(buf, sizeof(buf), "%x", static_cast<unsigned>(mask & 0xFFFC0000UL));
-    return std::string(buf);
-  }();
-  return out;
 }
 
 /**
@@ -329,14 +389,36 @@ std::string OrNone(const std::wstring& id) {
 }
 
 /**
- * @brief 打印端点属性存储的全部内容，并单独标出三行"要看的键"。
+ * @brief 把 `EndpointFormFactor` 枚举值翻成名字。
+ *
+ * @param value `PKEY_AudioEndpoint_FormFactor` 的值（VT_UI4）。
+ * @return 枚举名；越界时返回 "<form factor N>"。
+ * @note 这批名字是 Win32 API 的公开枚举，与我们的 `device.form-factor=controller`
+ *       在本项目里没有直接对应——winepulse 不消费该键，值能出现只说明 Wine 自己
+ *       填了一个默认值。
+ */
+std::string FormFactorName(ULONG value) {
+  static constexpr const char* kNames[] = {
+      "RemoteNetworkDevice", "Speakers",            "LineLevel",
+      "Headphones",          "Microphone",          "Headset",
+      "Handset",             "UnknownDigitalPassthrough", "SPDIF",
+      "DigitalAudioDisplayDevice", "UnknownFormFactor"};
+  if (value < std::size(kNames)) return kNames[value];
+  return "<form factor " + std::to_string(value) + ">";
+}
+
+/**
+ * @brief 打印端点属性存储的全部内容，并单独标出判读用的几项。
  *
  * @param device 要读属性的端点；本函数不持有它，也不释放。
- * @note 侧作用：写 stdout。三行标出的是 PKEY_Device_InstanceId（实例路径，
- *       `USB\VID_xxxx&PID_xxxx\...` 由 device.bus + 十六进制 VID/PID 拼成）、
- *       DEVPKEY_Device_ContainerId（容器 id，音频端点与 HID 设备靠它配对；
- *       `{00000000-...}` 就是补丁没拿到 sysfs.path 或 udev 没查到设备）、
- *       PKEY_Device_FriendlyName（游戏 strstr 的那份名字）。
+ * @note 侧作用：写 stdout。单列出来的是：
+ *       `PKEY_Device_FriendlyName`（游戏按 strstr 匹配的那份名字）、
+ *       `PKEY_AudioEndpoint_FormFactor` 与 `PhysicalSpeakers`（winepulse 自填）、
+ *       `PKEY_AudioEngine_DeviceFormat`（共享模式设备格式，EXTENSIBLE 时带掩码）、
+ *       `PKEY_Device_ContainerId`（音频端点与 HID 设备的配对依据；Wine 侧实测为空，
+ *       配对证据要另从 setupapi 的设备记录取，见 `DumpInterfaces`）。
+ *       `PKEY_Device_InstanceId` 在 Wine 上同样为空，实例路径由 winepulse 合成后存在
+ *       非 SDK 键 `{B3F8FA53-…}-2` 里，这一项也单独列出来。
  *       其余键一律照打，因为判据会随 GE 版本加新键。
  */
 void DumpProperties(IMMDevice* device) {
@@ -358,7 +440,7 @@ void DumpProperties(IMMDevice* device) {
     PROPERTYKEY key{};
     PROPVARIANT var{};
     PropVariantInit(&var);
-    if (FAILED(store->GetValueAt(i, &key, &var))) {
+    if (FAILED(store->GetAt(i, &key)) || FAILED(store->GetValue(key, &var))) {
       PropVariantClear(&var);
       continue;  // 单项读失败不影响其余项：探针宁可少一行也不中断整份快照。
     }
@@ -366,17 +448,43 @@ void DumpProperties(IMMDevice* device) {
     PropVariantClear(&var);
   }
 
-  // 这三项单独再打一遍：它们的名字在 SDK 里散在三个头文件，判读时不该来回翻。
-  for (const PROPERTYKEY& interesting : {PKEY_Device_InstanceId,
-                                         PKEY_Device_FriendlyName,
-                                         PKEY_Device_ContainerId}) {
+  // 这几项单独再打一遍：键名在 SDK 里散在头文件各处，判读时不该来回翻表。
+  // 其中 `kWineDevicePathKey` 不是 SDK 键，但实例路径只在它那里。
+  struct Interesting {
+    const PROPERTYKEY* key;
+    const char* name;
+    bool form_factor;  // true = 值是 EndpointFormFactor 枚举，按名字打
+    bool speakers;     // true = 值是 KSAUDIO_SPEAKER 掩码，按通道名打
+  };
+  static const Interesting kInteresting[] = {
+      {&PKEY_Device_InstanceId, "实例 id（Wine 上恒为空，路径在下一行）", false,
+       false},
+      {&kWineDevicePathKey, "设备实例路径（Wine 的 devicepath_key）", false, false},
+      {&PKEY_Device_FriendlyName, "友好名（游戏 strstr 的那份）", false, false},
+      {&PKEY_Device_ContainerId, "容器 id（端点配对键）", false, false},
+      {&PKEY_AudioEndpoint_FormFactor, "form factor", true, false},
+      {&PKEY_AudioEndpoint_PhysicalSpeakers, "物理通道掩码", false, true},
+      {&PKEY_AudioEngine_DeviceFormat, "共享模式设备格式", false, false},
+  };
+  for (const Interesting& item : kInteresting) {
     PROPVARIANT var{};
     PropVariantInit(&var);
-    if (SUCCEEDED(store->GetValue(&interesting, &var))) {
-      Print("    >> " + PropertyKeyToString(interesting) + " = " +
-            FormatPropVariant(var));
+    const std::string label =
+        std::string("    >> ") + item.name + " " + PropertyKeyToString(*item.key) +
+        " = ";
+    if (FAILED(store->GetValue(*item.key, &var))) {
+      Print(label + "<没有这一项>");
     } else {
-      Print("    >> " + PropertyKeyToString(interesting) + " = <没有这一项>");
+      // form factor 是裸枚举值，光看数字判不出；其余按 FormatPropVariant 的通用口径。
+      if (item.form_factor && var.vt == VT_UI4) {
+        Print(label + FormFactorName(var.ulVal) + " (" +
+              std::to_string(var.ulVal) + ")");
+      } else if (item.speakers && var.vt == VT_UI4) {
+        Print(label + ChannelMaskToString(var.ulVal) + " (" +
+              std::to_string(var.ulVal) + ")");
+      } else {
+        Print(label + FormatPropVariant(var));
+      }
     }
     PropVariantClear(&var);
   }
@@ -386,13 +494,12 @@ void DumpProperties(IMMDevice* device) {
 /**
  * @brief 取该端点共享模式的混音格式，并试列几种格式的接受度。
  *
- * @param device 要激活 `IAudioClient` 的端点。
- * @param flow 数据流方向，只影响提示文案（Capture 端点也支持 IsFormatSupported）。
+ * @param device 要激活 `IAudioClient` 的端点，播放或录音都行（IsFormatSupported 两侧都有）。
  * @note 侧作用：写 stdout；COM 对象在本函数内成对释放。`dwChannelMask` 是判读重点——
  *       上游 winepulse 用 `pulse_channel_map_to_channel_mask` 从节点的通道映射算它，
  *       GE 的 0193 再按它决定是否优先选"公开的 quad sink"。
  */
-void DumpMixFormat(IMMDevice* device, EDataFlow flow) {
+void DumpMixFormat(IMMDevice* device) {
   IAudioClient* client = nullptr;
   HRESULT hr = device->Activate(IID_IAudioClient, CLSCTX_ALL, nullptr,
                                 reinterpret_cast<void**>(&client));
@@ -406,19 +513,23 @@ void DumpMixFormat(IMMDevice* device, EDataFlow flow) {
   }
 
   WAVEFORMATEX* mix = nullptr;
-  if (SUCCEEDED(client->GetMixFormat(&mix)) && mix) {
-    Print(std::string("    混音格式: ") + std::to_string(mix->nChannels) +
-          "ch/" + std::to_string(mix->nSamplesPerSec) + "Hz/" +
-          std::to_string(mix->wBitsPerSample) + "bit cbSize=" +
-          std::to_string(mix->nBlockAlign));
-    // 只有 WAVE_FORMAT_EXTENSIBLE 才带通道掩码，PCM 形态的格式没有这一层信息。
-    if (mix->wFormatTag == WAVE_FORMAT_EXTENSIBLE) {
-      const auto* ext = reinterpret_cast<WAVEFORMATEXTENSIBLE*>(mix);
-      Print("      掩码 = " + ChannelMaskToString(ext->dwChannelMask) +
-            " subformat = " + GuidToString(ext->SubFormat));
-    }
+  const HRESULT mix_hr = client->GetMixFormat(&mix);
+  if (SUCCEEDED(mix_hr) && mix) {
+    Print("    混音格式: " + FormatWaveFormat(
+                                 reinterpret_cast<const BYTE*>(mix),
+                                 sizeof(WAVEFORMATEX) + mix->cbSize) +
+          " tag=0x" + [&] {
+            char buf[8] = {0};
+            std::snprintf(buf, sizeof(buf), "%04x",
+                          static_cast<unsigned>(mix->wFormatTag));
+            return std::string(buf);
+          }());
   } else {
-    Print("    混音格式取不到");
+    Print("    混音格式取不到 hr=0x" + [&] {
+      char buf[12] = {0};
+      std::snprintf(buf, sizeof(buf), "%08lx", static_cast<unsigned long>(mix_hr));
+      return std::string(buf);
+    }());
   }
   if (mix) CoTaskMemFree(mix);
 
@@ -427,15 +538,18 @@ void DumpMixFormat(IMMDevice* device, EDataFlow flow) {
   struct Probe {
     WORD channels;
     WORD bits;
-    WORD tag;
+    const GUID* subformat;
   };
-  static constexpr Probe kProbes[] = {{2, 32, WAVE_FORMAT_IEEE_FLOAT},
-                                      {4, 32, WAVE_FORMAT_IEEE_FLOAT},
-                                      {2, 16, WAVE_FORMAT_PCM},
-                                      {4, 16, WAVE_FORMAT_PCM}};
+  static const Probe kProbes[] = {
+      {2, 32, &KSDATAFORMAT_SUBTYPE_IEEE_FLOAT},
+      {4, 32, &KSDATAFORMAT_SUBTYPE_IEEE_FLOAT},
+      {2, 16, &KSDATAFORMAT_SUBTYPE_PCM},
+      {4, 16, &KSDATAFORMAT_SUBTYPE_PCM}};
   for (const Probe& p : kProbes) {
     WAVEFORMATEXTENSIBLE fmt{};
-    fmt.Format.wFormatTag = p.tag;
+    // 带通道掩码的请求只能是 EXTENSIBLE：普通 WAVEFORMATEX 没有掩码字段，
+    // 而混合模式按掩码下混。采样类型住在 SubFormat 里。
+    fmt.Format.wFormatTag = WAVE_FORMAT_EXTENSIBLE;
     fmt.Format.nChannels = p.channels;
     fmt.Format.nSamplesPerSec = 48000;  // 与本项目 sink/source 的采样率同一口径
     fmt.Format.wBitsPerSample = p.bits;
@@ -448,14 +562,21 @@ void DumpMixFormat(IMMDevice* device, EDataFlow flow) {
     // 想看到的两种形态。
     fmt.dwChannelMask = p.channels == 2 ? KSAUDIO_SPEAKER_STEREO
                                         : KSAUDIO_SPEAKER_QUAD;
-    fmt.SubFormat = (p.tag == WAVE_FORMAT_IEEE_FLOAT) ? KSDATAFORMAT_SUBTYPE_IEEE_FLOAT
-                                                      : KSDATAFORMAT_SUBTYPE_PCM;
+    fmt.SubFormat = *p.subformat;
+    fmt.Samples.wValidBitsPerSample = p.bits;  // 有效位数 = 容器位数（float/16bit 都是满位）
     WAVEFORMATEX* closest = nullptr;
     const HRESULT probe_hr = client->IsFormatSupported(
         AUDCLNT_SHAREMODE_SHARED, &fmt.Format, &closest);
+    // S_OK = 原生接受；S_FALSE = 需要转换（closest 给出要转成的格式）；其余 = 拒绝，
+    // 把 HRESULT 一起打出来，判读时分得清"格式不对"和"驱动不支持"。
     std::string verdict = probe_hr == S_OK
                               ? "支持"
-                              : (probe_hr == S_FALSE ? "需转换" : "拒绝");
+                              : (probe_hr == S_FALSE ? "需转换" : "拒绝 hr=0x" + [&] {
+                                  char buf[12] = {0};
+                                  std::snprintf(buf, sizeof(buf), "%08lx",
+                                                static_cast<unsigned long>(probe_hr));
+                                  return std::string(buf);
+                                }());
     if (closest) {
       verdict += "（建议格式 " + std::to_string(closest->nChannels) + "ch/" +
                  std::to_string(closest->wBitsPerSample) + "bit";
@@ -523,22 +644,25 @@ void DumpFlow(IMMDeviceEnumerator* enumerator, EDataFlow flow,
     if (id && !default_multimedia.empty() && default_multimedia == id) {
       Print("    << eMultimedia 角色默认端点");
     }
-    Print("    数据流 = " + std::string(FlowName(flow)) +
-          "（IMMEndpoint::GetDataFlow）");
+    // 端点自己声明的方向与枚举方向分开取、分开打：两者不一致时只看集合会判错。
     EDataFlow reported = flow;
+    bool have_reported = false;
     IMMEndpoint* endpoint = nullptr;
     if (SUCCEEDED(device->QueryInterface(IID_IMMEndpoint,
                                          reinterpret_cast<void**>(&endpoint))) &&
         endpoint) {
-      endpoint->GetDataFlow(&reported);
+      have_reported = SUCCEEDED(endpoint->GetDataFlow(&reported));
       endpoint->Release();
-      if (reported != flow) {
-        Print("    !! 声明方向与集合不一致: " + std::string(FlowName(reported)));
-      }
+    }
+    Print("    数据流 = " + std::string(FlowName(reported)) +
+          (have_reported ? "（IMMEndpoint::GetDataFlow）"
+                         : "（取不到，按枚举方向）"));
+    if (have_reported && reported != flow) {
+      Print("    !! 声明方向与集合不一致: " + std::string(FlowName(reported)));
     }
 
     DumpProperties(device);
-    DumpMixFormat(device, flow);
+    DumpMixFormat(device);
     if (id) CoTaskMemFree(id);
     device->Release();
   }
@@ -549,15 +673,18 @@ void DumpFlow(IMMDeviceEnumerator* enumerator, EDataFlow flow,
  * @brief 枚举 setupapi 里某一设备接口类的全部实例，打印路径、实例 id 与容器 id。
  *
  * @param class_guid 设备接口类 GUID（HID 用 `GUID_DEVINTERFACE_HID`，音频用
- *                   `AM_KSCATEGORY_AUDIO` / `_RENDER` / `_CAPTURE`——mingw 只有
- *                   DirectShow 的那套名字，数值与 Windows 的 `KSCATEGORY_*` 相同）。
+ *                   `KSCATEGORY_AUDIO` / `_RENDER` / `_CAPTURE`，定义在 `ksmedia.h`）。
  * @param label 输出里那一节的标题。
  * @return 找到的接口数；`SetupDiGetClassDevsW` 直接失败返回 -1。
  * @note 侧作用：写 stdout。这一节回答"音频端点和 HID 设备是不是被认成同一只设备"——
- *       两边的 DEVPKEY_Device_ContainerId 必须相等，而 Wine 侧的容器 id 是靠
- *       bus/devnum + 创建时间从 udev 算出来的，所以同一只手柄的两条路径要么给出
- *       同一个 GUID，要么其中一个是全零。两次调用取长度是 SetupDi 系列的固定形态，
- *       第一次返回 ERROR_INSUFFICIENT_BUFFER 属于正常流程，不当失败处理。
+ *       同一个物理设备的两条接口记录应给出相等的 `DEVPKEY_Device_ContainerId`；取不到
+ *       时打该行的 gle，全零 GUID 也照打（GUID_NULL 的语义是"不归属任何容器"）。
+ *       容器 id 由 WineBus/SetupAPI 写在设备记录上，不在 MMDevice 属性存储里（那边实测
+ *       为空，见 `DumpProperties`），所以配对证据只能从这一节取。原版 Wine 不造 KS
+ *       音频接口，`KSCATEGORY_*` 三节因此恒为空；有内容说明跑的是带 GE 0003 那类伪造
+ *       接口补丁的版本，且 `PROTON_ENABLE_MHWILDS_USB_AUDIO=1`（0103 把暴露范围收到
+ *       这个开关下）。两次调用取长度是 SetupDi 系列的固定形态，第一次返回
+ *       ERROR_INSUFFICIENT_BUFFER 属于正常流程，不当失败处理。
  */
 int DumpInterfaces(const GUID& class_guid, const char* label) {
   HDEVINFO set = SetupDiGetClassDevsW(&class_guid, nullptr, nullptr,
@@ -697,7 +824,10 @@ int WriteTone(IMMDeviceEnumerator* enumerator, const std::wstring& needle,
     LPWSTR id = nullptr;
     candidate->GetId(&id);
     // 只取第一个命中：目标是本工具自己打出来的那行完整 id，正常情况不会有两个候选。
-    if (id && wcsstr(id, needle.c_str()) != nullptr) device = candidate;
+    if (id && wcsstr(id, needle.c_str()) != nullptr) {
+      device = candidate;
+      Print("灌信号: 命中端点 " + ToUtf8(id));
+    }
     if (id) CoTaskMemFree(id);
     if (device) break;
     candidate->Release();
@@ -724,8 +854,8 @@ int WriteTone(IMMDeviceEnumerator* enumerator, const std::wstring& needle,
 
   WAVEFORMATEX* mix = nullptr;
   client->GetMixFormat(&mix);
-  if (!mix || mix->wFormatTag != WAVE_FORMAT_IEEE_FLOAT) {
-    Print("灌信号: 混音格式不是 float，本工具只按 float 填样本");
+  if (!mix || !IsFloat32Format(mix)) {
+    Print("灌信号: 混音格式不是 32 位 float，本工具只按 float 填样本");
     if (mix) CoTaskMemFree(mix);
     client->Release();
     return 2;
@@ -898,9 +1028,9 @@ int wmain(int argc, wchar_t** argv) {
   DumpFlow(enumerator, eCapture, console_capture, mm_capture);
 
   DumpInterfaces(GUID_DEVINTERFACE_HID, "HID（GUID_DEVINTERFACE_HID）");
-  DumpInterfaces(AM_KSCATEGORY_AUDIO, "音频类别（KSCATEGORY_AUDIO）");
-  DumpInterfaces(AM_KSCATEGORY_RENDER, "渲染类别（KSCATEGORY_RENDER）");
-  DumpInterfaces(AM_KSCATEGORY_CAPTURE, "采集类别（KSCATEGORY_CAPTURE）");
+  DumpInterfaces(KSCATEGORY_AUDIO, "音频类别（KSCATEGORY_AUDIO）");
+  DumpInterfaces(KSCATEGORY_RENDER, "渲染类别（KSCATEGORY_RENDER）");
+  DumpInterfaces(KSCATEGORY_CAPTURE, "采集类别（KSCATEGORY_CAPTURE）");
 
   if (!target.empty()) {
     Print("=== 灌信号 ===");
