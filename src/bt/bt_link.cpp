@@ -90,7 +90,10 @@ int GetFeature(uint8_t* buf, size_t len) {
   const int got = detail::GetFeature(full, sizeof(full));
   if (got <= 0) return -1;
 
-  detail::CacheStore(buf[0], full, static_cast<size_t>(got));
+  // 缓存键取回包自身的 id（后端保证 full[0] 就是报告 id）：条目 id 与内容
+  // 永远一致，迟到的回包不会串到别的请求名下——上游 feature_data 同样按
+  // 回包里 packet[1] 建键。
+  detail::CacheStore(full[0], full, static_cast<size_t>(got));
   // 缓存里现在有整份；按调用方容量截出去，同一份报告在线上只跑一次。
   return detail::CacheLookup(buf, len);
 }

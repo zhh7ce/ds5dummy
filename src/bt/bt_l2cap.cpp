@@ -442,11 +442,14 @@ bool ControlSetProtocolReportMode() {
 }
 
 /**
- * @brief 发 HIDP GET_REPORT(@p report_id)，一直等到匹配的 feature 回包。
+ * @brief 发 HIDP GET_REPORT(@p report_id)，等到 id 匹配的 feature 回包。
  *
- * 等待期间读到的其它控制包（SET_PROTOCOL 的回包、异步通知等）直接丢弃，
- * 只认首字节 0xA3 的那一个。整体预算 kControlRecvTimeoutMs，每轮 recv 只按
- * 剩余时间等。这里只管把控制通道上的原始帧收回来，缓存一律不碰。
+ * 控制通道上的 0xA3 回包可能属于上一次请求（它超时后才到），所以按回包自带
+ * 的 report id 配对：只有 reply_buf[1] == @p report_id 的那一份算本次的答案，
+ * id 不符或首字节不是 0xA3 的包读掉丢弃、继续等。与上游 DS5Dongle 的归档
+ * 方式一致——那边的 feature_data 按回包里 packet[1] 建键，条目永远只对应
+ * 自己的 id。整体预算 kControlRecvTimeoutMs，每轮 recv 只按剩余时间等。这里
+ * 只管把控制通道上的原始帧收回来，缓存一律不碰。
  *
  * @param report_id   目标 report id。
  * @param reply_buf   收包缓冲：成功时 reply_buf[0] 是事务头 0xA3，
@@ -494,13 +497,22 @@ ssize_t ControlGetReport(uint8_t report_id, uint8_t* reply_buf,
       return -1;
     }
 
-    // 首字节不是 feature 回包头：是别的控制流量，读掉丢弃、继续等。
-    if (reply_buf[0] == core::protocol::kHidpFeatureReply) break;
-    DS5DUMMY_LOG(WARNING,
-          "control GET 0x{:02X}: ignoring HIDP control header 0x{:02X}",
-          report_id, reply_buf[0]);
+    // 只有 [0xA3][本次请求的 id] 才算答案；其余包（SET_PROTOCOL 的回包、
+    // 异步通知、其它 id 的迟到回复）读掉丢弃、继续等剩余预算。
+    if (n >= 2 && reply_buf[0] == core::protocol::kHidpFeatureReply &&
+        reply_buf[1] == report_id) {
+      return n;
+    }
+    if (reply_buf[0] == core::protocol::kHidpFeatureReply) {
+      DS5DUMMY_LOG(WARNING,
+            "control GET 0x{:02X}: ignoring reply for report 0x{:02X} (len={})",
+            report_id, n >= 2 ? reply_buf[1] : 0, n);
+    } else {
+      DS5DUMMY_LOG(WARNING,
+            "control GET 0x{:02X}: ignoring HIDP control header 0x{:02X}",
+            report_id, reply_buf[0]);
+    }
   }
-  return n;
 }
 
 }  // namespace
