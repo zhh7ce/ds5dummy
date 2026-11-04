@@ -13,10 +13,11 @@
  * 两条线程（它们都要 poll 收工 fd），`plane::Finish()` 必须晚于两次 join
  * （它们还握着那两个 eventfd）。线程本体在 `bt_rx.cpp`、`bt_tx.cpp`。
  *
- * @note 线程模型：本文件的链路入口都在调用方线程上执行，不起线程、不加锁。
- *       feature 缓存的无锁前提是这里的时序：建链期由 worker 主线程预取，
- *       运行期只有 usb 的 ep0 线程经 `GetFeature()` 触碰它。改动这个时序
- *       要先给 bt_detail.cpp 的缓存本体补锁。
+ * @note 线程模型：本文件的链路入口都在调用方线程上执行，不起线程。控制通道
+ *       上有一把互斥锁：ep0 线程的现取 GET 与另一条线程的 SET 可能并发，
+ *       两者共用同一条控制通道，必须串行。feature 缓存本身仍无锁，前提是
+ *       这里的时序：建链期由 worker 主线程预取，运行期只有 usb 的 ep0 线程
+ *       经 `GetFeature()` 触碰它。改动这个时序要先给缓存本体补锁。
  * @see bt_plane.h —— 两条线程共享的运行状态与判死入口。
  */
 
@@ -24,6 +25,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <mutex>
 
 #include "bt/bt_detail.h"
 #include "bt/bt_plane.h"
@@ -36,6 +38,11 @@ namespace {
 /// 现取 feature 报告用的整份缓冲：DS5 的 feature 报告没有超过这个尺寸的，
 /// 缓存因此总能存下完整一份，交给调用方时才按对方容量截断。
 constexpr size_t kFeatureFetchSize = 512;
+
+/// 控制通道上的互斥：GET 的"发请求 + 等 0xA3 回包"与 SET 的一次发送不能
+/// 交错，否则迟到的 feature 回包会被 SET 夹在中间，下一次 GET 按 id 配对时
+/// 还可能读到不属于本次的字节。纯串行化，不保护任何内存状态。
+std::mutex control_mutex;
 
 /// 建链后预取一遍 feature 报告。此刻缓存已被 `bt::Open()` 清空，命中分支
 /// 走不到，每一份都是上线现取；取到取不到都不算建链失败——`GetFeature()`
@@ -87,7 +94,11 @@ int GetFeature(uint8_t* buf, size_t len) {
   // 偏小的那次请求把一份被截短的报告永久留在缓存里。
   uint8_t full[kFeatureFetchSize];
   full[0] = buf[0];
-  const int got = detail::GetFeature(full, sizeof(full));
+  int got = 0;
+  {
+    std::lock_guard<std::mutex> lock(control_mutex);
+    got = detail::GetFeature(full, sizeof(full));
+  }
   if (got <= 0) return -1;
 
   // 缓存键取回包自身的 id（后端保证 full[0] 就是报告 id）：条目 id 与内容
@@ -96,6 +107,15 @@ int GetFeature(uint8_t* buf, size_t len) {
   detail::CacheStore(full[0], full, static_cast<size_t>(got));
   // 缓存里现在有整份；按调用方容量截出去，同一份报告在线上只跑一次。
   return detail::CacheLookup(buf, len);
+}
+
+bool SetFeature(const uint8_t* data, size_t len) {
+  // 空指针没处读、len < 2 连"首字节是 report id"都装不下；链路没开则控制
+  // 通道上的 send/ioctl 只会拿到一个必然失败的错误。
+  if (data == nullptr || len < 2 || !detail::IsOpen()) return false;
+
+  std::lock_guard<std::mutex> lock(control_mutex);
+  return detail::SetFeature(data, len);
 }
 
 bool StartThreads(const Handlers& handlers) {

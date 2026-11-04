@@ -3,7 +3,7 @@
  * @brief bt 的裸 L2CAP 后端：自己走 HIDP，只实现 §A 接缝，BlueZ 只管底层链路
  *
  * 两条 AF_BLUETOOTH/L2CAP 通道按顺序打开，对齐上游 DS5Dongle 固件的做法：
- * - PSM 0x11 — HIDP 控制通道：GET_REPORT / SET_PROTOCOL；
+ * - PSM 0x11 — HIDP 控制通道：GET_REPORT / SET_REPORT / SET_PROTOCOL；
  * - PSM 0x13 — HIDP 中断通道：INPUT / OUTPUT 报告数据报。
  *
  * 分工切在 L2CAP 这层：BlueZ 仍然负责 ACL 与配对，本项目只把两个 PSM 抢
@@ -12,7 +12,7 @@
  * 把 PSM 重新 claim 走；Close() 再把 profile 还回去。
  *
  * HIDP framing 全部在本文件内消化：Read() 剥 0xA1，Write() 补 0xA2，控制
- * 通道的事务头（0x43/0xA3）只在这里出现。建链先关后开、feature 缓存与预取
+ * 通道的事务头（0x43/0x53/0xA3）只在这里出现。建链先关后开、feature 缓存与预取
  * 都在门面那一层（bt_link.cpp）；本文件的 Write() 一步都不等，开链末尾的
  * 0x32 唤醒报告也由本文件自己补发。
  */
@@ -518,7 +518,7 @@ ssize_t ControlGetReport(uint8_t report_id, uint8_t* reply_buf,
 }  // namespace
 
 // ---------------------------------------------------------------------------
-// §A 后端接缝：本文件唯一对外负责的东西（bt_detail.h 里那 7 个符号）
+// §A 后端接缝：本文件唯一对外负责的东西（bt_detail.h 里那 8 个符号）
 // ---------------------------------------------------------------------------
 
 namespace bt::detail {
@@ -753,6 +753,39 @@ int GetFeature(uint8_t* buf, size_t len) {
   const size_t copied = std::min(static_cast<size_t>(n) - 1, len);
   memcpy(buf, reply + 1, copied);
   return static_cast<int>(copied);
+}
+
+/**
+ * @brief 在控制通道上发一份 feature 报告（HIDP SET_REPORT），不等应答。
+ *
+ * 帧形如 `[0x53][report id][报告体]`：调用方给的 @p data 已经是完整线上
+ * 形态，这里只补 1 字节事务头。手柄对 SET_REPORT 不回 0xA3；即便它回一个
+ * HIDP HANDSHAKE，下一次 GET_REPORT 也会把它当无关控制包丢弃。
+ *
+ * @param data 完整报告，data[0] 是 report id。
+ * @param len  字节数，必须 >= 2。
+ * @return 整帧发出 true；控制通道没开、参数不合法、帧超过本文件缓冲或
+ *         send() 短写/报错 false。
+ * @note 同步写控制通道；调用方（门面）已用互斥锁与 GET 串行化。
+ */
+bool SetFeature(const uint8_t* data, size_t len) {
+  if (ctrl_fd < 0) return false;
+  if (data == nullptr || len < 2) return false;
+
+  // 512B 与 GetFeature 的回包缓冲同量级：本模块会用到的 feature 报告远短于此。
+  uint8_t frame[512];
+  if (len + 1 > sizeof(frame)) return false;
+  frame[0] = core::protocol::kHidpSetReport;
+  std::memcpy(frame + 1, data, len);
+
+  const ssize_t n = ::send(ctrl_fd, frame, len + 1, MSG_NOSIGNAL);
+  if (n != static_cast<ssize_t>(len + 1)) {
+    DS5DUMMY_LOG(ERROR, "control SET 0x{:02X}: send() failed: {} (errno={})",
+          data[0], n < 0 ? strerror(errno) : "short write", errno);
+    return false;
+  }
+  DS5DUMMY_LOG(INFO, "control SET 0x{:02X} sent ({} bytes)", data[0], len);
+  return true;
 }
 
 int Fd() { return intr_fd; }

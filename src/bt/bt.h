@@ -20,7 +20,9 @@
  * @note 线程模型：进程级单实例，一个 worker 进程服务一只手柄。
  *       Open()/Close()/StartThreads()/StopThreads() 只由 worker 主线程调用；
  *       GetFeature() 由 usb 的 ep0 线程调用（缓存未命中时会同步等一次链路
- *       往返）；PostOutput() 非阻塞，任何线程可调用，Handlers 的两个回调则
+ *       往返）；SetFeature() 同样同步写控制通道，与 GetFeature 由一把锁串行
+ *       化，因此调用方线程会被一次写占用；
+ *       PostOutput() 非阻塞，任何线程可调用，Handlers 的两个回调则
  *       在传输线程上执行。链路就绪后需要的 0x32 唤醒报告由 L2CAP 后端在
  *       Open() 内部自己补发，门面不提供绕过队列的直发口。
  */
@@ -90,6 +92,24 @@ void Close();
  * @see bt::Open() —— 建链成功后批量预取常用的几份，走的是同一份缓存。
  */
 int GetFeature(uint8_t* buf, size_t len);
+
+/**
+ * @brief 往手柄写一份 feature 报告（控制通道 SET_REPORT），不等应答。
+ *
+ * 与 PostOutput 的区别是走的通道和帧格式：这里进控制通道、用 HIDP
+ * SET_REPORT 的 `[0x53]` 事务头，不是中断通道上的普通输出报告，也不经过
+ * 发送队列。@p data 必须已经是完整线上形态（首字节 report id + 尾部 CRC），
+ * 本层不补帧、不算 CRC、不改任何字节。
+ *
+ * @param data 完整报告，data[0] 是 report id。
+ * @param len  @p data 的字节数，必须 >= 2。
+ * @return 已整份发出 true；链路没开、参数不合法或写失败 false。
+ * @note 同步写控制通道，可能短暂阻塞调用线程。与 ep0 线程上现取的
+ *       GetFeature 由模块内一把互斥锁串行化，两份请求不会在控制通道上交错。
+ *       手柄不回应答，返回 true 只代表"已交给链路"。
+ * @see bridge::PowerOff() —— 用它把冻结的 0x08 报告发给手柄，让它自己关机。
+ */
+bool SetFeature(const uint8_t* data, size_t len);
 
 // ---------------------------------------------------------------------------
 // 传输线程与输出队列

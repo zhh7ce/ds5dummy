@@ -57,7 +57,10 @@ inline constexpr size_t kBtAudioReportSize = 398;
 inline constexpr size_t kBtWakeReportSize = 142;
 
 // DualSense feature reports. 只有 0x09（反序 BD_ADDR）和 0x20（出厂日期块）
-// 的字节会被本项目解释；0x22 与 0x05 连接时预取后按不透明载荷缓存。
+// 的字节会被本项目解释；0x22 与 0x05 连接时预取后按不透明载荷缓存。0x08
+// 方向相反：由本项目主动 SET，用来让手柄自己关机，不在预取清单里。
+/// feature 报告 0x08：蓝牙控制（payload[0] = 0x01 开 / 0x02 关）。
+inline constexpr uint8_t kFeatureReportIdBluetooth = 0x08;
 /// feature 报告 0x09：设备 MAC，payload 是反序 BD_ADDR。
 inline constexpr uint8_t kFeatureReportIdMac = 0x09;
 /// feature 报告 0x20：出厂构建日期块。
@@ -74,6 +77,9 @@ inline constexpr uint8_t kHidpDataIn = 0xA1;
 inline constexpr uint8_t kHidpDataOut = 0xA2;
 /// HIDP CONTROL 事务：GET_REPORT（feature 类型）。
 inline constexpr uint8_t kHidpGetReport = 0x43;
+/// HIDP CONTROL 事务：SET_REPORT。帧形如 `[0x53][report id][payload]`，
+/// 手柄不回应答——发出去即算完成。
+inline constexpr uint8_t kHidpSetReport = 0x53;
 /// HIDP feature 报告数据帧头，用于辨认控制通道上的 GET_REPORT 应答。
 inline constexpr uint8_t kHidpFeatureReply = 0xA3;
 

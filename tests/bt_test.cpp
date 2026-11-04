@@ -9,6 +9,9 @@
 
 #include <gtest/gtest.h>
 
+#include <array>
+#include <cstdint>
+
 #include "bt/bt.h"
 #include "bt/bt_detail.h"
 
@@ -16,4 +19,14 @@
 TEST(BtBackend, NotOpenBeforeConnect) {
   // 本测试进程从不调 bt::Open，后端全局 fd 保持初值 -1。
   EXPECT_FALSE(bt::detail::IsOpen());
+}
+
+// 链路没开时 SetFeature 也必须拒绝：控制通道不存在，不能把报告"发"进虚空后
+// 报告成功。缓冲区即使合法也一样——判据是 IsOpen，不是参数形态。
+TEST(BtBackend, SetFeatureFailsWhenClosed) {
+  std::array<uint8_t, 48> report{};
+  report[0] = 0x08;
+  report[1] = 0x02;
+  EXPECT_FALSE(bt::SetFeature(report.data(), report.size()));
+  EXPECT_FALSE(bt::SetFeature(nullptr, 0));
 }

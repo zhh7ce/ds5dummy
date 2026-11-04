@@ -4,7 +4,7 @@
  *
  * 本头文件只在 `src/bt/` 内部使用（模块自己的单测是唯一外部读者）。按内容分三段：
  *
- * - **§A 后端接缝**：一个后端要提供的全部 7 个原语。链接期只编进 `bt_l2cap.cpp`
+ * - **§A 后端接缝**：一个后端要提供的全部 8 个原语。链接期只编进 `bt_l2cap.cpp`
  *   或 `bt_hidraw.cpp` 之一（见 CMake 的 BT_BACKEND），所以这一组符号就是后端
  *   与共享层（`bt_link.cpp`、`bt_plane.cpp`、`bt_rx.cpp`、`bt_tx.cpp`）之间
  *   唯一的接缝。上层只见 `bt.h`，看不到这里。
@@ -139,6 +139,23 @@ IoResult Write(const uint8_t* data, size_t len);
  *       由内核决定何时返回。
  */
 int GetFeature(uint8_t* buf, size_t len);
+
+/**
+ * @brief 上线 SET 一份 feature 报告，**不等应答**。
+ *
+ * L2CAP 在控制通道上发 `[0x53][report id + 报告体]`；hidraw 用
+ * HIDIOCSFEATURE(len) 把整份报告交给内核。两条路径的 @p data 都已经是完整
+ * 线上形态：首字节 report id，尾部 4 字节 CRC——后端不补帧、不算 CRC。
+ *
+ * 手柄对 SET_REPORT 不回应答，所以"发出去"就是全部语义；迟到的 HIDP
+ * HANDSHAKE（若有）由下一次 GET_REPORT 当作无关控制包丢弃。
+ *
+ * @param data 完整报告，data[0] 是 report id。
+ * @param len  @p data 的字节数，必须 >= 2。
+ * @return 已整份发出 true；链路没开、参数不合法、短写或后端报错 false。
+ * @note 会在调用线程上同步写控制通道；与并发的 GetFeature 由门面串行化。
+ */
+bool SetFeature(const uint8_t* data, size_t len);
 
 // ---------------------------------------------------------------------------
 // §B feature 缓存：只有共享层（bt_link.cpp）与模块单测可用，后端不得触碰

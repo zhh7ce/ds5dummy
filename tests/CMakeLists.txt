@@ -18,6 +18,7 @@ add_executable(ds5dummy_tests
     fake_mac_test.cpp
     audio_report_test.cpp
     mic_report_test.cpp
+    power_report_test.cpp
     audio_identity_test.cpp
     test_dump_sink.cpp
     handoff_test.cpp

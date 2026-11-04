@@ -27,6 +27,7 @@
 #include "bridge/audio_report.h"
 #include "bridge/fake_mac.h"
 #include "bridge/mic_report.h"
+#include "bridge/power_report.h"
 #include "bridge/state_report.h"
 #include "bridge/usb_report.h"
 #include "bt/bt.h"
@@ -283,6 +284,18 @@ void OnBtInput(const uint8_t* data, size_t len) {
   uint8_t report[core::protocol::kUsbInputReportSize];
   detail::BuildUsbInputReport(report, data + 2);
   usb::PostInputReport(report, sizeof(report));
+}
+
+bool PowerOff() {
+  // 整包冻结：feature 报告的 CRC 已写死在字节里，控制通道只负责原样送出。
+  if (!bt::SetFeature(detail::kPowerOffReport, detail::kPowerOffReportSize)) {
+    DS5DUMMY_LOG(ERROR,
+          "[bridge] power-off feature report 0x08 was not sent; the controller "
+          "stays on");
+    return false;
+  }
+  DS5DUMMY_LOG(INFO, "[bridge] Controller asked to power off (feature 0x08)");
+  return true;
 }
 
 void SetMicSink(MicSink sink) {

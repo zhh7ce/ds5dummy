@@ -116,6 +116,23 @@ void OnUsbOutput(const uint8_t* data, size_t len);
 void OnBtInput(const uint8_t* data, size_t len);
 
 /**
+ * @brief 让手柄自己关机：发一份整包冻结的 0x08 feature 报告。
+ *
+ * 报告字节在 detail::kPowerOffReport（48 字节，payload[0]=0x02 关，尾部
+ * CRC 已含）。它走控制通道的 SET_REPORT，不进发送队列，因此调用路径是
+ * bt::SetFeature 而不是 bt::PostOutput；手柄不回应答，返回 true 只代表
+ * 报告已交给链路。
+ *
+ * @return 报告已发出 true；链路没开或发送失败 false。
+ * @warning 同步写控制通道，可能短暂阻塞调用线程（与 GetFeature 共用一把锁，
+ *          对方可能正在等手柄的 feature 应答）；不要从 bt/usb 的传输线程上
+ *          调用。
+ * @see detail::kPowerOffReport —— 冻结的 48 字节报告。
+ * @see bt::SetFeature() —— 控制通道上的 SET_REPORT。
+ */
+bool PowerOff();
+
+/**
  * @brief 上行麦克风帧的去处：bridge 把纯 Opus 包体交给谁。
  *
  * @param packet core::protocol::kMicOpusSize（71）字节的单声道 Opus 包体，

@@ -39,7 +39,7 @@ Entertainment / DualSense Wireless Controller"，DualSense Edge 是 `054c:0df2`
 | `src/daemon/` | 进程形态：`config`（YAML 解析 + 加固读取）、`discovery`（hidraw sysfs → 手柄 MAC）、`identity`（sd-login 会话 → worker 身份）、`options`（Manager→worker 的内部交接参数编解码）、`shutdown`（信号）、`manager`（root 多槽监督循环）、`worker`（数据面宿主）、`handoff`（fd 交接）、`privdrop`（降权执行） |
 | `src/usb/` | `gadget_setup`（configfs 装配 + mount）、`ffs_device`（端点 fd 机制）、`usb`（门面 + 线程起停）、`usb_plane`（共享运行状态）、`usb_inout`（IN/OUT 两条循环）、`usb_ep0`（ep0 循环 + Ep0Responder 实现） |
 | `src/bt/` | `bt`（门面）、`bt_link`（生命周期/缓存策略/线程起停）、`bt_plane`（共享运行状态）、`bt_rx`/`bt_tx`（两条传输线程）、`bt_detail`（后端接缝）、`bt_l2cap`/`bt_hidraw`（二选一的后端 TU） |
-| `src/bridge/` | `bridge`（转发策略）、`state_report`（63 字节输出状态影子）、`fake_mac`（0x09 合成）、`usb_report`/`audio_report`/`mic_report`（三种报告的字节布局） |
+| `src/bridge/` | `bridge`（转发策略）、`state_report`（63 字节输出状态影子）、`fake_mac`（0x09 合成）、`usb_report`/`audio_report`/`mic_report`/`power_report`（四种报告的字节布局） |
 | `src/audio/` | 双向音频链：`audio`（门面）、`audio_identity`（sink/source 共用的节点名与 `device.*` 硬件身份）、`audio_port`（sink/source 共用的建流骨架与断线退避重建）、`audio_sink`（PipeWire 4 通道 sink）、`audio_encoder`（SRC + Opus + 编码线程）、`audio_decoder`（Opus 解码线程）、`audio_source`（单声道虚拟麦克风 Source） |
 | `tests/` | googletest 单测（`ctest`，无 root、无硬件） |
 | `tools/` | 诊断程序：`spike_l2cap`、`spike_rumble`、`mini_gadget`、`audio_dump`(+`dump_sink.*`)、几个 `spike_*` 特权/交接探针；`win_audio_probe.cpp` 是唯一的 Windows 侧探针（mingw 交叉编译，在 Wine/Proton 前缀里读 MMDevice 与 setupapi，不参与 Linux 构建） |
@@ -143,7 +143,7 @@ worker（`src/daemon/worker.cpp`）认领 fd（`usb::Adopt`）、建蓝牙链路
   它是否越过了门面边界。
 - 每个模块的门面是 namespace 自由函数，**进程级单实例**（一个 worker 服务一只手柄）。
   多手柄靠一个 Manager 起多个 worker 进程（每站一份 bt/usb/audio 单实例）。
-- 不该外泄的实现细节进 `<mod>::detail`：例如 `bt::detail` 放后端契约（§A 7 个原语）、
+- 不该外泄的实现细节进 `<mod>::detail`：例如 `bt::detail` 放后端契约（§A 8 个原语）、
   feature 缓存（§B）、跨后端共享字节（§C）；`usb::detail` 放 configfs 机制层
   （`gadget_setup.h`）与端点 fd 类（`FfsDevice`）。业务模块只走门面，唯一的例外是
   `tools/mini_gadget`（诊断程序，故意绕开门面直接驱动这一层）。
@@ -192,10 +192,11 @@ Manager 进程只有主线程（+loguru）。
 
 ## 6. bt —— 蓝牙传输层
 
-门面（`src/bt/bt.h`）对外只有：`Open`、`Close`、`GetFeature`、`StartThreads`、
-`StopThreads`、`PostOutput`、`Handlers`，加三个队列尺寸常量；`Stats`/`StatsWindow`
-只在 `DS5DUMMY_DEBUG` 构建里存在。
-输出报告只有一条路：`PostOutput` 入队，写线程排空。
+门面（`src/bt/bt.h`）对外只有：`Open`、`Close`、`GetFeature`、`SetFeature`、
+`StartThreads`、`StopThreads`、`PostOutput`、`Handlers`，加三个队列尺寸常量；
+`Stats`/`StatsWindow` 只在 `DS5DUMMY_DEBUG` 构建里存在。
+输出报告只有一条路：`PostOutput` 入队，写线程排空。`SetFeature` 是唯一的例外：它
+不进队列、直写控制通道、不等应答，与 ep0 线程上的 `GetFeature` 由模块内一把锁串行化。
 
 **IoResult 契约**（后端接缝的返回类型，声明在 `bt_detail.h`，门面不暴露）：
 `kOk`/`kAgain`（同一份字节原样重试安全）/`kTruncated`（仅读侧，整份丢）/`kClosed`
@@ -222,13 +223,14 @@ Manager 进程只有主线程（+loguru）。
   它把 seq 钉死为 1（`0x10` 的高 4 位），与队列路径从 0 起计的编号不连续。裸 L2CAP 上
   没有别的 HID 主机跟手柄说话，不推这一份它不会开始上报；hidraw 后端没有这段代码。
 
-两个后端在链接期二选一（`-DBT_BACKEND=`），只实现 `bt_detail.h` §A 的 7 个原语：
+两个后端在链接期二选一（`-DBT_BACKEND=`），只实现 `bt_detail.h` §A 的 8 个原语：
 
 | | L2CAP（`bt_l2cap.cpp`） | HIDRAW（`bt_hidraw.cpp`） |
 |---|---|---|
 | 链路 | 裸 `AF_BLUETOOTH` L2CAP，自己走 HIDP 组帧：让 BlueZ 拉起 ACL → 释放 HID profile → 抢 PSM 0x11（控制）/0x13（中断）→ 切 report protocol | 内核 hidp/hidraw 建好的 session，打开 `/sys/class/hidraw` 节点 |
 | 开链唤醒 | 末尾补发 142 字节 0x32（冻结数组，`WaitWritable` 5×10 ms 重试） | 无（内核驱动建节点时已初始化过手柄） |
 | feature 取值 | 控制通道 `GET_REPORT`，整段预算 2 s | `HIDIOCGFEATURE` ioctl |
+| feature 写值 | 控制通道 `SET_REPORT`（`[0x53]` 事务头 + 完整报告），不等应答 | `HIDIOCSFEATURE` ioctl（整份报告含 report id 一起交给内核） |
 | 手柄识别 | MAC（BD_ADDR） | VID/PID 匹配真 `054C:0CE6`/`054C:0DF2` 或 DKMS 合成的 `1998:1221`/`1998:1103`，MAC 可选 |
 | MTU/尺寸 | `kWantMtu = 672`、音频帧 `kHidpAudioFrameBytes = 399` | 由内核决定 |
 | 额外依赖 | `pkg_check_modules(BLUEZ)`、`gdbus`（`--timeout 5`）调用 | 无 |
@@ -354,6 +356,11 @@ dummy_hcd 不按它轮询（见上面那段），所以它既不限制也不产�
   WARNING）。flags bit1 时这份 0x31 装的是麦克风帧：`[3..73]` 的 71 字节 Opus 包体交给
   `MicSink`，不发布 USB 输入报告；开关没开、没装 sink 或 `len<74` 时丢弃，这些只写
   `DS5DUMMY_DLOG`（100 Hz，WARNING 会刷屏）。
+- `PowerOff()`：把整包冻结的 48 字节 0x08 feature 报告（`power_report.h`，
+  payload[0]=0x02 关，尾部 CRC 是字节的一部分）经 `bt::SetFeature` 送上控制通道——
+  不进发送队列、不等应答，因此它是 bridge 里唯一同步写链路的入口；调用线程会被这一次
+  写占用，所以它不能在 bt/usb 的传输线程上调用。本提交只交付这个入口，还没有调用它的
+  策略（什么时候该让手柄关机）。
 - `SetMicSink` 装填上行 Opus 包体的去处（生产实现 `audio::OnMicPacket`），必须在
   `bt::StartThreads()` 之前调用；空 sink 表示不接收上行帧。
 - `OnMicOpen`：主机开始/停止录音时把 142 字节的 0x32 状态报告（`mic_report.cpp`，
@@ -467,7 +474,13 @@ dummy_hcd 不按它轮询（见上面那段），所以它既不限制也不产�
 | `kSetStateShadowSize` | 63 | 47 有效 + 16 主机从不发送的 reserved padding，0x36 需要整 63 |
 | `kBtReportSize` / `kBtAudioReportSize` / `kBtWakeReportSize` | 78 / 398 / 142 | BT 三种报告体，均自带尾部 4 B CRC（USB 侧没有 CRC） |
 | `kFeatureReportIds` | `{0x09, 0x20, 0x22, 0x05}` | 建链后预取清单，顺序即预取顺序；只有 0x09（反序 BD_ADDR）和 0x20（出厂日期）的字节会被解释 |
-| `kHidpDataIn/Out`、`kHidpGetReport/SetReport/FeatureReply` | `0xA1/0xA2/0x43/0x53/0xA3` | 协议镜像值；实际使用方在 bt 后端自持同名常量 |
+| `kFeatureReportIdBluetooth` | `0x08` | 方向相反的 feature：由本项目主动 SET，让手柄自己关机，不在预取清单里 |
+| `kHidpDataIn/Out`、`kHidpGetReport/SetReport/FeatureReply` | `0xA1/0xA2/0x43/0x53/0xA3` | 协议镜像值；`0x53` 由 `bt_l2cap.cpp` 的 `SetFeature` 使用，其余的实际使用方在 bt 后端自持同名常量 |
+
+0x08 关机报告的布局：`[0]=0x08 [1]=0x02（关）[2..43]=0 [44..47]=feature CRC32 LE`。
+48 字节 = 描述符里 Report ID 8 的 47 字节 Report Count 加上 report id；CRC 覆盖前 44
+字节（起点是 report id），因为整包没有逐次变化的字段，它冻在
+`bridge/power_report.h` 里，运行期不重算。
 
 0x32 唤醒报告的布局：`[0]=0x32 [1]=0x10 [2]=0x90 [3]=0x3f [4..66]=63B SetStateData
 [67..137]=0 [138..141]=输出报告 CRC`。
@@ -531,7 +544,7 @@ configure 失败是设计选择**——静默退化成 HID-only 会让除了在�
 ## 12. 测试
 
 `tests/CMakeLists.txt` 把被测源文件直接编进一个 `ds5dummy_tests` 二进制，
-`gtest_discover_tests` 让 ctest 看到逐个用例（当前 254 个，两个后端各跑一遍）。
+`gtest_discover_tests` 让 ctest 看到逐个用例（当前 259 个，两个后端各跑一遍）。
 **硬性约束：全部测试必须能在无 root、无手柄的环境下跑** —— 需要特权或硬件的验证是人工
 清单，不进 CI/单测。因此 bt 的测试只覆盖门面到后端的纯转发契约、`tx` 的入队/seq/CRC/
 背压、feature 缓存策略，硬件往返一律不测；`daemon/discovery` 与 `usb` 的测试自己搭临时
@@ -641,3 +654,8 @@ worker 退出）；恢复后见标记就 `systemctl start`。留在 `/run` 的�
     ~253 帧/s，与这里任何一档都不严格对应；要对齐真机取
     `usb_report_interval_ms: 4`，而"到点时端点正忙导致某一格没发出去"的情形没有
     实测过。
+13. 0x08 关机报告与 `bt::SetFeature` 只有单测级证据：字节布局（48 字节、payload[0]=0x02、
+    尾部 feature CRC `0x23A2EFE0`）照协议资料编排，两个后端各写了一遍发送路径，但
+    "手柄收到后自己断电、链路随之断开、Manager 按既有路径拆站"这一段没有实机跑过。
+    hidraw 后端把整份报告交给内核 `HIDIOCSFEATURE`，手柄是否接受还取决于内核 HID
+    驱动对 feature 报告的实现。

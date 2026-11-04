@@ -15,7 +15,7 @@
  *
  * 节点的写路径不看 O_NONBLOCK：写之前的可写判定由调用方用 poll 代劳，
  * 理由写在 Write() 上。
- * @see bt_detail.h —— 本文件要实现的那 7 个符号。
+ * @see bt_detail.h —— 本文件要实现的那 8 个符号。
  */
 
 #include "bt/bt_detail.h"
@@ -127,7 +127,7 @@ int FindDualSenseHidraw(const std::string& want_mac) {
 }  // namespace
 
 // ---------------------------------------------------------------------------
-// §A 后端接缝：本文件唯一对外负责的东西（bt_detail.h 里那 7 个符号）
+// §A 后端接缝：本文件唯一对外负责的东西（bt_detail.h 里那 8 个符号）
 // ---------------------------------------------------------------------------
 
 namespace bt::detail {
@@ -233,6 +233,30 @@ int GetFeature(uint8_t* buf, size_t len) {
     return -1;
   }
   return got;
+}
+
+/**
+ * @brief 用 HIDIOCSFEATURE 写一份 feature 报告；无应答可等。
+ *
+ * @p data 已是完整线上形态（report id + 报告体 + 尾部 CRC）：hidraw 的
+ * feature 写把缓冲区原样交给内核驱动的 SET_REPORT，不会替我们补帧或算 CRC。
+ * 命令号 HIDIOCSFEATURE(len) 把缓冲区大小编码进去，长度必须含 report id。
+ *
+ * @param data 完整报告，data[0] 是 report id。
+ * @param len  字节数，必须 >= 2。
+ * @return 内核接受整份报告 true；节点没开、参数不合法或 ioctl 失败 false。
+ */
+bool SetFeature(const uint8_t* data, size_t len) {
+  if (hidraw_fd < 0) return false;
+  if (data == nullptr || len < 2) return false;
+
+  const int rc = ::ioctl(hidraw_fd, HIDIOCSFEATURE(len), data);
+  if (rc < 0) {
+    DS5DUMMY_LOG(ERROR, "[bt] hidraw: HIDIOCSFEATURE(0x{:02X}) failed: {}", data[0],
+          strerror(errno));
+    return false;
+  }
+  return true;
 }
 
 int Fd() { return hidraw_fd; }
