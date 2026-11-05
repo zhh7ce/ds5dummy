@@ -26,6 +26,8 @@ TEST(Options, Defaults) {
   EXPECT_TRUE(o.host_sysfs_path.empty());
   EXPECT_EQ(o.verbosity, 0);
   EXPECT_EQ(o.bt_wait_s, 60);
+  // 插件配置默认是空的：配置没写 plugins 就等于每个插件用自己的默认值。
+  EXPECT_TRUE(o.plugins.empty());
   EXPECT_EQ(o.usb_report_interval_ms, 1);
   EXPECT_EQ(o.ep0_fd, -1);
   EXPECT_EQ(o.ep_in_fd, -1);
@@ -35,8 +37,9 @@ TEST(Options, Defaults) {
 TEST(Options, ParsesAllInternalFlags) {
   ds5::daemon::Options o = ds5::daemon::internal::ParseArgv(
       {"--worker", "--ep0", "3", "--ep-in", "4", "--ep-out", "5", "--bt-addr",
-       "AA:BB:CC:DD:EE:FF", "--bt-wait", "5", "-v", "DEBUG", "--no-audio",
-       "--usb-edge", "--usb-report-interval-ms", "0"});
+       "AA:BB:CC:DD:EE:FF", "--bt-wait", "5", "--plugin-config",
+       "idle.off_after_minutes=45", "-v",
+       "DEBUG", "--no-audio", "--usb-edge", "--usb-report-interval-ms", "0"});
   EXPECT_TRUE(o.error.empty()) << o.error;
   EXPECT_TRUE(o.worker);
   EXPECT_EQ(o.ep0_fd, 3);
@@ -44,6 +47,8 @@ TEST(Options, ParsesAllInternalFlags) {
   EXPECT_EQ(o.ep_out_fd, 5);
   EXPECT_EQ(o.bt_addr, "AA:BB:CC:DD:EE:FF");
   EXPECT_EQ(o.bt_wait_s, 5);
+  ASSERT_EQ(o.plugins.count("idle.off_after_minutes"), 1u);
+  EXPECT_EQ(o.plugins.at("idle.off_after_minutes"), "45");
   EXPECT_EQ(o.verbosity, 1);  // -v DEBUG 解析成 loguru 的 1
   EXPECT_TRUE(o.no_audio);
   EXPECT_TRUE(o.usb_edge);
@@ -92,6 +97,46 @@ TEST(Options, AcceptsOnlyTheIntervalTable) {
   for (const char* value : {"3", "5", "8", "-1", "0.5", "loud", ""}) {
     ds5::daemon::Options o = ds5::daemon::internal::ParseArgv(
         {"--usb-report-interval-ms", value});
+    EXPECT_FALSE(o.error.empty()) << value;
+  }
+}
+
+// --plugin-config 只定形态：一条一个键、`插件名.键=值`，可重复。值本身是不是
+// 那个插件认得的取值，交接层判不了——它不认识任何插件的键。
+TEST(Options, AcceptsRepeatedPluginConfigEntries) {
+  ds5::daemon::Options o = ds5::daemon::internal::ParseArgv({
+      "--plugin-config", "idle.off_after_minutes=45",
+      "--plugin-config", "idle.verbose=1",
+      "--plugin-config", "button-map.left_stick=trigger"});
+  EXPECT_TRUE(o.error.empty()) << o.error;
+  EXPECT_EQ(o.plugins.size(), 3u);
+  EXPECT_EQ(o.plugins.at("idle.off_after_minutes"), "45");
+  EXPECT_EQ(o.plugins.at("idle.verbose"), "1");
+  EXPECT_EQ(o.plugins.at("button-map.left_stick"), "trigger");
+
+  // 值里再出现 '=' 不影响：分隔符只取第一个，剩下的整段是值。
+  ds5::daemon::Options extra_eq = ds5::daemon::internal::ParseArgv(
+      {"--plugin-config", "idle.formula=a==b"});
+  EXPECT_TRUE(extra_eq.error.empty()) << extra_eq.error;
+  EXPECT_EQ(extra_eq.plugins.at("idle.formula"), "a==b");
+
+  // 同一个键出现多条：最后一条赢（正常路径由配置重建，不会重复，这条宽容只服务
+  // 手工拼出来的命令行）。
+  ds5::daemon::Options twice = ds5::daemon::internal::ParseArgv(
+      {"--plugin-config", "idle.off_after_minutes=10", "--plugin-config",
+       "idle.off_after_minutes=20"});
+  EXPECT_TRUE(twice.error.empty()) << twice.error;
+  EXPECT_EQ(twice.plugins.at("idle.off_after_minutes"), "20");
+}
+
+// 形态不合的写法一律按参数错误收掉：`.` 与 `=` 是分隔符，名字里不能出现它们，
+// 空插件名、空键名与空值同样没有第二种含义。
+TEST(Options, RejectsMalformedPluginConfig) {
+  for (const char* value : {"idle", "idle.key", "=30", "idle.=30", ".key=30",
+                            "idle..key=30", "idle.key=", "idle.odd.key=30",
+                            "idle.name with space=30", "idle.键=30"}) {
+    ds5::daemon::Options o =
+        ds5::daemon::internal::ParseArgv({"--plugin-config", value});
     EXPECT_FALSE(o.error.empty()) << value;
   }
 }
@@ -199,6 +244,10 @@ TEST(Options, WorkerArgvRoundTripsWithOptionalFields) {
   src.bt_addr = "AA:BB:CC:DD:EE:FF";
   src.verbosity = 1;
   src.bt_wait_s = 42;
+  // 插件配置带两个插件、其中一个两个键：往返要把扁平的 argv 原样还原。
+  src.plugins["idle.off_after_minutes"] = "45";
+  src.plugins["idle.verbose"] = "1";
+  src.plugins["button-map.left_stick"] = "trigger";
   src.no_audio = true;
   src.usb_edge = true;
   src.usb_report_interval_ms = 4;
@@ -230,6 +279,7 @@ TEST(Options, WorkerArgvRoundTripsWithOptionalFields) {
   EXPECT_EQ(got.bt_addr, src.bt_addr);
   EXPECT_EQ(got.verbosity, src.verbosity);
   EXPECT_EQ(got.bt_wait_s, src.bt_wait_s);
+  EXPECT_EQ(got.plugins, src.plugins);
   EXPECT_EQ(got.no_audio, src.no_audio);
   EXPECT_EQ(got.usb_edge, src.usb_edge);
   EXPECT_EQ(got.usb_report_interval_ms, src.usb_report_interval_ms);
@@ -254,6 +304,7 @@ TEST(Options, WorkerArgvRoundTripsDefaults) {
     EXPECT_NE(arg, "--no-audio") << "默认的 no_audio 不应出现在 argv 里";
     EXPECT_NE(arg, "--usb-edge") << "普通 DualSense 站不应写出该参数";
     EXPECT_NE(arg, "--usb-report-interval-ms") << "默认间隔不应写出该参数";
+    EXPECT_NE(arg, "--plugin-config") << "空插件配置不应写出任何条目";
     EXPECT_NE(arg, "--haptics-gain") << "默认增益 1.0 不应出现在 argv 里";
     EXPECT_NE(arg, "--speaker-gain") << "默认增益 2 不应出现在 argv 里";
     EXPECT_NE(arg, "--sysfs-path") << "没解析到设备目录时不应写出该参数";
@@ -265,6 +316,7 @@ TEST(Options, WorkerArgvRoundTripsDefaults) {
   EXPECT_TRUE(got.bt_addr.empty());
   EXPECT_TRUE(got.host_sysfs_path.empty());
   EXPECT_EQ(got.bt_wait_s, 60);
+  EXPECT_TRUE(got.plugins.empty());
   EXPECT_FALSE(got.no_audio);
   EXPECT_FALSE(got.usb_edge);
   EXPECT_EQ(got.usb_report_interval_ms, 1);

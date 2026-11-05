@@ -30,8 +30,10 @@
 #include "core/debug.h"
 #include "core/device/descriptors.h"
 #include "daemon/config.h"
+#include "daemon/identity.h"
 #include "daemon/shutdown.h"
 #include "loguru.hpp"
+#include "plugin/plugin.h"
 #include "usb/usb.h"
 
 namespace ds5::daemon {
@@ -96,6 +98,28 @@ void RestoreXdgRuntimeDir() {
         static_cast<unsigned>(target));
 }
 
+/**
+ * @brief 把 HOME 修到降权后这个 uid 的家目录。
+ * @details Manager 由 systemd 以 root 起（单元里 `User=root`），systemd 按
+ *          passwd 给 root 填 HOME=/root；privdrop 只换 uid/gid，execv 原样
+ *          继承环境。用户插件目录是 `$HOME/.config/ds5dummy/plugins`
+ *          （plugin::Directories），所以 HOME 必须指回拿配置的那个用户，
+ *          否则会在 root 家目录下扫插件。修法与 RestoreXdgRuntimeDir 同一个
+ *          位置、同一条理由：环境跟着身份走。
+ * @note 副作用：覆盖 HOME。查不到 passwd 记录时保留原值并记 WARNING——之后
+ *       plugin::Directories 仍会按继承来的 HOME 派生用户插件目录，也就是在
+ *       root 的家目录下扫。
+ */
+void RestoreHome() {
+  std::string home;
+  std::string why;
+  if (!LookupHome(::getuid(), home, why)) {
+    DS5DUMMY_LOG(WARNING, "[worker] cannot restore HOME: {}", why);
+    return;
+  }
+  ::setenv("HOME", home.c_str(), 1);
+}
+
 #if DS5DUMMY_DEBUG
 /**
  * @brief 5 秒统计窗口的上一次快照，用来把累计计数器差分成窗口值。
@@ -109,6 +133,36 @@ struct StatsWindow {
       std::chrono::steady_clock::now();  ///< 上次成窗时刻，单调钟。
 };
 #endif
+
+/**
+ * @brief 插件日志的去处：把 C 边界的级别映射到 loguru 的等级名。
+ * @param level DS5_LOG_* 之一。
+ * @param message 插件写好的文本；nullptr 当成空串。
+ */
+void LogForPlugin(int level, const char* message) {
+  const char* text = message != nullptr ? message : "";
+  switch (level) {
+    case DS5_LOG_ERROR:
+      DS5DUMMY_LOG(ERROR, "{}", text);
+      return;
+    case DS5_LOG_WARNING:
+      DS5DUMMY_LOG(WARNING, "{}", text);
+      return;
+    case DS5_LOG_DEBUG:
+      DS5DUMMY_DLOG(1, "{}", text);
+      return;
+    default:
+      DS5DUMMY_LOG(INFO, "{}", text);
+      return;
+  }
+}
+
+/**
+ * @brief 插件的关机执行器：把 bridge::PowerOff 的 bool 翻成 C 边界的 0/1。
+ * @return 报告送上控制通道 1；链路不可用 0。
+ * @note 经 plugin::OnTick 在 worker 主循环上调用，因此不在传输线程上碰控制通道。
+ */
+int PowerOffForPlugin() { return bridge::PowerOff() ? 1 : 0; }
 
 /**
  * @brief 一个 worker 进程的生命周期持有者。
@@ -204,6 +258,10 @@ class WorkerSession {
                            std::chrono::seconds(kAudioRetrySeconds);
         }
       }
+      // 插件心跳：100 ms 一轮。这也是插件唯一被允许动链路的时刻（见
+      // plugin/plugin_api.h 里 power_off 的线程约束），所以把它排在主循环里，
+      // 而不是任何一条传输线程上。
+      plugin::OnTick();
 #if DS5DUMMY_DEBUG
       LogStatsWindow();
 #endif
@@ -275,6 +333,15 @@ class WorkerSession {
     }
 
     DS5DUMMY_LOG(INFO, "[worker] Connected — bridging BT ↔ USB");
+    // 装载插件，再把它交出的输入钩子注册进 bridge：bridge 不认识 plugin，只持有
+    // 一组裸函数指针。位置卡在传输线程之前——注册完的钩子会马上开始在 bt 读线程
+    // 上被调。worker 不认识任何插件名，也不认识任何键名：整份交下去就完事。
+    for (const plugin::StateInHook hook :
+         plugin::Start(options_.plugins, plugin_host_,
+                       plugin::Directories())) {
+      bridge::AddStateHook(hook);
+    }
+
     // 起线程的顺序照着数据流排，让每个生产方开始产出时它的消费方已经在跑：
     // bt 传输线程 → audio（产出经 bridge 进发送队列）→ usb 三条阻塞线程。
     bt::Handlers bt_handlers;
@@ -375,6 +442,12 @@ class WorkerSession {
       bt::StopThreads();
       bt_started_ = false;
     }
+    // 插件最后收：OnStateIn 经 bridge 的钩子跑在 bt 读线程、OnTick 跑在 worker
+    // 主循环，实例被清掉之前必须先 join 传输线程并撤掉 bridge 里的注册，否则就是
+    // 在释放的同时还有钩子在跑。Start 失败时可能一个插件都没装过，这三步因此是
+    // 空调用。
+    bridge::ClearStateHooks();
+    plugin::Stop();
     bt::Close();
     usb::Close();
   }
@@ -452,6 +525,9 @@ class WorkerSession {
 
   const Options& options_;
   usb::Endpoints endpoints_;
+  /// 交给插件的宿主能力表；两个执行器都同步碰链路，只能从 OnTick 调用。
+  const ds5Host plugin_host_{kPluginAbiVersion, &LogForPlugin,
+                             &PowerOffForPlugin};
   std::atomic<bool> stop_all_{false};       ///< 链路断/ep0 关：主循环退出请求。
   std::atomic<bool> audio_failed_{false};   ///< 音频线程的一次性失效通知。
 #if DS5DUMMY_DEBUG
@@ -469,7 +545,7 @@ class WorkerSession {
  * @brief worker 进程主体：配置日志、修运行环境、跑一个 WorkerSession。
  * @param options worker 侧配置（ep*_fd 为本进程已就位的 fd 号）。
  * @return WorkerSession 的退出码。
- * @note 副作用：setenv XDG_RUNTIME_DIR、起线程、开 socket。
+ * @note 副作用：setenv HOME/XDG_RUNTIME_DIR、起线程、开 socket。
  * @see RunManager。
  */
 int RunWorker(const Options& options) {
@@ -478,8 +554,9 @@ int RunWorker(const Options& options) {
         static_cast<long>(::getgid()), static_cast<long>(::getegid()),
         static_cast<long>(::getpid()));
 
-  // 身份已经落定，环境跟着身份走：先修 XDG_RUNTIME_DIR，后面任何模块连桌面
-  // 服务都直接用现成的环境。
+  // 身份已经落定，环境跟着身份走：先修 HOME 与 XDG_RUNTIME_DIR——用户插件目录
+  // 按 HOME 派生，连桌面服务也直接用现成的环境。
+  RestoreHome();
   RestoreXdgRuntimeDir();
 
   usb::Endpoints endpoints{options.ep0_fd, options.ep_in_fd, options.ep_out_fd};

@@ -124,6 +124,24 @@ void ReportChildExit(int status) {
 }
 
 /**
+ * @brief 把插件配置写成一行面向横幅的文本。
+ * @param settings 本站生效的扁平插件配置。
+ * @return 形如 "idle.off_after_minutes=30, other.key=1" 的单行文本；空配置返回
+ *         "(none)"。
+ * @details 只列用户在配置里写了的键，不列插件自己的默认值：Manager 不认识任何
+ *          键名，也不知道哪个插件用了什么。生效值的另一半在插件自己的启动日志
+ *          里（worker 侧的 [idle] 那行）。Settings 有序，遍历顺序即横幅顺序。
+ */
+std::string PluginSettingsText(const plugin::Settings& settings) {
+  std::string text;
+  for (const auto& [key, value] : settings) {
+    if (!text.empty()) text += ", ";
+    text += key + "=" + value;
+  }
+  return text.empty() ? "(none)" : text;
+}
+
+/**
  * @brief 把一组手柄级设置打进启动横幅。
  * @param label 行的标签："defaults"（global 层）或具体 MAC。
  * @param settings 生效设置。
@@ -146,6 +164,10 @@ void PrintControllerSettings(const std::string& label,
          label.c_str(), settings.audio ? "on" : "off",
          static_cast<double>(settings.haptics_gain), settings.speaker_gain,
          interval_text, UsbModelName(settings.usb_model), settings.bt_wait_s);
+  // 插件的键单列一行：它是用户写的，Manager 只负责原样搬下去，横幅把这站最终
+  // 会交给 worker 的那些键摊开，配置写没写中一眼就能看出来。
+  printf("  %s plugins: %s\n", label.c_str(),
+         PluginSettingsText(settings.plugins).c_str());
 }
 
 /**
@@ -389,6 +411,9 @@ class ManagerSupervisor {
     worker_options.worker = true;
     worker_options.bt_addr = mac;
     worker_options.bt_wait_s = settings.bt_wait_s;
+    // 插件配置整份交给这一站：Manager 不读里面的键，取值对不对由插件自己在
+    // worker 侧判。空配置等于没写，插件用各自的默认值。
+    worker_options.plugins = settings.plugins;
     worker_options.no_audio = !settings.audio;
     // worker 的 ep0 要应答与自己身份相符的 report descriptor：型号必须跟着
     // 这一站走，不能像默认值那样一律按普通 DualSense。

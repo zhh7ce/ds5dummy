@@ -31,6 +31,10 @@ add_executable(ds5dummy_tests
     usb_test.cpp
     usb_report_test.cpp
     usb_ep0_test.cpp
+    bridge_hook_test.cpp
+    plugin_test.cpp
+    plugin_idle_test.cpp
+    plugin_util_test.cpp
     ../src/daemon/options.cpp
     ../src/daemon/config.cpp
     ../src/daemon/discovery.cpp
@@ -49,6 +53,9 @@ add_executable(ds5dummy_tests
     ../src/bt/bt_rx.cpp
     ../src/bt/bt_tx.cpp
     ../src/bt/bt_detail.cpp
+    ../src/plugin/plugin.cpp
+    ../src/plugin/plugin_loader.cpp
+    ../plugin/idle/idle.cpp
     ../tools/dump_sink.cpp
     ../src/daemon/handoff.cpp
     ../src/daemon/privdrop.cpp
@@ -67,6 +74,8 @@ target_compile_definitions(ds5dummy_tests PRIVATE
     LOGURU_USE_FMTLIB=1
     DS5DUMMY_DEBUG=1
     DS5DUMMY_DEBUG_LOG=0
+    # 只给测试存在的钩子（idle 的时间拨表）在生产构建里不编进来。
+    DS5DUMMY_TESTING=1
     # 用户配置模板的路径：用例把这份发布文件解析出来，和内置默认层逐项比对，
     # 这样"模板宣告的默认值"与"家目录没有配置时的生效值"不会各走各的。
     DS5DUMMY_USER_TEMPLATE="${CMAKE_CURRENT_SOURCE_DIR}/../pkg/user-config.example.yaml")
@@ -85,7 +94,45 @@ target_link_libraries(ds5dummy_tests PRIVATE
     # 硬件身份（audio_identity_test.cpp）只写内存里的 pw_properties 字典，不连
     # daemon，但那些符号来自 libpipewire。
     PkgConfig::PIPEWIRE
+    # plugin_loader.cpp 用 dlopen/dlsym 装载 .so 插件，测试走的是同一条路。
+    ${CMAKE_DL_LIBS}
 )
+
+# 插件装载测试需要一个真的 .so：夹具按 plugin_api.h 单独编译成 MODULE，不链接
+# 测试二进制，也不链宿主——它证明的正是"第三方只拿得到那份 C 边界"。
+add_library(ds5dummy_plugin_probe MODULE fixtures/plugin_probe.cpp)
+set_target_properties(ds5dummy_plugin_probe PROPERTIES
+    PREFIX "" SUFFIX ".so" POSITION_INDEPENDENT_CODE ON)
+target_include_directories(ds5dummy_plugin_probe PRIVATE ../src)
+
+# 同一份源码再编一份导出宿主不认的 ABI 版本号：装载点必须拒绝它。
+add_library(ds5dummy_plugin_probe_bad_abi MODULE fixtures/plugin_probe.cpp)
+set_target_properties(ds5dummy_plugin_probe_bad_abi PROPERTIES
+    PREFIX "" SUFFIX ".so" POSITION_INDEPENDENT_CODE ON)
+target_include_directories(ds5dummy_plugin_probe_bad_abi PRIVATE ../src)
+target_compile_definitions(ds5dummy_plugin_probe_bad_abi PRIVATE
+    DS5_PLUGIN_TEST_ABI_VERSION=2)
+
+# 同一份源码再编一份不带标记节的：导出名与版本号都对，但装载器必须在 dlopen
+# 之前就把它当成"不是我们的插件"跳过。
+add_library(ds5dummy_plugin_probe_no_marker MODULE fixtures/plugin_probe.cpp)
+set_target_properties(ds5dummy_plugin_probe_no_marker PROPERTIES
+    PREFIX "" SUFFIX ".so" POSITION_INDEPENDENT_CODE ON)
+target_include_directories(ds5dummy_plugin_probe_no_marker PRIVATE ../src)
+target_compile_definitions(ds5dummy_plugin_probe_no_marker PRIVATE
+    DS5DUMMY_TEST_NO_MARKER=1)
+
+add_dependencies(ds5dummy_tests ds5dummy_plugin_probe
+                                 ds5dummy_plugin_probe_bad_abi
+                                 ds5dummy_plugin_probe_no_marker
+                                 ds5dummy_idle)
+target_compile_definitions(ds5dummy_tests PRIVATE
+    DS5DUMMY_TEST_PROBE_SO="$<TARGET_FILE:ds5dummy_plugin_probe>"
+    DS5DUMMY_TEST_PROBE_BAD_ABI_SO="$<TARGET_FILE:ds5dummy_plugin_probe_bad_abi>"
+    DS5DUMMY_TEST_PROBE_NO_MARKER_SO="$<TARGET_FILE:ds5dummy_plugin_probe_no_marker>"
+    # 随包插件的真实产物：用例把它复制进临时插件目录，走与第三方插件完全相同的
+    # 扫描 + 标记 + dlopen 路径。
+    DS5DUMMY_TEST_IDLE_SO="$<TARGET_FILE:ds5dummy_idle>")
 
 # bt 契约测试链接共享门面（bt_link.cpp）加选中的那个后端 TU：
 # bt::detail::IsOpen 直接是后端符号，不碰硬件。其余 bt_* 要真链路，这里

@@ -10,7 +10,7 @@ _srcdir="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 # 版本跟随 checkout，由下面的 pkgver() 现查。makepkg 会把结果写回本文件并把
 # pkgrel 重置为 1，所以这里留占位值；改动提交后重新 makepkg 就是升级。
 pkgver=0.r16.g2ad1a98
-pkgrel=1
+pkgrel=2
 pkgdesc="Bridge a BT DualSense to a virtual USB device (BlueZ HIDRAW backend)"
 arch=('x86_64')
 url="https://github.com/zhh7ce/ds5dummy"
@@ -65,6 +65,9 @@ build() {
 package() {
   install -Dm755 "$srcdir/build-hidraw/ds5dummyd" \
     "$pkgdir/usr/bin/ds5dummyd"
+  # 随包插件与主程序分开编、分开装；worker 启动时扫这个目录自动装载。
+  install -Dm755 "$srcdir/build-hidraw/idle.so" \
+    "$pkgdir/usr/lib/ds5dummy/plugins/idle.so"
 
   install -Dm755 "$_srcdir/scripts/teardown.sh" \
     "$pkgdir/usr/lib/ds5dummy/teardown.sh"

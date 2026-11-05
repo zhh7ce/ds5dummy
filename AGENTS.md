@@ -27,6 +27,8 @@ Entertainment / DualSense Wireless Controller"，DualSense Edge 是 `054c:0df2`
 由手柄 MAC 派生的值（见 §7）。
 麦克风开关走 HID 通道（0x32 状态报告），不走音频通道：主机打开虚拟麦克风开始
 录音时程序才让手柄开麦。
+转发之外的可选行为（现在只有一个：多久没人碰手柄就让它自己关机）由 `src/plugin/` 的
+进程内插件承担，宿主和插件之间只隔 `plugin_api.h` 那份 C 边界（见 §10）。
 
 ---
 
@@ -41,6 +43,8 @@ Entertainment / DualSense Wireless Controller"，DualSense Edge 是 `054c:0df2`
 | `src/bt/` | `bt`（门面）、`bt_link`（生命周期/缓存策略/线程起停）、`bt_plane`（共享运行状态）、`bt_rx`/`bt_tx`（两条传输线程）、`bt_detail`（后端接缝）、`bt_l2cap`/`bt_hidraw`（二选一的后端 TU） |
 | `src/bridge/` | `bridge`（转发策略）、`state_report`（63 字节输出状态影子）、`fake_mac`（0x09 合成）、`usb_report`/`audio_report`/`mic_report`/`power_report`（四种报告的字节布局） |
 | `src/audio/` | 双向音频链：`audio`（门面）、`audio_identity`（sink/source 共用的节点名与 `device.*` 硬件身份）、`audio_port`（sink/source 共用的建流骨架与断线退避重建）、`audio_sink`（PipeWire 4 通道 sink）、`audio_encoder`（SRC + Opus + 编码线程）、`audio_decoder`（Opus 解码线程）、`audio_source`（单声道虚拟麦克风 Source） |
+| `src/plugin/` | 进程内插件的宿主侧：`plugin_api`（插件作者 include 的那份 C ABI 契约，含标记节的宏）、`plugin_util`（插件作者的可选小工具，纯头文件）、`plugin`（门面：实例表 + 输入钩子表 + 目录扫描 + `OnTick` 分派）、`plugin_loader`（目录列举、ELF 标记检查、`dlopen` 机制） |
+| `plugin/` | 随包插件源码，与宿主分开编译：`idle/` 只 include `src/plugin/` 的两份插件作者头文件，不链接宿主任何符号，`c++ -std=c++20 -fPIC -shared -I src plugin/idle/idle.cpp` 就能单独编出 `idle.so` |
 | `tests/` | googletest 单测（`ctest`，无 root、无硬件） |
 | `tools/` | 诊断程序：`spike_l2cap`、`spike_rumble`、`mini_gadget`、`audio_dump`(+`dump_sink.*`)、几个 `spike_*` 特权/交接探针；`win_audio_probe.cpp` 是唯一的 Windows 侧探针（mingw 交叉编译，在 Wine/Proton 前缀里读 MMDevice 与 setupapi，不参与 Linux 构建） |
 | `pkg/ds5dummy_hidraw`、`pkg/ds5dummy_l2cap` | 两个互斥的 Arch 包：systemd 单元、`/etc/ds5dummy/config.yaml`、`/usr/share/doc/ds5dummy/user-config.example.yaml`、modprobe/modules-load 配置、install 钩子 |
@@ -127,7 +131,15 @@ worker（`src/daemon/worker.cpp`）认领 fd（`usb::Adopt`）、建蓝牙链路
 `host_sysfs_path`（`--sysfs-path`）由 Manager 建站时从 sysfs 解析出本站的 USB 接口目录后
 写入，worker 只转交给音频的 sink 与 source——它已降权，也不认识 configfs 坐标，自己查不到；`usb_report_interval_ms` 的数值整个进 argv（`--usb-report-interval-ms`），因为 IN 线程的发送节拍要靠它在 worker 侧自己排，描述符里那个 `bInterval` 不构成节奏。它连 PipeWire 用的是桌面用户的身份，所以需要
 `XDG_RUNTIME_DIR`；`RestoreXdgRuntimeDir()` 在环境变量丢了的时候按当前 uid（或
-`SUDO_UID`）回落到 `/run/user/<uid>`。
+`SUDO_UID`）回落到 `/run/user/<uid>`。插件配置里的 `~/` 在 worker 侧展开，所以
+`RestoreHome()` 在同一步把 `HOME` 改成当前 uid 的 passwd 家目录——Manager 以
+root 起，继承下来的 `HOME` 是 root 的。
+
+插件袋也走 argv：`--plugin-config <插件名>.<点分键路径>=<值>` 一条一个键，由 Manager 从合并后的
+`plugins:` 那一节压出来，daemon 只搬字符串、不认识任何键名（见 §10）。worker 在连上手柄
+之后、`bt::StartThreads()` 之前 `plugin::Start()`，把交出的输入钩子逐个
+`bridge::AddStateHook()`；在两条传输线程都 join 之后先 `bridge::ClearStateHooks()` 再
+`plugin::Stop()`——钩子还在别的线程上跑的时候不能释放实例。
 
 `main.cpp` 刻意不让 `loguru::init` 扫 argv：级别由 `options` 自己解析
 （`ParseVerbosity`），因为 loguru 的名字表不认 `DEBUG`，遇到不认识的值是
@@ -150,7 +162,7 @@ worker（`src/daemon/worker.cpp`）认领 fd（`usb::Adopt`）、建蓝牙链路
 - 数据面线程共享的进程内状态收 `<mod>::plane`（`bt::plane`、`usb::plane`），只在
   模块自己的 TU 里可见；它不进 detail——detail 有 mini_gadget 那个诊断工具例外，
   plane 没有。
-- 依赖方向：`core` 不依赖任何人；`bt`/`usb`/`audio` 只依赖 `core`；`bridge` 是唯一
+- 依赖方向：`core` 不依赖任何人；`bt`/`usb`/`audio`/`plugin` 只依赖 `core`；`bridge` 是唯一
   认识"两个方向"的模块；`daemon` 是装配者。
 
 ---
@@ -158,11 +170,13 @@ worker（`src/daemon/worker.cpp`）认领 fd（`usb::Adopt`）、建蓝牙链路
 ## 5. 线程清单
 
 worker 进程里本仓库起的 12 条线程，加上 libpipewire 自己为两条 RT 流各起的
-data-loop 线程一共 14 条（loguru 的日志线程不计）：
+data-loop 线程一共 14 条（loguru 的日志线程不计）。插件不额外占这一页：它的钩子
+都在下面已有的线程上跑（随包的 `idle` 不自起线程），但一个 `.so` 插件可以在 `init`
+里起自己的线程——那种线程由插件自己在 `stop` 里 join，宿主看不见也不管：
 
 | 线程 | 归属 | 干什么 | 阻塞性约束 |
 |---|---|---|---|
-| 主线程 | `daemon/worker` | 100 ms 一轮：睡、收音频失效通知，诊断构建下每 5 s 打一行窗口统计；建链阶段在 `OpenBtWithWait()` 里 500 ms 重试 | 唯一调用 `bt::Open/Close/StartThreads/StopThreads` 的线程 |
+| 主线程 | `daemon/worker` | 100 ms 一轮：睡、收音频失效通知、把 `plugin::OnTick()` 递给每个插件，诊断构建下每 5 s 打一行窗口统计；建链阶段在 `OpenBtWithWait()` 里 500 ms 重试 | 唯一调用 `bt::Open/Close/StartThreads/StopThreads` 的线程 |
 | bt 读线程 | `bt/bt_rx.cpp` | poll 链路 fd + `stop_fd`，100 ms tick；把裸输入报告交给 `on_input` | 静默 1 s 打 WARNING，5 s 判死；回调里不许阻塞 |
 | bt 写线程 | `bt/bt_tx.cpp` | 队列空时 poll `wake_fd`/`stop_fd` 睡等；有活时 poll `stop_fd` + 链路 POLLOUT（无超时），排空 ≤8 份的发送队列 | 手上一份没发出去就原地重试同一份字节，不退回队列 |
 | ep0 线程 | `src/usb/usb_ep0.cpp` | 阻塞读 ep0 setup 包，标准请求自己答，class 请求交给 `on_class_request` | `GET_REPORT(FEATURE)` 缓存未命中时会在**这条线程上**同步等手柄回复（L2CAP 预算 2 s） |
@@ -369,6 +383,12 @@ dummy_hcd 不按它轮询（见上面那段），所以它既不限制也不产�
 - `OnUsbOutput`：`len ≥ 48` 时取 47 字节 payload 更新 63 字节 `SetStateData`，再把同样的
   47 字节搬进 78 字节的 0x31 报告体（`body[0]=0x31`、`body[2]=0x10` 置 rumble 使能）
   交给 `bt::PostOutput`。id 不是 `0x02` 或 `len` 为 0 静默丢弃且不记日志（端点上的常态噪声）。
+- `OnBtInput`：`[0]` 之后的 63 字节状态体在摆成 USB 输入报告之后、发布之前按注册顺序过
+  一遍输入钩子（`StateHook`）——插件改的就是主机将要读到的那一段，转发路径不因此多一次
+  解码/编码。
+- `AddStateHook` / `ClearStateHooks`：输入钩子表，全是 `void (*)(uint8_t*)` 裸函数指针。
+  worker 在 `bt::StartThreads()` 之前把 `plugin::Start()` 交出的区间逐个注册进来，在两条
+  传输线程 join 之后清空；bridge 因此不认识 plugin，也不解释钩子做了什么。
 - `OnAudioOutput`：64 B 触觉 + 200 B 喇叭拼成 398 B 的 0x36，`byte[10]` 段计数器**只在入队
   成功时**递增（队列满丢包不留空洞）。`byte[4]` 的 bit0 是 `mic_open` 的镜像
   （0xFF/0xFE）。它是唯一碰段计数器的线程，计数器因此不需要原子性。
@@ -462,7 +482,82 @@ dummy_hcd 不按它轮询（见上面那段），所以它既不限制也不产�
 
 ---
 
-## 10. 线格式常量（`src/core/protocol/report.h`）
+## 10. plugin —— 进程内插件
+
+插件是这个仓库里唯一"内容由别人写"的一层。插件是**进程级单例**：没有类、没有 self、
+没有宿主替它保存的实例状态——自己的状态放在自己的静态存储里。宿主侧四个文件加上
+仓库根的一份随包插件，按角色分：
+
+| 文件 | 角色 |
+|---|---|
+| `plugin_api.h` | C ABI 边界：`ds5PluginDesc`（版本号、名字、版本 + `init`/`stop`/`on_tick`/`on_state_in` 四个槽）与 `ds5Host`（`abi_version` + `log` + `power_off`）。插件作者只 include 这一份，两侧之间不跨 C++ 类型 |
+| `plugin_util.h` | 插件作者的可选工具，纯头文件 inline、不进 ABI：`FindSetting`（在 `ds5Setting` 数组里按键取值）、`ParseInt`（严格非负十进制 + 上下界）、`NowMs`（`steady_clock` 毫秒）。随包与第三方插件共用 |
+| `plugin_loader.{h,cpp}` | 纯机制：`ListPlugins` 列目录里的 `.so`、`HasMarker` 只读 ELF 节表验标记、`dlopen(RTLD_NOW\|RTLD_LOCAL)` + `dlsym(kPluginEntryName)`、`ds5Setting`（键、值）数组的拼装。不持状态 |
+| `plugin.cpp` | 门面：实例表、输入钩子表、目录扫描顺序、同名去重、`OnTick` 分派 |
+| `plugin/idle/`（仓库根） | 随包插件：单独编译成 `idle.so`，静止一段时间后请手柄自己关机；与第三方插件走同一条目录扫描路径 |
+
+**三关识别**：文件里有 `.ds5_plugin` 标记节、内容逐字节是字符串 `"DS5 Plugin"`
+（`kPluginMarkerMagic`，含结尾 NUL；装载前只读 ELF 节表，不执行任何代码）→ 导出名
+`ds5_plugin_desc`（dlsym）→ `abi_version == kPluginAbiVersion`（当前为 1）。标记是给
+"目录里混进了别的 `.so`"用的，不是信任
+边界：它能被伪造。没有 struct size、没有布局指纹：函数签名不匹配
+是**静默**的（ELF `.dynsym` 不带参数类型），所以任何签名/布局改动都必须改版本号并从新
+导出名开始；旧 `.so` 的版本号对不上，装载点当场拒掉。
+
+**装载由目录决定，不由配置决定**：`plugin::Directories()` 给出系统目录
+`/usr/lib/ds5dummy/plugins` 与 `$HOME/.config/ds5dummy/plugins`（`HOME` 缺失时只有前者），
+`Start()` 按这个顺序扫描、按文件名排序，每个 `.so` 依次过三关。同名插件以后出现的目录
+为准（用户覆盖系统），同一目录内的同名只留第一个并记 WARNING。最终按插件名排序装载，
+所以顺序只取决于目录内容。配置里没有 `path` 这样的保留键——一组
+`plugins.插件名.…` 只决定这个插件拿到的取值，不决定它存不存在。
+
+**能力靠空槽表达**：`on_tick`/`on_state_in` 为 `nullptr` 就是"这个插件不做这件事"，宿主
+跳过空槽；`init`/`stop` 必填，`init` 返回 0 表示"这一轮不生效"（配置关掉了它），宿主记
+INFO 而不是 ERROR。配置是 `plugin::Settings`（`map<string,string>`，键为
+`插件名.点分键路径`，值是标量文本，按扁平键有序），daemon 只校验形状并逐层合并，取值合不合法
+由插件自己判；没有保留键。YAML 里插件名之下是**任意层**的嵌套映射，读取时由
+`FlattenPluginSettings` 摊平成点分路径（`buttons.remap.dpad.up`）：每一段名字都要过
+`plugin::IsToken`，所以"写成嵌套"与"写成一个带点的键"不是同一种拼法——后者被拒；
+段数上限是 `daemon::kMaxPluginDepth`（8，含叶子那一段），收的是递归别名而不是形状。
+拍平后没有"切片"对象：某个插件的配置就是
+键带 `插件名.` 前缀的那些条目，转成 `init` 要的 `ds5Setting`（键、值）数组时按前缀长度整段剥掉
+插件名、其余原样交给插件（层数由插件自己解释），遍历顺序就是扁平键序，不需要再排序。默认插件层是空的：随包 `idle.so` 就在系统插件目录里，默认安装
+下照常装载；配置里不写它的任何键，它拿到的数组只有结尾的 `{nullptr, nullptr}`，全部走
+自己的默认值。反过来，配置里写了某个插件的键、目录里却没有同名 `.so` 时，那些键只是
+没人读，不影响别的插件。
+
+**输入钩子反向派发**：`plugin` 不认识 `bridge`，`bridge` 也不认识 `plugin`。`Start()`
+返回本轮装进来的 `on_state_in` 函数指针区间，worker 在 `bt::StartThreads()` 之前把它们
+逐个 `bridge::AddStateHook()`；bridge 只持有一张 `void (*)(uint8_t*)` 表，在发布 USB
+输入报告之前按注册顺序调过去。拆机时 worker 在两条传输线程 join 之后先
+`bridge::ClearStateHooks()`，再 `plugin::Stop()`。
+
+**线程相位**（两张表无锁靠的就是它，与 `bridge::SetMicSink` 同一条约定）：
+`plugin::Start()` 早于 `bt::StartThreads()`，`plugin::Stop()` 晚于两条传输线程 join；
+运行期 `on_state_in` 在 bt 读线程（~100–120 Hz）、`on_tick` 在 worker 主循环（10 Hz）。
+`ds5Host::power_off` 只允许从 `on_tick` 调用：它同步碰控制通道，搬到传输线程上就是把锁
+搬过去。`plugin::Start()` 自己不再收上一批，除首次外调用方必须先 `Stop()`。
+
+宿主能力表由 worker 填好（两个 C 壳子落在 `DS5DUMMY_LOG` 与 `bridge::PowerOff()`），
+`plugin::Start()` 把整表拷一份递给每个 `init`——插件跨不过去的是符号，不是拷贝。
+
+随包的 `idle` 插件是这份契约的第一个用户：`off_after_minutes`（缺省 30，`0` = 不自动
+关机，范围 0..60）。它自己取 `std::chrono::steady_clock`（`on_tick` 没有时间参数，精度
+因此不取决于主循环节拍）：`on_state_in` 只在真的动了手柄时记下"上次操作"的时刻，
+`on_tick` 比较 `now - last`，到期时先推起点再调 `host->power_off()`（即
+`bridge::PowerOff()`，0x08 关机 feature 报告），失败也只等下一个完整周期。静止判据是
+四个摇杆在 `[120, 140]`、两个扳机为 0、十字键 hat null、任何按键都没按；触摸板接触与
+六轴不参与判定。`steady_clock` 不含挂起时间，且休眠钩子会停掉服务，所以挂起不会被算成
+静置。
+
+`plugin` 只依赖 `core` 的常量；随包 `idle.so` 的源码在仓库根的 `plugin/idle/`，只
+include `plugin_api.h` / `plugin_util.h`，不链接宿主任何符号（`core` 的字节尺寸由
+`plugin_api.h` 里的 `kPluginStateSize` 提供）——所以它可以脱离本项目编译；`bridge` 不依赖 `plugin`；`worker`
+是装配者：它注册钩子、调 `OnTick`、在拆机时清钩子。没有双向 include。
+
+---
+
+## 11. 线格式常量（`src/core/protocol/report.h`）
 
 | 名称 | 值 | 含义 |
 |---|---|---|
@@ -496,7 +591,7 @@ dummy_hcd 不按它轮询（见上面那段），所以它既不限制也不产�
 
 ---
 
-## 11. 构建
+## 12. 构建
 
 ```bash
 cmake -B build -DCMAKE_BUILD_TYPE=Debug -DBT_BACKEND=HIDRAW \
@@ -521,7 +616,9 @@ C++20，CMake ≥ 3.16，`CMAKE_EXPORT_COMPILE_COMMANDS=ON`。必备依赖：
 `libpipewire-0.3`、`libspa-0.2`、`opus`、`samplerate`、`yaml-cpp`
 （`pkg_check_modules(YAMLCPP REQUIRED IMPORTED_TARGET yaml-cpp)`）、`libsystemd`
 （`pkg_check_modules(SYSTEMD REQUIRED IMPORTED_TARGET libsystemd)`，identity 用它
-枚举 logind 会话）、Boost 头文件（只用 `circular_buffer`）、`fmt`、pthreads。**缺库直接
+枚举 logind 会话）、Boost 头文件（只用 `circular_buffer`）、`fmt`、pthreads。装载 `.so`
+插件用的 `dlopen`/`dlsym` 来自 `${CMAKE_DL_LIBS}`（glibc 上是 libdl，现代版本已并进 libc，
+不算新依赖）。**缺库直接
 configure 失败是设计选择**——静默退化成 HID-only 会让除了在用户配置里写
 `audio: false` 的人之外都不知道音频没起来。
 
@@ -541,10 +638,10 @@ configure 失败是设计选择**——静默退化成 HID-only 会让除了在�
 
 ---
 
-## 12. 测试
+## 13. 测试
 
 `tests/CMakeLists.txt` 把被测源文件直接编进一个 `ds5dummy_tests` 二进制，
-`gtest_discover_tests` 让 ctest 看到逐个用例（当前 259 个，两个后端各跑一遍）。
+`gtest_discover_tests` 让 ctest 看到逐个用例（当前 319 个，两个后端各跑一遍）。
 **硬性约束：全部测试必须能在无 root、无手柄的环境下跑** —— 需要特权或硬件的验证是人工
 清单，不进 CI/单测。因此 bt 的测试只覆盖门面到后端的纯转发契约、`tx` 的入队/seq/CRC/
 背压、feature 缓存策略，硬件往返一律不测；`daemon/discovery` 与 `usb` 的测试自己搭临时
@@ -552,19 +649,33 @@ sysfs 树（假 `uevent` 文件、假 `dummy_udc.N/udc/dummy_udc.N` 与同索引
 `dummy_hcd.N/usbM/<M>-1`，即真机上的那对兄弟形状；设备目录下面的接口目录
 `<M>-1:1.0` 也照样摆出来），不碰真 `/sys`。
 
+插件装载链的最后一环由 `tests/fixtures/plugin_probe.cpp` 补上：CMake 把它单独编成
+MODULE（`ds5dummy_plugin_probe`，不链接测试二进制），测试把它拷进 `mkdtemp` 出来的
+临时插件目录，再让 `plugin::Start()` 扫那个目录——走的是与真实安装完全相同的
+`ListPlugins`/`HasMarker`/`dlopen` 路径，`dlsym` 找的也是真符号表。同一份源码再编两份
+变体：`..._bad_abi`（版本号改成宿主不认的值）与 `..._no_marker`（不落标记节），分别
+证明装载点拒绝版本不符、以及不 dlopen 没有标记的 `.so`。随包的 `idle.so` 也以同样方式
+编一份给测试用（`DS5DUMMY_TEST_IDLE_SO`），证明它的标记、导出名与描述符能被真实装载，
+也证明用户目录同名覆盖与 `off_after_minutes: 0` 的退出。它们同样不需要 root 或手柄，
+也不读真实系统/用户插件目录。
+`tests/bridge_hook_test.cpp` 覆盖反向派发的 bridge 一侧：注册的钩子改写的是 usb 最终
+持有的那份报告、按注册顺序跑、清空后不再被调，麦克风帧不经过钩子。
+
 `tools/audio_dump` 是离线回听路径：audio 下行链 + dump sink，不链 usb/bt/bridge，手柄连不
 连都能跑，用于单独验证编码半段。
 
 ---
 
-## 13. 打包与内核侧
+## 14. 打包与内核侧
 
-两个包都装 `/usr/bin/ds5dummyd`、`/usr/lib/ds5dummy/teardown.sh`、
+两个包都装 `/usr/bin/ds5dummyd`、`/usr/lib/ds5dummy/plugins/idle.so`、
+`/usr/lib/ds5dummy/teardown.sh`、
 `/usr/lib/systemd/system/ds5dummy.service`、`/usr/lib/systemd/system-sleep/ds5dummy`
 （休眠钩子）、`/etc/ds5dummy/config.yaml`（进 `backup=`）、
 `/usr/share/doc/ds5dummy/user-config.example.yaml`、`/etc/modprobe.d/ds5dummy.conf`、
 `/etc/modules-load.d/ds5dummy.conf`，都 `provides=('ds5dummy')`、
-`replaces=('ds5dummy')` 且互相 `conflicts`，`pkgrel=2`，`depends` 含 `yaml-cpp` 与
+`replaces=('ds5dummy')` 且互相 `conflicts`（`pkgrel` 随内容递增；makepkg 的 `pkgver()`
+回写会把它重置为 1），`depends` 含 `yaml-cpp` 与
 `systemd-libs`，构建参数固定在
 `-DCMAKE_BUILD_TYPE=Release -DBT_BACKEND=<对应后端> -DDS5DUMMY_STRICT=ON
 -DDS5DUMMY_DEBUG=OFF -DDS5DUMMY_DEBUG_LOG=OFF -DCMAKE_INSTALL_PREFIX=/usr`。
@@ -599,7 +710,7 @@ worker 退出）；恢复后见标记就 `systemctl start`。留在 `/run` 的�
 
 ---
 
-## 14. 代码规范
+## 15. 代码规范
 
 - 注释是**文档级**的：Doxygen 块（`/** @brief ... @param ... @return ... @note @see @warning`）
   写在声明/定义之上，简体中文；调用方契约放头文件声明，实现细节/回退顺序/本地约束放定义处，
@@ -618,7 +729,7 @@ worker 退出）；恢复后见标记就 `systemctl start`。留在 `/run` 的�
 
 ---
 
-## 15. 当前代码里已知的薄弱点
+## 16. 当前代码里已知的薄弱点
 
 改到相关位置时值得先看：
 
@@ -659,3 +770,16 @@ worker 退出）；恢复后见标记就 `systemctl start`。留在 `/run` 的�
     "手柄收到后自己断电、链路随之断开、Manager 按既有路径拆站"这一段没有实机跑过。
     hidraw 后端把整份报告交给内核 `HIDIOCSFEATURE`，手柄是否接受还取决于内核 HID
     驱动对 feature 报告的实现。
+14. 插件的可信加载没有实现：装载点只验 `.ds5_plugin` 标记、导出名与 `abi_version`——
+    标记是公开的常量、可被任何 `.so` 伪造，所以它只挡"顺手放进来的无关 `.so`"，不是
+    信任边界。属主、权限、签名都没查，也不做任何沙箱化；而装载是扫目录自动进行的，
+    意味着 `~/.config/ds5dummy/plugins/` 里任何带标记的 `.so`（谁写的都算）都会进
+    worker 进程（它有降权后的全部权限，还能起线程）。查完标记到 `dlopen` 之间不重查
+    文件（TOCTOU）也没做。这是刻意推迟的一块，不是遗漏。
+15. idle 插件只有单测级证据：静止判据、到期时刻、失败后重等一个周期都在
+    `tests/plugin_idle_test.cpp` 里用 `detail::PretendIdleFor()`（只在定义
+    `DS5DUMMY_TESTING` 的测试构建里存在）把"上次操作"拨到过去
+    跑过，但"30 分钟没碰手柄 → 手柄真的断电、蓝牙随之断开"这一段依赖上面第 13 条，
+    同样没实机跑过。计时走的是插件自己的 `std::chrono::steady_clock`（Linux 上不含
+    挂起时间），所以挂起期间不计入静置时长——目前的 systemd-sleep 钩子在挂起前就停了
+    服务，这条不构成问题，但钩子一旦去掉，"整晚没碰手柄"就不会触发自动关机。

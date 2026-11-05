@@ -16,6 +16,8 @@
 #include <string>
 #include <vector>
 
+#include "plugin/plugin.h"
+
 namespace ds5::daemon {
 
 /**
@@ -24,7 +26,8 @@ namespace ds5::daemon {
  *          -1。ep*_fd 在 Manager 解析时保持 -1，由 Manager 在交接前显式写入目标
  *          fd 号（handoff 固定 3/4/5），再经 BuildWorkerArgv 变成命令行传下去
  *          ——所以 worker 解析到的号就是 handoff 挪过去的号。用户级设置
- *          （MAC、等待秒数、音频开关、两个增益、日志级别）由 Manager 从
+ *          （MAC、等待秒数、音频开关、两个增益、插件配置、日志级别）由
+ *          Manager 从
  *          配置文件读出后写进这里交接，worker 自己不读配置文件。另有一个
  *          不来自配置、只来自本运行时刻的字段 host_sysfs_path：Manager 建站
  *          时从 sysfs 解析到的 USB 接口目录，同样经 argv 单向传给 worker。USB
@@ -48,6 +51,11 @@ struct Options {
   /// 而 -v DEBUG 这种写法太自然了，必须是普通报错。
   int verbosity = 0;
   int bt_wait_s = 60;  ///< --bt-wait：worker 重试 BT 连接的秒数；0 = 不等
+  /// 插件配置：--plugin-config 的 `插件名.键=值` 逐条解出来的结果，键即
+  /// `插件名.键名`。本模块与 Manager 都不认识里面的键；整份交下去是为了让
+  /// worker 把属于某个插件的键递给它（见 plugin/plugin.h）。空 = 配置没写，
+  /// 每个插件用自己的默认值。
+  plugin::Settings plugins;
   /// --haptics-gain：触觉振幅倍率，[config::kHapticsGainMin,
   /// kHapticsGainMax]；1.0 = 原样。乘在编码线程的 int8 量化之前。
   float haptics_gain = 1.0f;

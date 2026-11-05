@@ -79,6 +79,10 @@ sudo ./scripts/setup.sh            # 加载内核模块、确保 configfs 可用
 
 然后按下一节写好用户配置，再 `sudo ./build/ds5dummyd`。
 
+随包的 `idle` 插件不在主程序里：构建产物是 `build/idle.so`，要放到
+`/usr/lib/ds5dummy/plugins/` 或登录用户的 `~/.config/ds5dummy/plugins/` 才会被装载
+（见配置一节的“插件”）。
+
 把 `-DBT_BACKEND=HIDRAW` 换成 `-DBT_BACKEND=L2CAP` 就构建另一个后端；两者不能同时装。
 
 ---
@@ -134,6 +138,10 @@ bt_addr: auto          # auto | list | "AA:BB:CC:DD:EE:FF"
 #   usb_report_interval_ms: 1   # 0 = real-time：只在蓝牙新样本到达时发一份
 #   usb_model: auto             # auto | dualsense | edge
 
+# plugins:            # 只放插件自己的键；装不装载由插件目录决定，不在这里写路径
+#   idle:
+#     off_after_minutes: 30   # 多久没有按键就让手柄自己关机；0 = 从不
+
 # controllers:         # 按 MAC 覆盖单只手柄；键必须是合法 BD_ADDR
 #   "AA:BB:CC:DD:EE:FF":
 #     audio: false
@@ -146,6 +154,7 @@ bt_addr: auto          # auto | list | "AA:BB:CC:DD:EE:FF"
 | `global` | 无 | 对所有手柄生效的一组覆盖值（见下表） |
 | `controllers` | 无 | 以 MAC 为键的覆盖子树；`bt_addr: list` 时它同时是白名单，至少要有一项 |
 | `log_level` | 继承系统值 | 覆盖系统级别；写法同上。顶层键，不参与分层 |
+| `plugins` | 无 | 给插件的那一节，形状是 `插件名 → 键 → 取值`；写在这里等于对所有手柄的默认值，`global:` 与 `controllers.<MAC>:` 下面也可以写同名的子树，逐层只覆盖写了的那个键。这一节不决定装载哪些插件，只决定装上的插件拿到什么取值；程序本身不认识键名，取值原样交给插件 |
 
 下面六个键既可以写在 `global:` 下，也可以写在 `controllers.<MAC>:` 下。生效顺序是
 内置默认 ← `global` ← `controllers.<MAC>`，每层只覆盖写出来的键：
@@ -158,6 +167,35 @@ bt_addr: auto          # auto | list | "AA:BB:CC:DD:EE:FF"
 | `speaker_gain` | `2` | 手柄侧扬声器前置增益，`0`..`7`。加大是让**手柄自己**放大，编码与音量数据不变 |
 | `usb_report_interval_ms` | `1` | 虚拟手柄两份输入报告之间的间隔：`1`/`2`/`4` ms（1000/500/250 Hz）由程序按这个间隔自己排发送时刻，两次蓝牙样本之间会把持有的那一份原样重发；`0` = real-time，只在收到新的蓝牙样本时发一份。这是 USB 侧行为；手柄经蓝牙上报的节奏由固件固定，不受此影响 |
 | `usb_model` | `auto` | 虚拟 USB 设备呈现的型号：`auto` 跟随真手柄的 HID 身份（Edge 呈现为 Edge，其余呈现为普通 DualSense）；`dualsense` / `edge` 强制按该型号呈现。型号同时决定 USB PID、产品串与 report descriptor，三者始终一起换。单 MAC 模式下手柄启动时不在线、发现不到型号时，用它固定呈现最省事 |
+
+插件由 worker 自己装载，配置里不写路径：它扫描两个目录里的每一个 `.so`——随包安装的
+`/usr/lib/ds5dummy/plugins` 和用户自己的 `~/.config/ds5dummy/plugins`。一个文件要同时
+满足两条才算本程序的插件：`.ds5_plugin` 标记节里是字符串 `DS5 Plugin`（装载前只读 ELF
+节表，不会先运行它），并且导出 `ds5_plugin_desc`、报告的 ABI 版本号与宿主一致（当前
+为 1）。别的 `.so` 一律
+跳过并在 worker 日志里说一句；打不开或初始化失败也只让那一个插件缺席，站点照常工作。
+两个目录里有同名插件时用户目录那份生效，装载顺序按插件名排序。
+
+插件自己的键写在 `plugins.<插件名>:` 下，程序只负责把那一块原样送到插件手里；
+写错的取值只会让那一个插件回到它自己的默认值，不会让整个配置失效。目前的插件：
+
+| 插件 | 键 | 默认 | 说明 |
+|---|---|---|---|
+| `idle` | `off_after_minutes` | `30` | 连续多少分钟没有任何按键（摇杆离开中心带、扳机、十字键、任一按键都算）之后，请手柄自己关机；`0` = 从不自动关机，范围 `0`..`60`。手柄关机后蓝牙断开，下次按下 PS 键重新连上时会被当作新的一站拉起。触摸板接触与手柄被挪动不算操作 |
+
+`idle` 与第三方插件没有区别，都是独立 `.so`——随包那份装在
+`/usr/lib/ds5dummy/plugins/idle.so`，源码在仓库根的 `plugin/idle/`，只 include
+`src/plugin/plugin_api.h` 与 `plugin_util.h`、不链接宿主任何符号，所以能脱离本项目编译：
+
+```bash
+c++ -std=c++20 -fPIC -shared -I src plugin/idle/idle.cpp -o idle.so
+```
+
+自己写的插件放进 `~/.config/ds5dummy/plugins/` 就会被下一次启动装载。
+
+插件是进程内的任意代码：它能改交给它的输入状态字节，也能自己起线程。标记与 ABI 版本号
+只证明这个文件是按这份接口编出来的，**不是**签名；程序没有"只加载可信插件"的机制——
+文件属主、权限、签名都没查，所以插件目录里只放你自己编译或自己审阅过的 `.so`。
 
 Manager 每 `discovery_interval_s` 秒（默认 3 秒）扫描一次 `/sys/class/hidraw/`：只认蓝牙总线
 （`HID_ID` 的 bus 为 `0005`）且 VID/PID 属于受支持组合的设备——真机 `054c:0ce6`

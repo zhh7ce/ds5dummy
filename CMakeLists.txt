@@ -104,6 +104,8 @@ set(DS5DUMMY_CORE_SRC
     src/audio/audio_encoder.cpp
     src/audio/audio_decoder.cpp
     src/audio/audio_source.cpp
+    src/plugin/plugin.cpp
+    src/plugin/plugin_loader.cpp
     third_party/loguru.cpp
 )
 
@@ -138,6 +140,19 @@ target_compile_definitions(ds5dummyd PRIVATE
     DS5DUMMY_DEBUG_LOG=$<BOOL:${DS5DUMMY_DEBUG_LOG}>)
 
 # ---------------------------------------------------------------------------
+# 随包插件：源码在仓库根的 plugin/（不在 src/ 里），单独编成 idle.so。
+#   它只 include 公共 ABI 头（plugin/plugin_api.h、plugin_util.h），不链接宿主
+#   任何符号——单独一条
+#       c++ -std=c++20 -fPIC -shared -I src plugin/idle/idle.cpp -o idle.so
+#   就能编出来。文件名与 plugin/plugin.h 的 kSystemPluginDir、两个 PKGBUILD 的
+#   安装位置必须一致。
+# ---------------------------------------------------------------------------
+add_library(ds5dummy_idle MODULE plugin/idle/idle.cpp)
+set_target_properties(ds5dummy_idle PROPERTIES
+    PREFIX "" OUTPUT_NAME "idle" SUFFIX ".so" POSITION_INDEPENDENT_CODE ON)
+target_include_directories(ds5dummy_idle PRIVATE ${DS5DUMMY_MODULE_INCLUDE_DIRS})
+
+# ---------------------------------------------------------------------------
 # 音频下链（PipeWire sink → Opus → 0x36）—— 两个后端都要，缺库直接 configure
 # 失败：静默退化成 HID-only 会让除用户配置 audio: false 之外的人不知道音频
 # 没起来。
@@ -162,7 +177,9 @@ find_package(Boost REQUIRED)
 target_link_libraries(ds5dummyd PRIVATE
     PkgConfig::PIPEWIRE PkgConfig::SPA PkgConfig::OPUS PkgConfig::SAMPLERATE
     PkgConfig::YAMLCPP PkgConfig::SYSTEMD
-    Boost::headers)
+    Boost::headers
+    # plugin/loader.cpp 的 dlopen/dlsym；glibc 上它是独立的 libdl。
+    ${CMAKE_DL_LIBS})
 
 # loguru: 单头文件日志库。LOG_F 的等级过滤是运行时的（低于阈值时参数不被
 # 求值，但代码与格式串仍在二进制里）；把调试日志整条去掉由 DS5DUMMY_DEBUG_LOG

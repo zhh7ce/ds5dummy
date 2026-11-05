@@ -18,6 +18,7 @@
 #include <cerrno>
 #include <cstring>
 #include <utility>
+#include <vector>
 
 #if DS5DUMMY_DEBUG_LOG
 #include <iomanip>
@@ -53,6 +54,10 @@ std::atomic<bool> mic_open{false};
 // 上行 Opus 包体的去处。SetMicSink 在 bt::StartThreads() 之前装填，此后只读，
 // 因此不需要锁（与 Init 装填的状态同一个线程相位约定）。
 MicSink mic_sink;
+
+// 输入状态钩子表。AddStateHook 在 bt::StartThreads() 之前写、ClearStateHooks 在
+// join 之后清，运行期只有 bt 读线程遍历，所以不加锁。
+std::vector<StateHook> state_hooks;
 
 }  // namespace
 
@@ -283,8 +288,17 @@ void OnBtInput(const uint8_t* data, size_t len) {
   // 交接单位是整份报告：在这里摆好 [0x01][63 字节状态体]，usb 只按字节发端点。
   uint8_t report[core::protocol::kUsbInputReportSize];
   detail::BuildUsbInputReport(report, data + 2);
+  // 钩子看到的是这段状态体本身（report+1），改写直接进入主机将要读到的那份
+  // 报告；转发路径不因此多一次解码/编码。没注册钩子时这里是一次空循环。
+  for (const StateHook hook : state_hooks) hook(report + 1);
   usb::PostInputReport(report, sizeof(report));
 }
+
+void AddStateHook(StateHook hook) {
+  if (hook != nullptr) state_hooks.push_back(hook);
+}
+
+void ClearStateHooks() { state_hooks.clear(); }
 
 bool PowerOff() {
   // 整包冻结：feature 报告的 CRC 已写死在字节里，控制通道只负责原样送出。

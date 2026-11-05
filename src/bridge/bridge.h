@@ -116,6 +116,30 @@ void OnUsbOutput(const uint8_t* data, size_t len);
 void OnBtInput(const uint8_t* data, size_t len);
 
 /**
+ * @brief 一份输入状态钩子：在 USB 输入报告发布之前改写那 63 字节。
+ *
+ * 插件是进程级单例，所以这里就是一个裸函数指针，没有 self、没有辅助结构。
+ * @param state 63 字节状态体，可写；调用返回之后宿主才把它交给 usb。
+ * @warning 在 bt 的读线程上调用：实现不许阻塞、不许分配，也不许碰链路。
+ */
+using StateHook = void (*)(uint8_t* state);
+
+/**
+ * @brief 注册一份输入状态钩子。
+ * @param hook 要追加到表尾的钩子，按注册顺序调用。
+ * @warning 只能在 bt/usb 传输线程起来之前调用；运行期这张表只读，不加锁。
+ * @see ClearStateHooks() —— 拆机时的反向一步。
+ */
+void AddStateHook(StateHook hook);
+
+/**
+ * @brief 清空全部输入状态钩子。
+ * @warning 只能在两条传输线程 join 之后调用：清表与钩子调用不能并发。
+ * @see AddStateHook()。
+ */
+void ClearStateHooks();
+
+/**
  * @brief 让手柄自己关机：发一份整包冻结的 0x08 feature 报告。
  *
  * 报告字节在 detail::kPowerOffReport（48 字节，payload[0]=0x02 关，尾部

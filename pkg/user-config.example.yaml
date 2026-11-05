@@ -53,6 +53,35 @@ bt_addr: auto
 #   # different model on purpose.
 #   usb_model: auto
 #
+# Plugin settings. Plugins are shared objects and the worker loads them by
+# itself: every .so file in /usr/lib/ds5dummy/plugins (the shipped one) and in
+# ~/.config/ds5dummy/plugins (yours) is a candidate. Nothing here decides what
+# gets loaded. A file is loaded only when it carries the DS5Dummy marker
+# section and exports ds5_plugin_desc with the ABI version this build expects;
+# anything else is skipped with a line in the worker log. When both
+# directories hold a plugin with the same name, yours wins.
+#
+# Each plugin sees only its own block — the keys under plugins:<name>: — and
+# nothing else. A key the plugin does not know is ignored and a bad value only
+# affects that plugin (it reports the problem in the worker log and falls back
+# to its own default). Per-controller overrides go under
+# controllers:<MAC>.plugins: and replace only the keys you write there.
+#
+# plugins:
+#   # idle: powers the controller off by sending the 0x08 feature report when
+#   # nobody touches it. A stick outside its centre band, a trigger, the D-pad
+#   # or any button counts as input; touchpad contact and motion do not.
+#   idle:
+#     # Minutes without any user input before the controller is asked to power
+#     # itself off (0 = never power off automatically; range 0..60).
+#     off_after_minutes: 30
+#
+# Plugins run as arbitrary code inside the worker process: they can rewrite the
+# input state they are given and can start their own threads. The marker and
+# the ABI version prove only that the file was built for this interface — they
+# are not a signature. There is no ownership or permission check, so keep only
+# .so files you compiled or reviewed yourself in the plugin directories.
+#
 # Per-controller overrides. Keys are the controller's BD_ADDR in uppercase
 # XX:XX:XX:XX:XX:XX; only the keys you write are overridden. With
 # bt_addr: list this section doubles as the allowlist, so it must name at
@@ -62,6 +91,9 @@ bt_addr: auto
 #   "AA:BB:CC:DD:EE:FF":
 #     audio: false
 #     haptics_gain: 1.5
+#     plugins:
+#       idle:
+#         off_after_minutes: 0
 
 # Personal log level, overriding the system-wide one. Names or integers, same
 # vocabulary as the daemon's -v option: OFF/FATAL/ERROR/WARNING/INFO/DEBUG/

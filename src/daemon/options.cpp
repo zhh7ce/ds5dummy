@@ -12,7 +12,6 @@
 
 #include "daemon/options.h"
 
-#include <algorithm>
 #include <cerrno>
 #include <charconv>
 #include <cmath>
@@ -44,6 +43,7 @@ struct OptDef {
 const OptDef kOpts[] = {
     {"--bt-addr", Kind::Value},
     {"--bt-wait", Kind::Value},
+    {"--plugin-config", Kind::Value},
     {"--worker", Kind::Switch},
     {"--ep0", Kind::Value},
     {"--ep-in", Kind::Value},
@@ -130,6 +130,42 @@ std::string format_gain(float gain) {
   return std::string(buf, result.ptr);
 }
 
+/**
+ * @brief 把一条 `插件名.键=值` 解码进扁平配置。
+ * @param text --plugin-config 的参数，形如 idle.off_after_minutes=30。
+ * @param settings 成功时写入/覆盖那一个键；同一个键出现多条时最后一条赢（重建
+ *            argv 按配置发，正常路径不会重复，这里的宽松只服务于手工命令行）。
+ * @param why 失败时写入面向用户的整句错误原因。
+ * @return 成功 true；形态不对 false。
+ * @details 分隔符各取第一次出现：`=` 之前整段是扁平键，再按第一个 `.` 分成
+ *          插件名与键名；值里可以再有 `=`，BuildWorkerArgv 因此能原样往返。
+ *          两个名字都必须过 plugin::IsToken（不含 `.` 与 `=`），所以这里不必再
+ *          处理"键名里带分隔符"的歧义；值必须非空，与配置层同一判据。取值本身
+ *          合不合法不在这里判：交接层不认识任何插件的键。
+ * @see plugin/plugin.h 的 IsToken —— 这条形态判据的单源。
+ */
+bool decode_plugin_entry(const std::string& text, plugin::Settings& settings,
+                         std::string& why) {
+  const size_t eq = text.find('=');
+  if (eq == std::string::npos) {
+    why = "Option --plugin-config needs <plugin>.<key>=<value>, got: " + text;
+    return false;
+  }
+  const std::string flat_key = text.substr(0, eq);
+  const std::string value = text.substr(eq + 1);
+  std::string name;
+  std::string key;
+  if (!plugin::SplitKey(flat_key, name, key) || !plugin::IsToken(name) ||
+      !plugin::IsToken(key) || value.empty()) {
+    why = "Option --plugin-config needs plugin and key made of letters, "
+          "digits, '_' or '-', and a non-empty value, got: " +
+          text;
+    return false;
+  }
+  settings[plugin::MakeKey(name, key)] = value;
+  return true;
+}
+
 }  // namespace
 
 /**
@@ -163,6 +199,13 @@ Options internal::ParseArgv(const std::vector<std::string>& args) {
 
     if (name == "--bt-addr") {
       o.bt_addr = value;
+    } else if (name == "--plugin-config") {
+      // 一条字符串一个键：`插件名.键名` 本身就是扁平配置的键，这里只拆出值。
+      std::string why;
+      if (!decode_plugin_entry(value, o.plugins, why)) {
+        o.error = why;
+        return o;
+      }
     } else if (name == "--sysfs-path") {
       // 路径由 Manager 从 sysfs 读回，worker 只是转交给 PipeWire 属性，
       // 这里不做存在性校验：校验点在解析成功之前已经过了，再查一遍只会
@@ -271,6 +314,11 @@ std::vector<std::string> BuildWorkerArgv(const Options& o,
                               "--bt-wait",  std::to_string(o.bt_wait_s)};
   // 可选段：与解析端的默认值一一对应，等于默认就不写，保持命令行简短。
   if (!o.bt_addr.empty()) av.insert(av.end(), {"--bt-addr", o.bt_addr});
+  // 插件配置一个键一条（`插件名.键名=值`）。Settings 按扁平键有序，遍历顺序
+  // 即 argv 顺序，同一份配置两次重建得到同一套 argv（把"互逆"加强成"可复现"）。
+  for (const auto& [key, value] : o.plugins) {
+    av.insert(av.end(), {"--plugin-config", key + "=" + value});
+  }
   if (!o.host_sysfs_path.empty()) {
     av.insert(av.end(), {"--sysfs-path", o.host_sysfs_path});
   }

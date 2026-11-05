@@ -288,6 +288,130 @@ bool ReadSpeakerGain(const YAML::Node& node, const std::string& where,
 }
 
 /**
+ * @brief 把一个插件名之下的嵌套映射摊平成点分路径，就地合并进 settings。
+ * @param node 已确认 IsMap() 的那一层。
+ * @param where 错误定位。
+ * @param path 这一层的完整扁平前缀（插件名，或插件名往下已拼好的若干段），也是
+ *             写进 @p settings 的那些键的前缀；错误文本在它前面再加 `plugins.`，
+ *             报成配置文件里的位置。
+ * @param depth 本层写出的那些键在插件名以下的段数：插件名之下的第一层键是 1
+ *              （@p path 此时就是插件名本身），往下每进一层加 1。
+ * @param settings 入参是下层的配置，出参是叠加本层之后的结果。
+ * @param why 失败时的原因。
+ * @return 成功 true；某一层的键名不是 token、叶子不是非空标量、或嵌套超过
+ *         kMaxPluginDepth 时 false。
+ * @details 递归只做一件事：键名是 token 就把 `path + '.' + key` 往下带，遇到
+ *          映射继续深入，遇到标量就写进 @p settings。段名不允许含 `.`（过
+ *          plugin::IsToken），所以"写成嵌套"与"写成一个带点的键"不会撞成同一
+ *          个扁平键——后者在这里直接被拒，扁平路径因此是唯一形态；下游按
+ *          `插件名.` 前缀整段剥掉它（plugin::detail::BuildSettings），前缀匹配
+ *          不会有第二处候选。
+ *          空映射（`{}`）贡献零条键，不算错误：它与"这一组没写"同形。只写组名
+ *          不写值（YAML 的 null）不算空映射，和叶子写空一样被拒。
+ * @note 深度上限只收栈这一维：递归别名（`&a {b: *a}`）在 yaml-cpp 里能构出环，
+ *       没有上限这里就会无限递归下去。条目总数另有配置文件的 64 KiB 上限兜着。
+ * @see ReadPlugins —— 本函数唯一的调用方（插件名那一层）。
+ */
+bool FlattenPluginSettings(const YAML::Node& node, const std::string& where,
+                           const std::string& path, int depth,
+                           plugin::Settings& settings, std::string& why) {
+  const std::string located = "plugins." + path;
+  for (auto it = node.begin(); it != node.end(); ++it) {
+    const YAML::Node key_node = it->first;
+    if (!key_node.IsScalar()) {
+      why = At(where, located + " keys must be setting names");
+      return false;
+    }
+    const std::string key = key_node.Scalar();
+    if (!plugin::IsToken(key)) {
+      why = At(where, located + " key '" + key +
+                         "' must be 1..32 characters of letters, digits, '_' "
+                         "or '-' (nest deeper instead of writing a dotted key)");
+      return false;
+    }
+    const std::string child = path + plugin::kKeySeparator + key;
+    const YAML::Node value = it->second;
+    if (value.IsMap()) {
+      if (depth >= kMaxPluginDepth) {
+        why = At(where, "plugins." + child + " nests deeper than " +
+                        std::to_string(kMaxPluginDepth) +
+                        " key levels under a plugin name");
+        return false;
+      }
+      if (!FlattenPluginSettings(value, where, child, depth + 1, settings,
+                                 why)) {
+        return false;
+      }
+      continue;
+    }
+    if (!value.IsScalar() || value.Scalar().empty()) {
+      why = At(where, "plugins." + child + " must be a non-empty scalar");
+      return false;
+    }
+    settings[child] = value.Scalar();
+  }
+  return true;
+}
+
+/**
+ * @brief 读一个插件层（`plugins:` 那一节）并就地合并进配置。
+ * @param node 已确认存在的节点。
+ * @param where 错误定位。
+ * @param settings 入参是下层的配置，出参是叠加本层之后的结果。
+ * @param why 失败时的原因。
+ * @return 成功 true；形状不对 false。
+ * @details 只校验形状，不看键名含义：`plugins:` 的键属于各个插件，配置这一层
+ *          认识它们就会把插件列表变成自己的一份依赖。规则只有两条——第一层是
+ *          插件名（必须过 plugin::IsToken），它以下是**任意层**的嵌套映射，每
+ *          一段名字都要过 IsToken，叶子必须是**非空标量**并原样存成文本。取值
+ *          合不合插件的心意由插件自己判（写错取值的报错在 worker 日志里，不在
+ *          启动前的配置校验里）。
+ *          嵌套在读取时就摊平成点分路径（`buttons.remap.circle`），层数对下游
+ *          不可见：扁平键只有插件名那一段被认出来（它以下整段原样带走），递给
+ *          插件时按 `插件名.` 前缀整段剥掉（plugin::detail::BuildSettings），
+ *          交接 argv 搬的还是 `名.键路径=值` 一条字符串。所以加深只发生在配置
+ *          文件里，不发生在交接格式里；层数上限是 kMaxPluginDepth，收的是递归
+ *          别名与超长路径，不是形状。
+ *          合并是逐扁平键覆盖：本层写了 `buttons.axis.invert_rstick_x` 就替换
+ *          下层的同名键，同组里没写的键、别的组与别的插件都原样留下。
+ * @see FlattenPluginSettings —— 插件名以下那些层的递归。
+ * @see plugin/plugin.h —— 扁平配置的形状与插件如何读它。
+ */
+bool ReadPlugins(const YAML::Node& node, const std::string& where,
+                 plugin::Settings& settings, std::string& why) {
+  if (node.IsNull()) return true;  // `plugins:` 只写键不写值 = 本层不覆盖
+  if (!node.IsMap()) {
+    why = At(where, "key 'plugins' must be a mapping of plugin name to "
+                    "settings");
+    return false;
+  }
+  for (auto it = node.begin(); it != node.end(); ++it) {
+    const YAML::Node name_node = it->first;
+    if (!name_node.IsScalar()) {
+      why = At(where, "plugins keys must be plugin names");
+      return false;
+    }
+    const std::string name = name_node.Scalar();
+    if (!plugin::IsToken(name)) {
+      why = At(where, "plugin name '" + name +
+                      "' must be 1..32 characters of letters, digits, '_' "
+                      "or '-'");
+      return false;
+    }
+    const YAML::Node settings_node = it->second;
+    if (!settings_node.IsMap()) {
+      why = At(where, "plugins." + name + " must be a mapping of key to value");
+      return false;
+    }
+    // 第一层键（插件名之下）就是 depth=1：上限数的是插件名以下的层数。
+    if (!FlattenPluginSettings(settings_node, where, name, 1, settings, why)) {
+      return false;
+    }
+  }
+  return true;
+}
+
+/**
  * @brief 读两份 USB 输入报告之间的间隔：0（real-time）或 1/2/4 毫秒。
  * @param node 已确认存在的节点。
  * @param where 错误定位。
@@ -351,8 +475,9 @@ bool ReadUsbModel(const YAML::Node& node, const std::string& where,
  * @param why 失败时的原因。
  * @return 成功 true。
  * @details 只写出现的键，未出现的键保留入参里的值——三层叠加就是这样逐层
- *          覆盖出来的。允许的键与 worker 的交接参数一一对应，usb_model 例外：
- *          它在 Manager 里叠加成型号，再折成 `--usb-edge`。
+ *          覆盖出来的。允许的键与 worker 的交接参数一一对应，两个例外是
+ *          usb_model（Manager 把它叠加成型号，再折成 `--usb-edge`）与 plugins
+ *          （整份交给 worker，键的含义由插件自己读）。
  */
 bool ApplyControllerKeys(const YAML::Node& node, const std::string& where,
                          ControllerConfig& cfg, std::string& why) {
@@ -361,8 +486,9 @@ bool ApplyControllerKeys(const YAML::Node& node, const std::string& where,
     return false;
   }
   if (!CheckKeys(node,
-                 {"bt_wait_s", "audio", "haptics_gain", "speaker_gain",
-                  "usb_report_interval_ms", "usb_model"},
+                 {"bt_wait_s", "audio", "haptics_gain",
+                  "speaker_gain", "usb_report_interval_ms", "usb_model",
+                  "plugins"},
                  where, why)) {
     return false;
   }
@@ -395,6 +521,10 @@ bool ApplyControllerKeys(const YAML::Node& node, const std::string& where,
   const YAML::Node usb_model = node["usb_model"];
   if (usb_model &&
       !ReadUsbModel(usb_model, where, "usb_model", cfg.usb_model, why)) {
+    return false;
+  }
+  const YAML::Node plugins = node["plugins"];
+  if (plugins && !ReadPlugins(plugins, where, cfg.plugins, why)) {
     return false;
   }
   return true;
@@ -909,17 +1039,18 @@ bool ParseSystemConfig(const std::string& text, SystemConfig& out,
 }
 
 /**
- * @brief 解析用户配置文本（schema：enabled/bt_addr/log_level/global/controllers）。
+ * @brief 解析用户配置文本（schema：enabled/bt_addr/log_level/plugins/global/
+ *        controllers）。
  * @param text YAML 文本；空文本按空文档处理。
  * @param out 成功时写入结果；失败时不修改。
  * @param why 失败时的单行原因；成功时清空。
  * @return 成功 true。
  * @details root 级键（ffs_path、uid、gid 等）在这份 schema 里不存在，
  *          一律按未知键拒绝。bt_addr 取 auto/list/XX:XX:XX:XX:XX:XX 三者之一，
- *          缺省 auto；global 与 controllers.<MAC> 只接受六个手柄级键，且逐层
- *          叠加成每只手柄的最终值。bt_addr: list 要求 controllers 非空；
- *          bt_addr: <MAC> 时 controllers 里不能出现别的 MAC——那些条目永远
- *          不会生效，静默忽略等于让用户以为自己配上了。
+ *          缺省 auto；global 与 controllers.<MAC> 只接受七个手柄级键（含
+ *          plugins），且逐层叠加成每只手柄的最终值。bt_addr: list 要求
+ *          controllers 非空；bt_addr: <MAC> 时 controllers 里不能出现别的
+ *          MAC——那些条目永远不会生效，静默忽略等于让用户以为自己配上了。
  * @note 解析先落在局部对象里，只有全部校验通过才覆盖 out。
  */
 bool ParseUserConfig(const std::string& text, UserConfig& out,
@@ -933,8 +1064,8 @@ bool ParseUserConfig(const std::string& text, UserConfig& out,
         why = "user config: document root must be a mapping";
         return false;
       }
-      if (!CheckKeys(root, {"enabled", "bt_addr", "log_level", "global",
-                            "controllers"},
+      if (!CheckKeys(root, {"enabled", "bt_addr", "log_level", "plugins",
+                            "global", "controllers"},
                      "user config", why)) {
         return false;
       }
@@ -972,6 +1103,16 @@ bool ParseUserConfig(const std::string& text, UserConfig& out,
         int level = 0;
         if (!ReadLogLevel(log_level, "user config", level, why)) return false;
         cfg.log_level = level;
+      }
+
+      // 根级 `plugins:` 是插件那一族的默认层：先合进 defaults，global.plugins
+      // 与 controllers.<MAC>.plugins 再在它之上逐键覆盖。默认层是空的：装载由
+      // 插件目录决定（见 plugin/plugin.h），这一节只负责把键交给同名插件。
+      const YAML::Node root_plugins = root["plugins"];
+      if (root_plugins &&
+          !ReadPlugins(root_plugins, "user config", cfg.defaults.plugins,
+                       why)) {
+        return false;
       }
 
       // `global:` 只写键不写值时按"无覆盖"处理，与 identity: 同一种宽容。

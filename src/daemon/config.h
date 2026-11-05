@@ -5,8 +5,9 @@
  *          决定 FunctionFS 路径、发现轮询间隔、系统日志级别与降权身份策略；
  *          用户配置
  *          （<home>/.config/ds5dummy/config.yaml）属于目标用户，只决定服务哪些
- *          手柄以及每只手柄的等待秒数、音频开关、音频/触觉增益、USB 轮询上限、
- *          虚拟设备的型号与个人日志级别。用户级设置按"内置默认 ← global ←
+ *          手柄以及每只手柄的等待秒数、音频开关、音频/触觉
+ *          增益、USB 轮询上限、虚拟设备的型号、插件配置与个人日志级别。用户级设置按
+ *          "内置默认 ← global ←
  *          controllers.<MAC>"
  *          三层叠加，解析完即每只手柄的最终值。这份文件是可选的：家目录里没有
  *          它，Manager 就按内置默认层启动（取值同发布的
@@ -32,6 +33,7 @@
 #include <vector>
 
 #include "core/device/identity.h"
+#include "plugin/plugin.h"
 
 namespace ds5::daemon {
 
@@ -89,6 +91,19 @@ inline constexpr float kHapticsGainMin = 0.0f;
 inline constexpr float kHapticsGainMax = 2.0f;
 /// 扬声器前置增益的上限（3 位字段）；下限是 0。
 inline constexpr int kSpeakerGainMax = 7;
+
+/**
+ * @brief `plugins:` 里一个插件名之下还允许嵌几层键。
+ * @details 这不是"配置的形状只有这么多层"：组想分几层就分几层（`remap.circle`
+ *          是两层，以后三层也行），层名只由接收它的那个插件解释。上限收的是两
+ *          样东西——递归别名（`&a {b: *a}` 这类文档在 yaml-cpp 里能构出环，读取
+ *          方不封顶就会无限递归）和把整段说明写成一条超长路径。
+ *          计数的是插件名以下的键路径段数，叶子自己也算一段：
+ *          `off_after_minutes` 是 1 段，`remap.dpad.up` 是 3 段，所以最深的
+ *          合法形态是 `kMaxPluginDepth - 1` 层组加最下面那个叶子。
+ * @see daemon/config.cpp 的 FlattenPluginSettings —— 用它收口的地方。
+ */
+inline constexpr int kMaxPluginDepth = 8;
 /**
  * @brief usb_report_interval_ms 的合法取值（毫秒）：0 排在最前，它是模式而不是间隔。
  * @details 配置解析与交接 argv 解析共用这一张表，两处不能各写一份。这个值
@@ -114,8 +129,9 @@ enum class BtTargetMode {
 /**
  * @brief 一只手柄的生效设置，同时也是 global: 默认层的载体。
  * @details 字段与 worker 的交接参数一一对应；usb_model 是例外——Manager 先把它
- *          叠加成"本站型号"，再折成 worker 的 `--usb-edge` 开关。log_level 与
- *          bt_addr 也不在这里：前者只作用于 Manager 进程，后者决定服务哪只手柄。
+ *          叠加成"本站型号"，再折成 worker 的 `--usb-edge` 开关。plugins 也是
+ *          例外，它整份交下去、由插件自己读，Manager 不认识里面的键。log_level
+ *          与 bt_addr 不在这里：前者只作用于 Manager 进程，后者决定服务哪只手柄。
  * @note 纯数据，无行为；拷贝即配置快照。
  */
 struct ControllerConfig {
@@ -137,6 +153,12 @@ struct ControllerConfig {
   /// （见 core::device::ModelForHidIdentity）；写出型号则强制本站按它呈现，
   /// 不受发现结果影响。它同时决定 PID、产品串与 report descriptor。
   std::optional<core::device::ControllerModel> usb_model;
+  /// 插件配置：`插件名.点分键路径` → 标量文本（YAML 里的嵌套在读取时摊平）。
+  /// 来源是根级的 `plugins:`、`global: plugins:` 与 `controllers.<MAC>.plugins:`
+  /// 三处，按同一顺序逐层合并，只覆盖写了的那个叶子（见 plugin/plugin.h）。本
+  /// 模块只校验形状，段名含义与取值属于插件。默认层是空的：装载由插件目录决定，
+  /// 没写某个插件的键就等于它用自己的默认值。
+  plugin::Settings plugins;
 };
 
 /**
@@ -144,7 +166,10 @@ struct ControllerConfig {
  * @details 分层是"内置默认 ← global: ← controllers.<MAC>"：global 与每个
  *          controllers 条目都只写想改的键，解析期就把三层叠加成每只手柄的
  *          最终值，Manager 拿到的是可直接使用的快照。enabled 缺省 true，
- *          bt_addr 缺省 auto。
+ *          bt_addr 缺省 auto。插件配置另有一节 `plugins:`，它是插件那一层的
+ *          "global"：先于 global.plugins 生效，两者都被 controllers.<MAC>
+ *          覆盖；叠加结果落在 ControllerConfig::plugins，因此每只手柄拿到的
+ *          都是已合并的完整配置。
  * @note 纯数据，无行为；拷贝即配置快照。
  */
 struct UserConfig {
@@ -245,14 +270,21 @@ bool ParseSystemConfig(const std::string& text, SystemConfig& out,
  * @param out 成功时写入解析结果；失败时不修改。
  * @param why 失败时写入面向用户的单行原因（含出错键名）；成功时清空。
  * @return 成功 true。
- * @details 严格模式：只接受 enabled/bt_addr/log_level/global/controllers 五个
+ * @details 严格模式：只接受 enabled/bt_addr/log_level/plugins/global/
+ *          controllers 六个
  *          根键，ffs_path、uid、gid 等 root 级键在这里一律按未知键拒绝。
  *          global 与每个 controllers.<MAC> 条目都只接受 bt_wait_s/audio/
- *          haptics_gain/speaker_gain/usb_report_interval_ms/usb_model 六个键。
+ *          haptics_gain/speaker_gain/usb_report_interval_ms/usb_model/plugins
+ *          七个键。
  *          enabled 缺省 true，bt_addr 缺省 auto；bt_addr: list 要求 controllers
  *          非空，bt_addr: <MAC> 要求 controllers 至多只有这一个键。
  *          两个增益按各自区间收口，usb_report_interval_ms 只接受 0/1/2/4
  *          （0 = real-time），usb_model 只接受 auto/dualsense/edge。
+ *          plugins 只校验形状：插件名必须是 plugin::IsToken 认得的形态，它以下是
+ *          任意层的嵌套映射（每一段名字都要过 IsToken，层数上限 kMaxPluginDepth），
+ *          叶子必须是非空标量；取值对不对由插件自己判，每段名字的含义由收到它的
+ *          插件解释。根级 plugins、global.plugins 与 controllers.<MAC>.plugins 按
+ *          这个顺序逐层合并，拍平后只覆盖写了的那个叶子。
  * @note 纯函数：不碰文件系统、不写日志，可在任意线程调用。
  * @see LoadUserConfig —— 加固读取 + 本函数的组合。
  */
