@@ -1,357 +1,286 @@
 /**
  * @file daemon/options.cpp
- * @brief worker 交接参数的解析与 argv 重建实现
- * @details 认得的名字集中在 kOpts 一张表：解析器查表判定"是不是选项、吃不吃
- *          一个值"，字段落位由 ParseArgv 的分支链完成，两张清单需要同步维护。
- *          用户级设置不在这里——它们来自配置文件，用法文本因此只打印两份配置
- *          的路径（见 internal::UsageText）。
- * @details 不负责：任何 syscall（本模块只处理字符串）、配置的消费方。
- * @note 层次：daemon。线程模型：进程启动时单线程调用；无全局可变态，
- *       kOpts 是 const 表。
+ * @brief 命令行解析与 worker 配置快照的编解码实现
+ * @details 命令行只剩 `--worker` 与 `--help`；配置的跨进程传递是"定长标量头 +
+ *          长度前缀的字符串与插件条目"这一份自描述快照，由 Manager 编码、
+ *          worker 解码，两侧共用这里的同一个函数对。
+ * @details 不负责：任何 syscall（快照的 memfd 读写属于 handoff）、配置的消费方、
+ *          取值合法性（配置层在更早的一步收口）。
+ * @note 层次：daemon。线程模型：进程启动时单线程调用；无全局可变态。
  */
 
 #include "daemon/options.h"
 
 #include <cerrno>
-#include <charconv>
-#include <cmath>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <utility>
 
 #include "daemon/config.h"
 
 namespace ds5::daemon {
 namespace {
 
-/// @brief 选项形态：带值的开关，或不带值的开关。决定解析时是否消费下一个参数。
-enum class Kind { Switch, Value };
+/// @brief 快照的魔数，逐字节 "DS5W"。只用来判定"这个 fd 里装的是我们的配置"。
+constexpr uint8_t kMagic[4] = {'D', 'S', '5', 'W'};
+
+/// @brief 固定标量头的长度：magic + total_bytes + 4 个 i32 + f32 + 2 个 u8 +
+///        2 字节保留位。其后的字符串与插件条目全部变长。
+constexpr size_t kHeaderBytes = 4 + 4 + 4 * 4 + 4 + 1 + 1 + 2;
 
 /**
- * @brief 单个内部交接选项的定义。
- * @details 解析（find_opt）查这一张表判定名字与形态；用法文本不再由它生成，
- *          因为对用户只暴露配置文件。成员都是字符串字面量与枚举值，生命周期
- *          为整个程序。
+ * @brief 追加一个本机字节序的 u32。
+ * @param out 目标字节串。
+ * @param value 待写入数值。
+ * @note 两侧是同一个镜像、同一种架构，不需要做字节序转换；字段逐个写入而不是
+ *       memcpy 整个 struct，避免结构体内存布局与填充位进入线格式。
  */
-struct OptDef {
-  const char* name;  ///< 长选项带 "--"，短选项带 "-"；必须与命令行上的写法逐字相同
-  Kind kind;         ///< 是否消费下一个参数作为值
+void PutU32(std::vector<uint8_t>& out, uint32_t value) {
+  uint8_t bytes[sizeof value];
+  std::memcpy(bytes, &value, sizeof bytes);
+  out.insert(out.end(), bytes, bytes + sizeof bytes);
+}
+
+/// @brief 追加一个 i32，按无符号位型写入（两侧同构，负号原样保留）。
+void PutI32(std::vector<uint8_t>& out, int value) {
+  PutU32(out, static_cast<uint32_t>(value));
+}
+
+/// @brief 按位型追加一个 float。
+void PutF32(std::vector<uint8_t>& out, float value) {
+  uint32_t bits = 0;
+  static_assert(sizeof bits == sizeof value, "float must be 32 bits");
+  std::memcpy(&bits, &value, sizeof bits);
+  PutU32(out, bits);
+}
+
+/// @brief 追加一个长度前缀（u32）+ 原始字节的字符串；允许 NUL 与空串。
+void PutString(std::vector<uint8_t>& out, const std::string& text) {
+  PutU32(out, static_cast<uint32_t>(text.size()));
+  const auto* const begin = reinterpret_cast<const uint8_t*>(text.data());
+  out.insert(out.end(), begin, begin + text.size());
+}
+
+/**
+ * @brief 顺序读取快照的游标，所有读取都带剩余长度校验。
+ * @note 只在 Options::Decode 里使用；任何越界都让读取返回 false，由调用方
+ *       统一翻成一条错误文本。
+ */
+class Reader {
+ public:
+  /**
+   * @param data 首字节；调用方保证 size 与之匹配。
+   * @param size 可读字节数。
+   */
+  Reader(const uint8_t* data, size_t size) : data_(data), size_(size) {}
+
+  bool ReadU8(uint8_t& value) { return Take(&value, sizeof value); }
+
+  bool ReadU32(uint32_t& value) {
+    uint8_t bytes[sizeof value];
+    if (!Take(bytes, sizeof bytes)) return false;
+    std::memcpy(&value, bytes, sizeof bytes);
+    return true;
+  }
+
+  bool ReadI32(int& value) {
+    uint32_t raw = 0;
+    if (!ReadU32(raw)) return false;
+    value = static_cast<int>(static_cast<int32_t>(raw));
+    return true;
+  }
+
+  bool ReadF32(float& value) {
+    uint32_t raw = 0;
+    if (!ReadU32(raw)) return false;
+    std::memcpy(&value, &raw, sizeof value);
+    return true;
+  }
+
+  /// @brief 读一个长度前缀字符串；长度不得超过剩余字节数。
+  bool ReadString(std::string& value) {
+    uint32_t length = 0;
+    if (!ReadU32(length)) return false;
+    if (length > size_ - offset_) return false;
+    value.assign(reinterpret_cast<const char*>(data_ + offset_), length);
+    offset_ += length;
+    return true;
+  }
+
+  /// @brief 是否已读到快照末尾（用于拒绝尾随字节）。
+  bool Done() const { return offset_ == size_; }
+
+ private:
+  /// @brief 取走 n 字节；不足 n 时不动游标并返回 false。
+  bool Take(uint8_t* destination, size_t n) {
+    if (n > size_ - offset_) return false;
+    std::memcpy(destination, data_ + offset_, n);
+    offset_ += n;
+    return true;
+  }
+
+  const uint8_t* data_;
+  size_t size_;
+  size_t offset_ = 0;
 };
-
-// 单一表源：解析器只认这里列出的名字；新增选项必须在这里与 ParseArgv 的
-// 分支链里同时出现，否则会被"识别但不生效"。
-const OptDef kOpts[] = {
-    {"--bt-addr", Kind::Value},
-    {"--bt-wait", Kind::Value},
-    {"--plugin-config", Kind::Value},
-    {"--worker", Kind::Switch},
-    {"--ep0", Kind::Value},
-    {"--ep-in", Kind::Value},
-    {"--ep-out", Kind::Value},
-    {"--no-audio", Kind::Switch},
-    {"--usb-edge", Kind::Switch},
-    {"--usb-report-interval-ms", Kind::Value},
-    {"--haptics-gain", Kind::Value},
-    {"--speaker-gain", Kind::Value},
-    {"--sysfs-path", Kind::Value},
-    {"-v", Kind::Value},
-    {"--help", Kind::Switch},
-};
-
-/**
- * @brief 在 kOpts 里查名字对应的定义。
- * @param name 已含 "--"/"-" 前缀的选项字符串，逐字比较，不做缩写或大小写折叠。
- * @return 命中则指向表项（静态存储），否则 nullptr。
- * @note 纯查找，无副作用；表很短，线性扫描够用。
- */
-const OptDef* find_opt(const std::string& name) {
-  for (const OptDef& d : kOpts) {
-    if (name == d.name) return &d;
-  }
-  return nullptr;
-}
-
-/**
- * @brief 解析非负十进制整数，用于所有 Kind::Value 的数字选项。
- * @param text 待解析字符串。
- * @param out 成功时写入数值，范围 [0, INT_MAX]。
- * @return 成功 true；空串、含非数字尾串、溢出 long 或超出 int 范围 false。
- * @details 拒绝的是负数与尾随垃圾；strtol 本身仍会接受前导空格、单独的 '+'
- *          号和前导零（例如 " 5"、"+5"、"007" 都会解析成 5），本函数没有
- *          额外拦下它们。
- * @note 纯函数，无副作用；errno 只在调用局部使用，不透出。
- * @see internal::ParseVerbosity —— 那里才做了逐字符校验。
- */
-bool parse_number(const std::string& text, int& out) {
-  if (text.empty()) return false;
-  errno = 0;
-  char* end = nullptr;
-  const long v = std::strtol(text.c_str(), &end, 10);
-  if (end == text.c_str() || *end != '\0' || errno == ERANGE) return false;
-  // 上限即 INT_MAX：LP64 上 long 比 int 宽，必须自己拦掉 int 放不下的值。
-  if (v < 0 || v > 2147483647L) return false;
-  out = static_cast<int>(v);
-  return true;
-}
-
-/**
- * @brief 解析 [kHapticsGainMin, kHapticsGainMax] 内的十进制浮点数。
- * @param text 待解析字符串。
- * @param out 成功时写入增益倍率。
- * @return 成功 true；空串、尾随垃圾、溢出、NaN/Inf 或越界 false。
- * @details 与 parse_number 同口径允许前导空格、'+' 和前导零；`.nan`/`.inf`
- *          这类 strtod 认得的写法由 isfinite 拦下——一个 NaN 增益会让整段
- *          触觉量化成 NaN。边界取自 config.h，配置解析与本函数不会各自演化。
- */
-bool parse_gain(const std::string& text, float& out) {
-  if (text.empty()) return false;
-  errno = 0;
-  char* end = nullptr;
-  const double v = std::strtod(text.c_str(), &end);
-  if (end == text.c_str() || *end != '\0' || errno == ERANGE) return false;
-  if (!std::isfinite(v) || v < static_cast<double>(kHapticsGainMin) ||
-      v > static_cast<double>(kHapticsGainMax)) {
-    return false;
-  }
-  out = static_cast<float>(v);
-  return true;
-}
-
-/**
- * @brief 把浮点增益写成能被 parse_gain 原样读回的最短十进制串。
- * @param gain 已解析的增益值。
- * @return 十进制文本；float 的最短往返表示不会超过 24 字符。
- * @details 不能用 std::to_string：它固定 6 位小数，0.123456789f 会写成
- *          0.123457，往返后不是同一个 float，违反 BuildWorkerArgv 的互逆契约。
- */
-std::string format_gain(float gain) {
-  char buf[32];
-  const auto result = std::to_chars(buf, buf + sizeof buf, gain);
-  return std::string(buf, result.ptr);
-}
-
-/**
- * @brief 把一条 `插件名.键=值` 解码进扁平配置。
- * @param text --plugin-config 的参数，形如 idle.off_after_minutes=30。
- * @param settings 成功时写入/覆盖那一个键；同一个键出现多条时最后一条赢（重建
- *            argv 按配置发，正常路径不会重复，这里的宽松只服务于手工命令行）。
- * @param why 失败时写入面向用户的整句错误原因。
- * @return 成功 true；形态不对 false。
- * @details 分隔符各取第一次出现：`=` 之前整段是扁平键，再按第一个 `.` 分成
- *          插件名与键名；值里可以再有 `=`，BuildWorkerArgv 因此能原样往返。
- *          两个名字都必须过 plugin::IsToken（不含 `.` 与 `=`），所以这里不必再
- *          处理"键名里带分隔符"的歧义；值必须非空，与配置层同一判据。取值本身
- *          合不合法不在这里判：交接层不认识任何插件的键。
- * @see plugin/plugin.h 的 IsToken —— 这条形态判据的单源。
- */
-bool decode_plugin_entry(const std::string& text, plugin::Settings& settings,
-                         std::string& why) {
-  const size_t eq = text.find('=');
-  if (eq == std::string::npos) {
-    why = "Option --plugin-config needs <plugin>.<key>=<value>, got: " + text;
-    return false;
-  }
-  const std::string flat_key = text.substr(0, eq);
-  const std::string value = text.substr(eq + 1);
-  std::string name;
-  std::string key;
-  if (!plugin::SplitKey(flat_key, name, key) || !plugin::IsToken(name) ||
-      !plugin::IsToken(key) || value.empty()) {
-    why = "Option --plugin-config needs plugin and key made of letters, "
-          "digits, '_' or '-', and a non-empty value, got: " +
-          text;
-    return false;
-  }
-  settings[plugin::MakeKey(name, key)] = value;
-  return true;
-}
 
 }  // namespace
 
 /**
- * @brief 逐个参数查 kOpts 表并落进 Options 字段，出错即填 error 返回。
- * @param args 不含 argv[0] 的参数序列。
- * @return 配置结果；error 非空时后面参数不再解析，其余字段不可信。
- * @note 表里新增一项而这里没有对应分支时，该选项会被"识别但不生效"：
- *       名字合法、值被消费、字段保持默认。加选项时必须同时改两处。
- * @see BuildWorkerArgv —— 与本函数互逆。
+ * @brief 解析命令行：只认 `--worker` 与 `--help`。
+ * @param argc main 的参数个数；<=0 时按空参数表处理。
+ * @param argv main 的参数数组，argv[0] 为程序名，不计入选项。
+ * @return 配置结果；未知选项写入 error，且不再解析后面的参数。
+ * @note 用户级设置已经全部搬到 YAML：旧开关在这里一律是"未知选项"，不会留下
+ *       一个被静默忽略的入口。
  */
-Options internal::ParseArgv(const std::vector<std::string>& args) {
+Options ParseArgs(int argc, char* argv[]) {
   Options o;
-
-  for (size_t i = 0; i < args.size(); ++i) {
-    const std::string& name = args[i];
-    const OptDef* def = find_opt(name);
-    if (def == nullptr) {
+  for (int i = 1; i < argc; ++i) {
+    const std::string name = argv[i];
+    if (name == "--worker") {
+      o.worker = true;
+    } else if (name == "--help") {
+      o.show_help = true;
+    } else {
       o.error = "Unknown option: " + name;
       return o;
     }
-
-    // 带值选项必须还能向后吃一个参数；i+1 越界即"末尾缺值"。
-    std::string value;
-    if (def->kind == Kind::Value) {
-      if (i + 1 >= args.size()) {
-        o.error = "Option " + name + " requires a value";
-        return o;
-      }
-      value = args[++i];
-    }
-
-    if (name == "--bt-addr") {
-      o.bt_addr = value;
-    } else if (name == "--plugin-config") {
-      // 一条字符串一个键：`插件名.键名` 本身就是扁平配置的键，这里只拆出值。
-      std::string why;
-      if (!decode_plugin_entry(value, o.plugins, why)) {
-        o.error = why;
-        return o;
-      }
-    } else if (name == "--sysfs-path") {
-      // 路径由 Manager 从 sysfs 读回，worker 只是转交给 PipeWire 属性，
-      // 这里不做存在性校验：校验点在解析成功之前已经过了，再查一遍只会
-      // 把"接口目录被拆了"这种运行期变化当成参数错误。
-      o.host_sysfs_path = value;
-    } else if (name == "-v") {
-      int level = 0;
-      if (!internal::ParseVerbosity(value, level)) {
-        o.error =
-            "Option -v needs OFF/FATAL/ERROR/WARNING/INFO/DEBUG/VERBOSE "
-            "or an integer, got: " +
-            value;
-        return o;
-      }
-      o.verbosity = level;
-    } else if (name == "--worker") {
-      o.worker = true;
-    } else if (name == "--no-audio") {
-      o.no_audio = true;
-    } else if (name == "--usb-edge") {
-      o.usb_edge = true;
-    } else if (name == "--usb-report-interval-ms") {
-      // 与 YAML 那一侧同一张取值表：worker 拿到的是配置校验过的同一个值。
-      int interval = 0;
-      if (!parse_number(value, interval) ||
-          std::ranges::find(kUsbReportIntervals, interval) ==
-              std::ranges::end(kUsbReportIntervals)) {
-        o.error = "Option --usb-report-interval-ms needs " +
-                  UsbReportIntervalChoices() + ", got: " + value;
-        return o;
-      }
-      o.usb_report_interval_ms = interval;
-    } else if (name == "--haptics-gain") {
-      float gain = 0.0f;
-      if (!parse_gain(value, gain)) {
-        o.error = "Option --haptics-gain needs a number in [0, 2], got: " +
-                  value;
-        return o;
-      }
-      o.haptics_gain = gain;
-    } else if (name == "--speaker-gain") {
-      int gain = 0;
-      if (!parse_number(value, gain) || gain > kSpeakerGainMax) {
-        o.error = "Option --speaker-gain needs an integer in [0, " +
-                  std::to_string(kSpeakerGainMax) + "], got: " + value;
-        return o;
-      }
-      o.speaker_gain = gain;
-    } else if (name == "--help") {
-      o.show_help = true;
-    } else if (name == "--bt-wait" || name == "--ep0" || name == "--ep-in" ||
-               name == "--ep-out") {
-      // 四个数字选项共用一次严格校验，再按名字分发到各自的字段。
-      int parsed = 0;
-      if (!parse_number(value, parsed)) {
-        o.error =
-            "Option " + name + " needs a non-negative number, got: " + value;
-        return o;
-      }
-      if (name == "--bt-wait") o.bt_wait_s = parsed;
-      if (name == "--ep0") o.ep0_fd = parsed;
-      if (name == "--ep-in") o.ep_in_fd = parsed;
-      if (name == "--ep-out") o.ep_out_fd = parsed;
-    }
-  }
-
-  // worker 的三个 fd 号只能由 Manager 写入，缺任何一个都意味着交接被手工
-  // 拼出来的命令行绕过了——那种运行没有可用的数据面。
-  if (o.worker && (o.ep0_fd < 0 || o.ep_in_fd < 0 || o.ep_out_fd < 0)) {
-    o.error = "--worker requires --ep0, --ep-in and --ep-out";
   }
   return o;
 }
 
 /**
- * @brief 剥掉 argv[0] 后交给 internal::ParseArgv。
- * @param argc main 的参数个数；<=0 时按空参数表处理。
- * @param argv main 的参数数组；每个元素必须是非空 C 字符串（std::string
- *             构造会解引用它们）。
- * @return 配置结果；失败时 error 非空。
- * @note 会分配内存，只在 main 的启动路径调用。
+ * @brief 编码生效配置；布局见 options.h 的 Encode 说明。
+ * @return 自描述字节串；total_bytes 在最后回填。
  */
-Options ParseArgs(int argc, char* argv[]) {
-  std::vector<std::string> args;
-  args.reserve(static_cast<size_t>(argc > 0 ? argc - 1 : 0));
-  for (int i = 1; i < argc; ++i) args.push_back(argv[i]);
-  return internal::ParseArgv(args);
-}
-
-/**
- * @brief 把配置重写成 worker 能吃的一套 argv（与 internal::ParseArgv 互逆）。
- * @param o 已解析的配置；ep*_fd 须已是 worker 侧的目标号（负值会产出
- *          "--ep0 -1"，解析端判非法）。
- * @param self_path argv[0]，通常是 /proc/self/exe 的读回值。
- * @return 完整 argv。固定槽位（--worker、三个 fd 号、--bt-wait、-v）总是写出，
- *         其余字段只在非默认时写出。
- * @note --help 与 error 是解析期产物，不回写。
- * @see ToArgv —— 紧接着把它变成 execv 需要的指针数组。
- */
-std::vector<std::string> BuildWorkerArgv(const Options& o,
-                                         const std::string& self_path) {
-  std::vector<std::string> av{self_path,    "--worker",
-                              "--ep0",      std::to_string(o.ep0_fd),
-                              "--ep-in",    std::to_string(o.ep_in_fd),
-                              "--ep-out",   std::to_string(o.ep_out_fd),
-                              "--bt-wait",  std::to_string(o.bt_wait_s)};
-  // 可选段：与解析端的默认值一一对应，等于默认就不写，保持命令行简短。
-  if (!o.bt_addr.empty()) av.insert(av.end(), {"--bt-addr", o.bt_addr});
-  // 插件配置一个键一条（`插件名.键名=值`）。Settings 按扁平键有序，遍历顺序
-  // 即 argv 顺序，同一份配置两次重建得到同一套 argv（把"互逆"加强成"可复现"）。
-  for (const auto& [key, value] : o.plugins) {
-    av.insert(av.end(), {"--plugin-config", key + "=" + value});
+std::vector<uint8_t> Options::Encode() const {
+  const ControllerConfig& c = controller;
+  std::vector<uint8_t> out;
+  out.reserve(kHeaderBytes + c.bt_addr.size() + c.host_sysfs_path.size());
+  out.insert(out.end(), kMagic, kMagic + sizeof kMagic);
+  PutU32(out, 0);  // total_bytes：整份写完后再回填，解码端用它对账。
+  PutI32(out, verbosity);
+  PutI32(out, c.bt_wait_s);
+  PutI32(out, c.speaker_gain);
+  PutI32(out, c.usb_report_interval_ms);
+  PutF32(out, c.haptics_gain);
+  out.push_back(c.audio ? 1 : 0);
+  // usb_model 是 optional：0 = 未定（auto，正常只在测试/默认构造里出现），
+  // 1 = 普通 DualSense，2 = Edge。Manager 交接前已解决 auto。
+  uint8_t model_code = 0;
+  if (c.usb_model) {
+    model_code = *c.usb_model == core::device::ControllerModel::kEdge ? 2 : 1;
   }
-  if (!o.host_sysfs_path.empty()) {
-    av.insert(av.end(), {"--sysfs-path", o.host_sysfs_path});
+  out.push_back(model_code);
+  out.push_back(0);  // 保留位：留出对齐/未来加标量的位置，解码端跳过。
+  out.push_back(0);
+  PutString(out, c.bt_addr);
+  PutString(out, c.host_sysfs_path);
+  // 插件配置是有序 map：同一份配置重复编码得到逐字节相同的快照。
+  PutU32(out, static_cast<uint32_t>(c.plugins.size()));
+  for (const auto& [key, value] : c.plugins) {
+    PutString(out, key);
+    PutString(out, value);
   }
-  av.insert(av.end(), {"-v", std::to_string(o.verbosity)});
-  if (o.no_audio) av.push_back("--no-audio");
-  if (o.usb_edge) av.push_back("--usb-edge");
-  if (o.usb_report_interval_ms != 1) {
-    av.insert(av.end(), {"--usb-report-interval-ms",
-                         std::to_string(o.usb_report_interval_ms)});
-  }
-  if (o.haptics_gain != 1.0f) {
-    av.insert(av.end(), {"--haptics-gain", format_gain(o.haptics_gain)});
-  }
-  if (o.speaker_gain != 2) {
-    av.insert(av.end(), {"--speaker-gain", std::to_string(o.speaker_gain)});
-  }
-  return av;
-}
-
-/**
- * @brief 转成 execv 要的 NULL 结尾指针数组，指针复用 av 的缓冲区。
- * @param av 字符串数组，必须比返回的指针数组活得久。
- * @return size == av.size()+1 的数组，末元素为 nullptr。
- * @warning const_cast 是必需的：execv 的签名带 const char* const*，而内核
- *          不会写这些缓冲区。
- * @warning 必须在 fork 之前调用（子进程不得再分配内存）。
- */
-std::vector<char*> ToArgv(const std::vector<std::string>& av) {
-  std::vector<char*> out;
-  out.reserve(av.size() + 1);  // +1 留给末尾的 nullptr 哨兵
-  for (const std::string& a : av) out.push_back(const_cast<char*>(a.c_str()));
-  out.push_back(nullptr);
+  const uint32_t total = static_cast<uint32_t>(out.size());
+  std::memcpy(out.data() + 4, &total, sizeof total);
   return out;
+}
+
+/**
+ * @brief 解码快照；只校验结构，不校验取值。
+ * @param data 快照首字节。
+ * @param size 快照长度。
+ * @param why 失败时写入原因。
+ * @return 结构完整 true；失败时本对象不被修改。
+ * @details 四类拒绝：长度不足头、magic 不符、total_bytes 与实长不等（含截断与
+ *          尾随数据）、字符串长度越过剩余字节。total_bytes 紧跟 magic，先对账再
+ *          读其余字段，截断与追加都能在动任何字段之前拒掉。plugins 的条目数由
+ *          数据本身界定，超出实际内容时按截断处理。
+ */
+bool Options::Decode(const uint8_t* data, size_t size, std::string& why) {
+  if (data == nullptr || size < kHeaderBytes) {
+    why = "worker config snapshot is truncated";
+    return false;
+  }
+  if (std::memcmp(data, kMagic, sizeof kMagic) != 0) {
+    why = "worker config snapshot has a bad magic";
+    return false;
+  }
+
+  Reader reader(data + sizeof kMagic, size - sizeof kMagic);
+  uint32_t total = 0;
+  if (!reader.ReadU32(total)) {
+    why = "worker config snapshot is truncated";
+    return false;
+  }
+  if (total != size) {
+    why = "worker config snapshot length does not match its header";
+    return false;
+  }
+
+  int parsed_verbosity = 0;
+  int bt_wait_s = 0;
+  int speaker_gain = 0;
+  int interval_ms = 0;
+  float haptics_gain = 0.0f;
+  uint8_t audio = 0;
+  uint8_t model_code = 0;
+  uint8_t reserved[2] = {0, 0};
+  std::string bt_addr;
+  std::string host_sysfs_path;
+  uint32_t plugin_count = 0;
+
+  if (!reader.ReadI32(parsed_verbosity) ||
+      !reader.ReadI32(bt_wait_s) || !reader.ReadI32(speaker_gain) ||
+      !reader.ReadI32(interval_ms) || !reader.ReadF32(haptics_gain) ||
+      !reader.ReadU8(audio) || !reader.ReadU8(model_code) ||
+      !reader.ReadU8(reserved[0]) || !reader.ReadU8(reserved[1]) ||
+      !reader.ReadString(bt_addr) || !reader.ReadString(host_sysfs_path) ||
+      !reader.ReadU32(plugin_count)) {
+    why = "worker config snapshot is truncated";
+    return false;
+  }
+
+  ControllerConfig parsed;
+  if (model_code == 1) {
+    parsed.usb_model = core::device::ControllerModel::kDualSense;
+  } else if (model_code == 2) {
+    parsed.usb_model = core::device::ControllerModel::kEdge;
+  } else if (model_code != 0) {
+    // 编码端只会写 0/1/2；其余值说明快照已损坏，不是"未知型号"。
+    why = "worker config snapshot has a bad usb model";
+    return false;
+  }
+
+  plugin::Settings plugins;
+  for (uint32_t i = 0; i < plugin_count; ++i) {
+    std::string key;
+    std::string value;
+    if (!reader.ReadString(key) || !reader.ReadString(value)) {
+      why = "worker config snapshot is truncated";
+      return false;
+    }
+    plugins[std::move(key)] = std::move(value);
+  }
+  if (!reader.Done()) {
+    why = "worker config snapshot has trailing bytes";
+    return false;
+  }
+
+  parsed.bt_wait_s = bt_wait_s;
+  parsed.speaker_gain = speaker_gain;
+  parsed.usb_report_interval_ms = interval_ms;
+  parsed.haptics_gain = haptics_gain;
+  parsed.audio = audio != 0;
+  parsed.bt_addr = std::move(bt_addr);
+  parsed.host_sysfs_path = std::move(host_sysfs_path);
+  parsed.plugins = std::move(plugins);
+  verbosity = parsed_verbosity;
+  controller = std::move(parsed);
+  return true;
 }
 
 /**
@@ -364,7 +293,6 @@ std::vector<char*> ToArgv(const std::vector<std::string>& av) {
  *          整数分支先手写数字校验再走 strtol：strtol 单独用会接受前导空格、
  *          "+"、"0x" 前缀和尾随字符，这里一律拒绝；符号只允许一个前导 '-'。
  *          数值范围不额外夹取，超出 loguru 枚举的整数按原值透传。
- * @see kOpts 的 -v 说明列。
  */
 bool internal::ParseVerbosity(const std::string& text, int& out) {
   if (text.empty()) return false;
@@ -439,15 +367,15 @@ const char* internal::VerbosityName(int level) {
 
 /**
  * @brief 生成用法文本：一行用法加两份配置的路径。
- * @return 多行文本，首行固定 "Usage: ds5dummy [--worker]"，之后列出系统与
+ * @return 多行文本，首行固定 "Usage: ds5dummy [--help]"，之后列出系统与
  *         用户配置的位置。
- * @details 不再列选项：命令行是 Manager 与 worker 之间的内部契约，对用户暴露
- *          的只有 YAML 配置。两条路径取自 daemon/config.h 的常量，与实际读取
- *          点同源，不会各写一份。
+ * @details 不再列选项：对用户暴露的只有 YAML 配置；`--worker` 是 Manager 与
+ *          worker 之间的内部入口，不写进用法。两条路径取自 daemon/config.h 的
+ *          常量，与实际读取点同源，不会各写一份。
  * @note 首行的程序名是占位，展示前由 PrintUsage 换成实际 argv[0]。
  */
 std::string internal::UsageText() {
-  std::string text = "Usage: ds5dummy [--worker]\n";
+  std::string text = "Usage: ds5dummy [--help]\n";
   text += "Configuration:\n";
   text += std::string("  system: ") + kSystemConfigPath + "\n";
   text += std::string("  user:   ~/") + kUserConfigDir + "/" +

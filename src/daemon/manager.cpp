@@ -2,9 +2,10 @@
  * @file daemon/manager.cpp
  * @brief 常驻 root Manager 的实现
  * @details Manager 一生只做四件特权事：建 configfs gadget、mount FunctionFS、
- *          往 ep0 写描述符、bind 到 UDC。做完就把三个端点 fd 交给降权子进程，
- *          自己不再碰任何数据。每只手柄一站：gadget 实例名与 FunctionFS 挂载点
- *          都按 MAC 派生，所以这些特权动作按槽位重复 N 次，各站互不共享状态。
+ *          往 ep0 写描述符、bind 到 UDC。做完就把三个端点 fd 与一份生效配置
+ *          快照交给降权子进程，自己不再碰任何数据。每只手柄一站：gadget 实例名与
+ *          FunctionFS 挂载点都按 MAC 派生，所以这些特权动作按槽位重复 N 次，
+ *          各站互不共享状态。
  *          启动时它还负责读两份 YAML 配置、从 logind 的活跃图形会话选出 worker
  *          的目标身份。
  * @details 不负责：HID/音频数据面（worker 进程内的 bt/bridge/audio/usb）、
@@ -350,11 +351,13 @@ class ManagerSupervisor {
       return;
     }
 
-    const ControllerConfig settings = EffectiveSettings(mac);
+    ControllerConfig settings = EffectiveSettings(mac);
     // usb_model 的 auto 就是"用发现结果"；写了型号则本站一律按它呈现，
-    // 单 MAC 模式下手柄还没连上（发现不到型号）时也照样生效。
+    // 单 MAC 模式下手柄还没连上（发现不到型号）时也照样生效。在这里把 auto
+    // 定下来，快照里因此只有具体型号，worker 不再重复判断。
     const core::device::ControllerModel model =
         settings.usb_model.value_or(detected);
+    settings.usb_model = model;
     // 配置层已把间隔收口到 0/1/2/4 毫秒。0 是 real-time：描述符仍用最快的
     // 1 ms，但 worker 只在收到新蓝牙样本时才写；其余档位的数值本身就是
     // bInterval 的字节值（全速一帧 1 ms），不需要换算。这个字节是站点自己的
@@ -374,8 +377,13 @@ class ManagerSupervisor {
       return;
     }
 
+    // 本站的运行期事实也盖在设置里：交给 worker 的那一份因此是完整快照，
+    // 不需要在交接前再逐字段补。
+    settings.bt_addr = mac;
+    settings.host_sysfs_path = station.host_sysfs_path;
+
     pid_t pid = -1;
-    if (!StartWorker(station, mac, settings, gadget.instance, model, pid)) {
+    if (!StartWorker(station, settings, gadget.instance, pid)) {
       // worker 没起来：关掉父侧 fd 并把刚建好的站拆掉，坐标只属于这一站。
       CloseEndpoints(station.endpoints);
       usb::Teardown(gadget.ffs_path, gadget.instance);
@@ -388,82 +396,67 @@ class ManagerSupervisor {
   }
 
   /**
-   * @brief fork 出 worker 并把配置与 fd 交给它，随后父进程放掉自己的 fd 副本。
+   * @brief fork 出 worker 并把配置快照与 fd 交给它，随后父进程放掉自己的副本。
    * @param station 本站的 Provision 产出；其中三个端点 fd 成功时被就地关闭并
-   *                复位，host_sysfs_path 只读不改动。
-   * @param mac 目标手柄 MAC，写进 worker 的交接参数。
-   * @param settings 本站的手柄级设置，覆盖 worker 配置骨架。
+   *                复位。
+   * @param settings 本站完整的生效设置：用户可写字段已叠加，bt_addr、
+   *                host_sysfs_path 与 usb_model 也已由 StartSlot 填齐。
    * @param instance gadget 实例名，只用于日志。
-   * @param model 该手柄的型号，写进 worker 的交接参数。
    * @param out_pid 成功时写入子进程号；失败时不动。
    * @return 子进程已起来 true（不代表它成功 execv）；任何准备失败 false。
-   * @details 顺序上有两个硬约束：argv 与 char* 数组必须在 fork 之前构造好
-   *          （子进程不得分配内存），三个交接号必须在 fork 之前改写成本地号
-   *          3/4/5，worker 解析到的才是它自己进程里看到的编号。
+   * @details 两个硬约束：配置快照与它的 memfd 必须在 fork 之前写好（子进程不得
+   *          分配内存，也不能再编码配置），argv 只含程序名与 `--worker`。
+   *          worker 按固定号取用四条交接通道（3/4/5 端点、6 快照），不必知道
+   *          Manager 手里原本是几号。设置整份拷贝，Options 与 ControllerConfig
+   *          共用同一份字段定义，这里不需要逐项改名或取反。
    * @note 失败路径只负责关自己的 fd；拆站由调用方统一做。
-   * @see PrepareAndExec, ApplyPlan。
+   * @see PrepareAndExec, MakeConfigFd。
    */
-  bool StartWorker(usb::Station& station, const std::string& mac,
-                   const ControllerConfig& settings,
-                   const std::string& instance,
-                   core::device::ControllerModel model, pid_t& out_pid) {
+  bool StartWorker(usb::Station& station, const ControllerConfig& settings,
+                   const std::string& instance, pid_t& out_pid) {
     Options worker_options = base_options_;
-    worker_options.worker = true;
-    worker_options.bt_addr = mac;
-    worker_options.bt_wait_s = settings.bt_wait_s;
-    // 插件配置整份交给这一站：Manager 不读里面的键，取值对不对由插件自己在
-    // worker 侧判。空配置等于没写，插件用各自的默认值。
-    worker_options.plugins = settings.plugins;
-    worker_options.no_audio = !settings.audio;
-    // worker 的 ep0 要应答与自己身份相符的 report descriptor：型号必须跟着
-    // 这一站走，不能像默认值那样一律按普通 DualSense。
-    worker_options.usb_edge = model == core::device::ControllerModel::kEdge;
-    worker_options.haptics_gain = settings.haptics_gain;
-    worker_options.speaker_gain = settings.speaker_gain;
-    // 间隔整个交下去：IN 线程要按它自己排发送时刻，描述符里那个 bInterval
-    // 主机并不照它轮询（dummy_hcd 不兑现）；0 是 real-time 档——只在新样本
-    // 到达时写一份。
-    worker_options.usb_report_interval_ms = settings.usb_report_interval_ms;
-    // 主机侧 USB 接口目录跟着这一站走：worker 把它写进 PipeWire sink/source 的
-    // 节点属性，让按硬件身份找音频端点的消费者（Wine/Proton 的手柄触觉补丁）
-    // 认得出这台虚拟手柄。空串表示这一站没解析出来，BuildWorkerArgv 不为它生成
-    // 参数。
-    worker_options.host_sysfs_path = station.host_sysfs_path;
-    // 交接号写进 worker 的参数：它看到的是 3/4/5，而不是 Manager 手里的号。
-    worker_options.ep0_fd = kEp0Target;
-    worker_options.ep_in_fd = kEpInTarget;
-    worker_options.ep_out_fd = kEpOutTarget;
+    worker_options.controller = settings;
 
-    const std::vector<std::string> worker_argv =
-        BuildWorkerArgv(worker_options, self_path_);
-    // argv 的 char* 数组也必须在 fork 之前建好。
-    const std::vector<char*> argv = ToArgv(worker_argv);
+    // 生效配置编成一份自描述快照，经 memfd 交给 worker；命令行不再承载配置。
+    std::string why;
+    const std::vector<uint8_t> config_blob = worker_options.Encode();
+    const int config_fd = MakeConfigFd(config_blob, why);
+    if (config_fd < 0) {
+      DS5DUMMY_LOG(ERROR, "[manager] Cannot hand config to worker for {}: {}",
+                   settings.bt_addr.c_str(), why.c_str());
+      return false;
+    }
+
+    // argv 的 char* 数组也必须在 fork 之前建好；只剩程序名与内部角色开关。
+    const char* const argv[] = {self_path_.c_str(), "--worker", nullptr};
 
     const HandoffPlan plan{station.endpoints.ep0, station.endpoints.ep_in,
-                           station.endpoints.ep_out};
-    std::string why;
+                           station.endpoints.ep_out, config_fd};
     if (!PlanOk(plan, why)) {
-      DS5DUMMY_LOG(ERROR, "[manager] Cannot hand off endpoints for {}: {}",
-                   mac.c_str(), why.c_str());
+      DS5DUMMY_LOG(ERROR, "[manager] Cannot hand off fds for {}: {}",
+                   settings.bt_addr.c_str(), why.c_str());
+      ::close(config_fd);
       return false;
     }
 
     const pid_t child = ::fork();
     if (child < 0) {
       DS5DUMMY_LOG(ERROR, "[manager] fork: {}", strerror(errno));
+      ::close(config_fd);
       return false;
     }
     if (child == 0) {
       // 子进程从这里开始不许分配内存、不许打日志：只走 syscall 和字面量。
-      PrepareAndExec(plan, drop_uid_, drop_gid_, argv.data(),
-                     self_path_.c_str());
+      PrepareAndExec(plan, drop_uid_, drop_gid_, argv, self_path_.c_str());
     }
 
     out_pid = child;
     DS5DUMMY_LOG(INFO, "[manager] worker pid={} serves {} ({})",
-                 static_cast<long>(child), mac.c_str(), instance.c_str());
-    // 父进程立刻放掉自己那份 fd 副本：从这一刻起 FunctionFS 数据流只在
-    // uid=drop_uid 的 worker 进程里跑。
+                 static_cast<long>(child), settings.bt_addr.c_str(),
+                 instance.c_str());
+    // 父进程立刻放掉自己那份副本：从这一刻起 FunctionFS 数据流只在
+    // uid=drop_uid 的 worker 进程里跑，配置快照也只剩 worker 那一份。
+    ::close(config_fd);
     CloseEndpoints(station.endpoints);
     return true;
   }

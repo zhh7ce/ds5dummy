@@ -18,9 +18,9 @@ namespace ds5::daemon {
 /**
  * @brief 起一站虚拟 USB：读配置选身份 → 建实例 → fork 降权 worker → 等它退出
  *        → 整站拆掉 → 退避后重来。
- * @param options 命令行解析出的内部参数。Manager 只把它们当作 worker 配置的
- *                骨架：bt_addr / bt_wait_s / no_audio / verbosity 全部被配置文件
- *                里的生效值覆盖，ffs 路径与身份来自系统配置。
+ * @param options 命令行解析出的内部参数。Manager 只留用其中的进程级字段
+ *                （verbosity 与两个角色开关）；每只手柄的设置、目标 MAC 与
+ *                ffs 路径分别来自用户配置与系统配置。
  * @return 进程退出码：0 表示按 Ctrl-C 正常收摊，或当前登录用户没有启用本服务
  *         （配置 disabled / 不在白名单）；1 表示启动条件不成立（非 root、配置
  *         错误、无唯一目标用户、ffs 路径非法、无 dummy UDC）。

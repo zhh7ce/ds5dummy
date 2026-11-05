@@ -1,327 +1,277 @@
 // DS5Dummy — options 模块单测
 //
-// options 现在是 worker 交接编解码：Manager 把生效配置写成 argv，worker 解析
-// 回来，两侧必须严格互逆，否则 Manager 传给子进程的参数会和它自己解析到的不是
-// 同一件事。用户级设置走配置文件，命令行里不该再出现。
+// options 现在是"命令行两个开关 + worker 配置快照的编解码"。Manager 把生效配置
+// 编成一份变长二进制快照写进 memfd，worker 的新镜像解码回来；两侧共用同一对
+// 函数，所以往返必须逐字段一致，结构损坏必须在解码点被拒绝，而不是把半份配置
+// 交给数据面。用户级设置走配置文件，命令行里不该再出现。
 
 #include "daemon/options.h"
 
 #include <gtest/gtest.h>
 
-#include <cstdio>
-#include <cstdlib>
+#include <cstdint>
 #include <cstring>
 #include <string>
 #include <vector>
 
+#include "core/device/identity.h"
+
+namespace {
+
+/// @brief 编码再解码一份配置，断言解码成功。
+ds5::daemon::Options RoundTrip(const ds5::daemon::Options& src) {
+  const std::vector<uint8_t> blob = src.Encode();
+  ds5::daemon::Options out;
+  std::string why;
+  EXPECT_TRUE(out.Decode(blob.data(), blob.size(), why)) << why;
+  return out;
+}
+
+/// @brief 改掉快照头里的 total_bytes，用于构造"长度自洽但内容不完整"的样本。
+void SetTotalBytes(std::vector<uint8_t>& blob, uint32_t total) {
+  std::memcpy(blob.data() + 4, &total, sizeof total);
+}
+
+}  // namespace
+
 TEST(Options, Defaults) {
-  ds5::daemon::Options o = ds5::daemon::internal::ParseArgv({});
+  const ds5::daemon::Options o;
+  EXPECT_FALSE(o.worker);
+  EXPECT_FALSE(o.show_help);
+  EXPECT_TRUE(o.controller.audio);
+  // auto：配置层没写 usb_model，Manager 起站时才用发现结果填上。
+  EXPECT_FALSE(o.controller.usb_model.has_value());
+  EXPECT_TRUE(o.controller.bt_addr.empty());
+  // 设备目录是可选交接项：默认（Manager 没解析到）就是空串，worker 据此不写属性。
+  EXPECT_TRUE(o.controller.host_sysfs_path.empty());
+  EXPECT_EQ(o.verbosity, 0);
+  EXPECT_EQ(o.controller.bt_wait_s, 60);
+  // 插件配置默认是空的：配置没写 plugins 就等于每个插件用自己的默认值。
+  EXPECT_TRUE(o.controller.plugins.empty());
+  EXPECT_EQ(o.controller.usb_report_interval_ms, 1);
+  EXPECT_TRUE(o.error.empty());
+}
+
+// Options 的数据面字段与 ControllerConfig 是同一份定义：整份赋值即可，不需要
+// 改名、取反或再拼一遍。
+TEST(Options, CopiesPerControllerSettingsWholesale) {
+  ds5::daemon::ControllerConfig settings;
+  settings.bt_addr = "AA:BB:CC:DD:EE:FF";
+  settings.bt_wait_s = 12;
+  settings.audio = false;
+  settings.haptics_gain = 0.5f;
+  settings.speaker_gain = 5;
+  settings.usb_report_interval_ms = 2;
+  settings.usb_model = core::device::ControllerModel::kEdge;
+  settings.plugins["idle.off_after_minutes"] = "5";
+  settings.host_sysfs_path = "/devices/platform/dummy_hcd.0/usb9/9-1/9-1:1.0";
+
+  ds5::daemon::Options o;
+  o.controller = settings;
+  EXPECT_EQ(o.controller.bt_addr, settings.bt_addr);
+  EXPECT_EQ(o.controller.bt_wait_s, settings.bt_wait_s);
+  EXPECT_EQ(o.controller.audio, settings.audio);
+  EXPECT_FLOAT_EQ(o.controller.haptics_gain, settings.haptics_gain);
+  EXPECT_EQ(o.controller.speaker_gain, settings.speaker_gain);
+  EXPECT_EQ(o.controller.usb_report_interval_ms,
+            settings.usb_report_interval_ms);
+  EXPECT_EQ(o.controller.usb_model, settings.usb_model);
+  EXPECT_EQ(o.controller.plugins, settings.plugins);
+  EXPECT_EQ(o.controller.host_sysfs_path, settings.host_sysfs_path);
+}
+
+TEST(ParseArgs, RecognizesWorkerAndHelp) {
+  const char* raw[] = {"ds5dummyd", "--worker", "--help"};
+  char* argv[] = {const_cast<char*>(raw[0]), const_cast<char*>(raw[1]),
+                  const_cast<char*>(raw[2])};
+  const ds5::daemon::Options o = ds5::daemon::ParseArgs(3, argv);
+  EXPECT_TRUE(o.error.empty()) << o.error;
+  EXPECT_TRUE(o.worker);
+  EXPECT_TRUE(o.show_help);
+}
+
+TEST(ParseArgs, StripsProgramName) {
+  // 只有程序名：等价于空参数，走默认值而不是报错。
+  char* bare[] = {const_cast<char*>("ds5dummyd")};
+  const ds5::daemon::Options o = ds5::daemon::ParseArgs(1, bare);
   EXPECT_TRUE(o.error.empty()) << o.error;
   EXPECT_FALSE(o.worker);
   EXPECT_FALSE(o.show_help);
-  EXPECT_FALSE(o.no_audio);
-  EXPECT_FALSE(o.usb_edge);
-  EXPECT_TRUE(o.bt_addr.empty());
-  // 设备目录是可选交接项：默认（Manager 没解析到）就是空串，worker 据此不写属性。
-  EXPECT_TRUE(o.host_sysfs_path.empty());
-  EXPECT_EQ(o.verbosity, 0);
-  EXPECT_EQ(o.bt_wait_s, 60);
-  // 插件配置默认是空的：配置没写 plugins 就等于每个插件用自己的默认值。
-  EXPECT_TRUE(o.plugins.empty());
-  EXPECT_EQ(o.usb_report_interval_ms, 1);
-  EXPECT_EQ(o.ep0_fd, -1);
-  EXPECT_EQ(o.ep_in_fd, -1);
-  EXPECT_EQ(o.ep_out_fd, -1);
-}
-
-TEST(Options, ParsesAllInternalFlags) {
-  ds5::daemon::Options o = ds5::daemon::internal::ParseArgv(
-      {"--worker", "--ep0", "3", "--ep-in", "4", "--ep-out", "5", "--bt-addr",
-       "AA:BB:CC:DD:EE:FF", "--bt-wait", "5", "--plugin-config",
-       "idle.off_after_minutes=45", "-v",
-       "DEBUG", "--no-audio", "--usb-edge", "--usb-report-interval-ms", "0"});
-  EXPECT_TRUE(o.error.empty()) << o.error;
-  EXPECT_TRUE(o.worker);
-  EXPECT_EQ(o.ep0_fd, 3);
-  EXPECT_EQ(o.ep_in_fd, 4);
-  EXPECT_EQ(o.ep_out_fd, 5);
-  EXPECT_EQ(o.bt_addr, "AA:BB:CC:DD:EE:FF");
-  EXPECT_EQ(o.bt_wait_s, 5);
-  ASSERT_EQ(o.plugins.count("idle.off_after_minutes"), 1u);
-  EXPECT_EQ(o.plugins.at("idle.off_after_minutes"), "45");
-  EXPECT_EQ(o.verbosity, 1);  // -v DEBUG 解析成 loguru 的 1
-  EXPECT_TRUE(o.no_audio);
-  EXPECT_TRUE(o.usb_edge);
-  // 0 是 real-time 档：IN 线程只在新样本到达时写一份。
-  EXPECT_EQ(o.usb_report_interval_ms, 0);
-}
-
-TEST(Options, ParsesAdvancedFlags) {
-  ds5::daemon::Options o = ds5::daemon::internal::ParseArgv(
-      {"--haptics-gain", "1.5", "--speaker-gain", "5"});
-  EXPECT_TRUE(o.error.empty()) << o.error;
-  EXPECT_FLOAT_EQ(o.haptics_gain, 1.5f);
-  EXPECT_EQ(o.speaker_gain, 5);
-
-  // 两端都在闭区间内：0 = 静音，2 = 两倍。
-  EXPECT_FLOAT_EQ(
-      ds5::daemon::internal::ParseArgv({"--haptics-gain", "0"}).haptics_gain,
-      0.0f);
-  EXPECT_FLOAT_EQ(
-      ds5::daemon::internal::ParseArgv({"--haptics-gain", "2"}).haptics_gain,
-      2.0f);
-}
-
-TEST(Options, RejectsAdvancedFlagsOutsideTheirRange) {
-  for (const char* value : {"-0.1", "2.5", "nan", "inf", "loud", ""}) {
-    ds5::daemon::Options o = ds5::daemon::internal::ParseArgv(
-        {"--haptics-gain", value});
-    EXPECT_FALSE(o.error.empty()) << value;
-  }
-  for (const char* value : {"-1", "8", "2.0", "loud"}) {
-    ds5::daemon::Options o = ds5::daemon::internal::ParseArgv(
-        {"--speaker-gain", value});
-    EXPECT_FALSE(o.error.empty()) << value;
-  }
-}
-
-// USB 报告间隔与配置层同一张取值表：1/2/4 ms 之外的值落不到 bInterval 的
-// 档位上，real-time 只用 0 表示，所以表外的写法都按参数错误收掉。
-TEST(Options, AcceptsOnlyTheIntervalTable) {
-  for (const char* value : {"0", "1", "2", "4"}) {
-    ds5::daemon::Options o = ds5::daemon::internal::ParseArgv(
-        {"--usb-report-interval-ms", value});
-    EXPECT_TRUE(o.error.empty()) << value << " " << o.error;
-    EXPECT_EQ(o.usb_report_interval_ms, std::atoi(value));
-  }
-  for (const char* value : {"3", "5", "8", "-1", "0.5", "loud", ""}) {
-    ds5::daemon::Options o = ds5::daemon::internal::ParseArgv(
-        {"--usb-report-interval-ms", value});
-    EXPECT_FALSE(o.error.empty()) << value;
-  }
-}
-
-// --plugin-config 只定形态：一条一个键、`插件名.键=值`，可重复。值本身是不是
-// 那个插件认得的取值，交接层判不了——它不认识任何插件的键。
-TEST(Options, AcceptsRepeatedPluginConfigEntries) {
-  ds5::daemon::Options o = ds5::daemon::internal::ParseArgv({
-      "--plugin-config", "idle.off_after_minutes=45",
-      "--plugin-config", "idle.verbose=1",
-      "--plugin-config", "button-map.left_stick=trigger"});
-  EXPECT_TRUE(o.error.empty()) << o.error;
-  EXPECT_EQ(o.plugins.size(), 3u);
-  EXPECT_EQ(o.plugins.at("idle.off_after_minutes"), "45");
-  EXPECT_EQ(o.plugins.at("idle.verbose"), "1");
-  EXPECT_EQ(o.plugins.at("button-map.left_stick"), "trigger");
-
-  // 值里再出现 '=' 不影响：分隔符只取第一个，剩下的整段是值。
-  ds5::daemon::Options extra_eq = ds5::daemon::internal::ParseArgv(
-      {"--plugin-config", "idle.formula=a==b"});
-  EXPECT_TRUE(extra_eq.error.empty()) << extra_eq.error;
-  EXPECT_EQ(extra_eq.plugins.at("idle.formula"), "a==b");
-
-  // 同一个键出现多条：最后一条赢（正常路径由配置重建，不会重复，这条宽容只服务
-  // 手工拼出来的命令行）。
-  ds5::daemon::Options twice = ds5::daemon::internal::ParseArgv(
-      {"--plugin-config", "idle.off_after_minutes=10", "--plugin-config",
-       "idle.off_after_minutes=20"});
-  EXPECT_TRUE(twice.error.empty()) << twice.error;
-  EXPECT_EQ(twice.plugins.at("idle.off_after_minutes"), "20");
-}
-
-// 形态不合的写法一律按参数错误收掉：`.` 与 `=` 是分隔符，名字里不能出现它们，
-// 空插件名、空键名与空值同样没有第二种含义。
-TEST(Options, RejectsMalformedPluginConfig) {
-  for (const char* value : {"idle", "idle.key", "=30", "idle.=30", ".key=30",
-                            "idle..key=30", "idle.key=", "idle.odd.key=30",
-                            "idle.name with space=30", "idle.键=30"}) {
-    ds5::daemon::Options o =
-        ds5::daemon::internal::ParseArgv({"--plugin-config", value});
-    EXPECT_FALSE(o.error.empty()) << value;
-  }
-}
-
-TEST(Options, WorkerNeedsAllThreeEndpointFds) {
-  EXPECT_FALSE(
-      ds5::daemon::internal::ParseArgv({"--worker"}).error.empty());
-
-  ds5::daemon::Options missing_out =
-      ds5::daemon::internal::ParseArgv(
-          {"--worker", "--ep0", "3", "--ep-in", "4"});
-  EXPECT_FALSE(missing_out.error.empty());
-
-  ds5::daemon::Options missing_in =
-      ds5::daemon::internal::ParseArgv(
-          {"--worker", "--ep0", "3", "--ep-out", "5"});
-  EXPECT_FALSE(missing_in.error.empty());
-
-  // 不带 --worker 时三个 fd 号都不是必需项：Manager 侧解析的就是这种形态。
-  EXPECT_TRUE(
-      ds5::daemon::internal::ParseArgv({"--bt-wait", "7"}).error.empty());
-}
-
-TEST(Options, RejectsNonNumericOrNegativeFd) {
-  EXPECT_FALSE(ds5::daemon::internal::ParseArgv(
-                   {"--worker", "--ep0", "not-a-number", "--ep-in", "4",
-                    "--ep-out", "5"})
-                   .error.empty());
-  EXPECT_FALSE(ds5::daemon::internal::ParseArgv(
-                   {"--worker", "--ep0", "-1", "--ep-in", "4", "--ep-out", "5"})
-                   .error.empty());
-}
-
-TEST(Options, RejectsUnknownOptionAndMissingValue) {
-  ds5::daemon::Options unknown =
-      ds5::daemon::internal::ParseArgv({"--nope"});
-  EXPECT_FALSE(unknown.error.empty());
-  EXPECT_NE(unknown.error.find("--nope"), std::string::npos) << unknown.error;
-
-  EXPECT_FALSE(
-      ds5::daemon::internal::ParseArgv({"--bt-addr"}).error.empty());
-  EXPECT_FALSE(ds5::daemon::internal::ParseArgv({"--bt-wait", "abc"})
-                   .error.empty());
 }
 
 // 用户级设置已经搬到 YAML，旧的命令行开关必须变成"不认识的选项"，而不是被
 // 静默忽略——否则照着老文档敲命令的人会以为设置生效了。
-TEST(Options, RejectsRetiredUserFacingFlags) {
-  for (const char* retired : {"--ffs-path", "--uid", "--gid"}) {
-    ds5::daemon::Options o =
-        ds5::daemon::internal::ParseArgv({retired, "1"});
+TEST(ParseArgs, RejectsUnknownAndRetiredOptions) {
+  for (const char* retired :
+       {"--bt-addr", "--bt-wait", "--plugin-config", "--ep0", "--ep-in",
+        "--ep-out", "--no-audio", "--usb-edge", "--usb-report-interval-ms",
+        "--haptics-gain", "--speaker-gain", "--sysfs-path", "-v", "--ffs-path",
+        "--uid", "--gid"}) {
+    const char* raw[] = {"ds5dummyd", retired, "1"};
+    char* argv[] = {const_cast<char*>(raw[0]), const_cast<char*>(raw[1]),
+                    const_cast<char*>(raw[2])};
+    const ds5::daemon::Options o = ds5::daemon::ParseArgs(3, argv);
     EXPECT_FALSE(o.error.empty()) << retired;
     EXPECT_NE(o.error.find(retired), std::string::npos) << o.error;
   }
 }
 
-TEST(Options, RejectsUnknownVerbosityInsteadOfLettingLoguruAbort) {
-  EXPECT_FALSE(
-      ds5::daemon::internal::ParseArgv({"-v", "LOUD"}).error.empty());
-  EXPECT_EQ(ds5::daemon::internal::ParseArgv({"-v", "OFF"}).verbosity,
-            -9);
-  EXPECT_EQ(ds5::daemon::internal::ParseArgv({"-v", "2"}).verbosity, 2);
-}
-
-TEST(Options, HelpIsNotAnError) {
-  ds5::daemon::Options o =
-      ds5::daemon::internal::ParseArgv({"--help"});
-  EXPECT_TRUE(o.error.empty()) << o.error;
-  EXPECT_TRUE(o.show_help);
-}
-
-// ParseArgs 是 main 的真入口：必须剥掉 argv[0] 再交给 ParseArgv。
-TEST(Options, ParseArgsStripsProgramName) {
-  const char* raw[] = {"ds5dummy", "--bt-wait", "7", "--no-audio"};
-  char* argv[] = {const_cast<char*>(raw[0]), const_cast<char*>(raw[1]),
-                  const_cast<char*>(raw[2]), const_cast<char*>(raw[3])};
-  ds5::daemon::Options o = ds5::daemon::ParseArgs(4, argv);
-  EXPECT_TRUE(o.error.empty()) << o.error;
-  EXPECT_EQ(o.bt_wait_s, 7);
-  EXPECT_TRUE(o.no_audio);
-
-  // 只有程序名：等价于空参数，走默认值而不是报错。
-  char* bare[] = {const_cast<char*>("ds5dummy")};
-  ds5::daemon::Options d = ds5::daemon::ParseArgs(1, bare);
-  EXPECT_TRUE(d.error.empty()) << d.error;
-  EXPECT_EQ(d.bt_wait_s, 60);
-  EXPECT_FALSE(d.worker);
-}
-
-// ToArgv 产出 execv 直接吃的 NULL 结尾数组。
-TEST(Options, ToArgvIsNullTerminated) {
-  const std::vector<std::string> av{"ds5dummy", "--worker", "--no-audio"};
-  std::vector<char*> cargv = ds5::daemon::ToArgv(av);
-  ASSERT_EQ(cargv.size(), av.size() + 1);
-  EXPECT_STREQ(cargv[0], "ds5dummy");
-  EXPECT_STREQ(cargv[1], "--worker");
-  EXPECT_STREQ(cargv[2], "--no-audio");
-  EXPECT_EQ(cargv.back(), nullptr);
-}
-
-// 所有字段都非默认时的往返：BuildWorkerArgv 产出的 argv 必须能被 ParseArgv
-// 原样读回，这是"两侧看到同一份生效配置"的唯一保证。
-TEST(Options, WorkerArgvRoundTripsWithOptionalFields) {
+// 所有字段都非默认时的往返：字符串、浮点与有序插件表都要原样回来。
+TEST(Snapshot, RoundTripsAllFields) {
   ds5::daemon::Options src;
-  src.bt_addr = "AA:BB:CC:DD:EE:FF";
+  src.controller.bt_addr = "AA:BB:CC:DD:EE:FF";
   src.verbosity = 1;
-  src.bt_wait_s = 42;
-  // 插件配置带两个插件、其中一个两个键：往返要把扁平的 argv 原样还原。
-  src.plugins["idle.off_after_minutes"] = "45";
-  src.plugins["idle.verbose"] = "1";
-  src.plugins["button-map.left_stick"] = "trigger";
-  src.no_audio = true;
-  src.usb_edge = true;
-  src.usb_report_interval_ms = 4;
-  // 0.123456789f 是 std::to_string 往返会失真的值：固定 6 位小数写回后不是
-  // 同一个 float，这里用它钉住 format_gain 的最短表示契约。
-  src.haptics_gain = 0.123456789f;
-  src.speaker_gain = 6;
-  // 建站时解析到的主机侧 USB 接口目录，相对 /sys；值以 '/' 开头，正好验证它作为
-  // 独立参数不会被解析器当成选项名，而名字里的冒号（`9-1:1.0`）验证它不被当成分隔符。
-  src.host_sysfs_path = "/devices/platform/dummy_hcd.0/usb9/9-1/9-1:1.0";
-  // Manager 在建好实例后把交接目标号写进这三个字段（handoff 固定 3/4/5）。
-  src.ep0_fd = 3;
-  src.ep_in_fd = 4;
-  src.ep_out_fd = 5;
+  src.controller.bt_wait_s = 42;
+  src.controller.plugins["idle.off_after_minutes"] = "45";
+  src.controller.plugins["idle.verbose"] = "1";
+  src.controller.plugins["button-map.left_stick"] = "trigger";
+  src.controller.audio = false;
+  src.controller.usb_model = core::device::ControllerModel::kEdge;
+  src.controller.usb_report_interval_ms = 4;
+  // 0.123456789f 按原始位型走线格式：encode/decode 不是十进制往返，不能丢精度。
+  src.controller.haptics_gain = 0.123456789f;
+  src.controller.speaker_gain = 6;
+  // 以 '/' 开头、带冒号的接口目录：证明路径不经过任何分隔符解析。
+  src.controller.host_sysfs_path =
+      "/devices/platform/dummy_hcd.0/usb9/9-1/9-1:1.0";
 
-  std::vector<std::string> av =
-      ds5::daemon::BuildWorkerArgv(src, "/usr/bin/ds5dummy");
-  ASSERT_FALSE(av.empty());
-  EXPECT_EQ(av[0], "/usr/bin/ds5dummy");
-
-  std::vector<std::string> tail(av.begin() + 1, av.end());
-  ds5::daemon::Options got =
-      ds5::daemon::internal::ParseArgv(tail);
-  EXPECT_TRUE(got.error.empty()) << got.error;
-  EXPECT_TRUE(got.worker);
-  EXPECT_EQ(got.ep0_fd, 3);
-  EXPECT_EQ(got.ep_in_fd, 4);
-  EXPECT_EQ(got.ep_out_fd, 5);
-  EXPECT_EQ(got.bt_addr, src.bt_addr);
+  const ds5::daemon::Options got = RoundTrip(src);
+  EXPECT_EQ(got.controller.bt_addr, src.controller.bt_addr);
   EXPECT_EQ(got.verbosity, src.verbosity);
-  EXPECT_EQ(got.bt_wait_s, src.bt_wait_s);
-  EXPECT_EQ(got.plugins, src.plugins);
-  EXPECT_EQ(got.no_audio, src.no_audio);
-  EXPECT_EQ(got.usb_edge, src.usb_edge);
-  EXPECT_EQ(got.usb_report_interval_ms, src.usb_report_interval_ms);
-  EXPECT_FLOAT_EQ(got.haptics_gain, src.haptics_gain);
-  EXPECT_EQ(got.speaker_gain, src.speaker_gain);
-  EXPECT_EQ(got.host_sysfs_path, src.host_sysfs_path);
+  EXPECT_EQ(got.controller.bt_wait_s, src.controller.bt_wait_s);
+  EXPECT_EQ(got.controller.plugins, src.controller.plugins);
+  EXPECT_EQ(got.controller.audio, src.controller.audio);
+  EXPECT_EQ(got.controller.usb_model, src.controller.usb_model);
+  EXPECT_EQ(got.controller.usb_report_interval_ms,
+            src.controller.usb_report_interval_ms);
+  EXPECT_FLOAT_EQ(got.controller.haptics_gain, src.controller.haptics_gain);
+  EXPECT_EQ(got.controller.speaker_gain, src.controller.speaker_gain);
+  EXPECT_EQ(got.controller.host_sysfs_path, src.controller.host_sysfs_path);
 }
 
-// 可选字段全为默认时同样要往返：缺省不写进 argv，读回后仍是默认值。
-TEST(Options, WorkerArgvRoundTripsDefaults) {
+// 另一个具体型号也要原样回来：0/1/2 三个编码值各对应一种状态。
+TEST(Snapshot, RoundTripsDualSenseModel) {
   ds5::daemon::Options src;
-  src.ep0_fd = 3;
-  src.ep_in_fd = 4;
-  src.ep_out_fd = 5;
+  src.controller.usb_model = core::device::ControllerModel::kDualSense;
+  const ds5::daemon::Options got = RoundTrip(src);
+  ASSERT_TRUE(got.controller.usb_model.has_value());
+  EXPECT_EQ(*got.controller.usb_model,
+            core::device::ControllerModel::kDualSense);
+}
 
-  const std::vector<std::string> av =
-      ds5::daemon::BuildWorkerArgv(src, "ds5dummy");
-  const std::vector<std::string> tail(av.begin() + 1, av.end());
-  // 可选段一个都不该出现：空 bt_addr 若被写成 "--bt-addr" 会成缺值错误。
-  for (const std::string& arg : tail) {
-    EXPECT_NE(arg, "--bt-addr") << "空 bt_addr 不应出现在 argv 里";
-    EXPECT_NE(arg, "--no-audio") << "默认的 no_audio 不应出现在 argv 里";
-    EXPECT_NE(arg, "--usb-edge") << "普通 DualSense 站不应写出该参数";
-    EXPECT_NE(arg, "--usb-report-interval-ms") << "默认间隔不应写出该参数";
-    EXPECT_NE(arg, "--plugin-config") << "空插件配置不应写出任何条目";
-    EXPECT_NE(arg, "--haptics-gain") << "默认增益 1.0 不应出现在 argv 里";
-    EXPECT_NE(arg, "--speaker-gain") << "默认增益 2 不应出现在 argv 里";
-    EXPECT_NE(arg, "--sysfs-path") << "没解析到设备目录时不应写出该参数";
-  }
+// 全默认配置同样要往返：空字符串与空插件表是合法内容，不是"缺字段"。
+TEST(Snapshot, RoundTripsDefaults) {
+  const ds5::daemon::Options src;
+  const ds5::daemon::Options got = RoundTrip(src);
+  EXPECT_TRUE(got.controller.bt_addr.empty());
+  EXPECT_TRUE(got.controller.host_sysfs_path.empty());
+  EXPECT_EQ(got.controller.bt_wait_s, 60);
+  EXPECT_TRUE(got.controller.plugins.empty());
+  EXPECT_TRUE(got.controller.audio);
+  EXPECT_FALSE(got.controller.usb_model.has_value());
+  EXPECT_EQ(got.controller.usb_report_interval_ms, 1);
+  EXPECT_FLOAT_EQ(got.controller.haptics_gain, 1.0f);
+  EXPECT_EQ(got.controller.speaker_gain, 2);
+}
 
-  ds5::daemon::Options got = ds5::daemon::internal::ParseArgv(tail);
-  EXPECT_TRUE(got.error.empty()) << got.error;
-  EXPECT_TRUE(got.worker);
-  EXPECT_TRUE(got.bt_addr.empty());
-  EXPECT_TRUE(got.host_sysfs_path.empty());
-  EXPECT_EQ(got.bt_wait_s, 60);
-  EXPECT_TRUE(got.plugins.empty());
-  EXPECT_FALSE(got.no_audio);
-  EXPECT_FALSE(got.usb_edge);
-  EXPECT_EQ(got.usb_report_interval_ms, 1);
-  EXPECT_FLOAT_EQ(got.haptics_gain, 1.0f);
-  EXPECT_EQ(got.speaker_gain, 2);
+// 字符串是"长度 + 原始字节"，不是 C 字符串：内嵌 NUL 与空值都必须原样保留。
+TEST(Snapshot, PreservesEmbeddedNulAndEmptyValues) {
+  ds5::daemon::Options src;
+  src.controller.bt_addr = std::string("AA\0BB", 5);
+  src.controller.plugins["idle.key"] = "";
+  src.controller.plugins["idle.blob"] = std::string("x\0y", 3);
+
+  const ds5::daemon::Options got = RoundTrip(src);
+  EXPECT_EQ(got.controller.bt_addr, src.controller.bt_addr);
+  EXPECT_EQ(got.controller.bt_addr.size(), 5u);
+  EXPECT_EQ(got.controller.plugins, src.controller.plugins);
+}
+
+// 解码只写配置字段：调用方在读取快照前已经用 ParseArgs 填好的进程内标志不能被
+// 清掉，否则 worker 会丢掉自己的角色。
+TEST(Snapshot, LeavesRuntimeFlagsUntouched) {
+  ds5::daemon::Options out;
+  out.worker = true;
+  out.show_help = true;
+  out.error = "keep me";
+  const std::vector<uint8_t> blob = ds5::daemon::Options{}.Encode();
+  std::string why;
+  ASSERT_TRUE(out.Decode(blob.data(), blob.size(), why)) << why;
+  EXPECT_TRUE(out.worker);
+  EXPECT_TRUE(out.show_help);
+  EXPECT_EQ(out.error, "keep me");
+}
+
+TEST(Snapshot, RejectsBadMagic) {
+  std::vector<uint8_t> blob = ds5::daemon::Options{}.Encode();
+  blob[0] ^= 0xFF;
+  ds5::daemon::Options out;
+  std::string why;
+  EXPECT_FALSE(out.Decode(blob.data(), blob.size(), why));
+  EXPECT_NE(why.find("magic"), std::string::npos) << why;
+}
+
+// usb_model 只编码 0/1/2 三个值；其余字节说明快照损坏，不能当成"未知型号"。
+// 型号字节在头里的偏移：magic 4 + total 4 + 四个 i32 16 + f32 4 + audio 1。
+TEST(Snapshot, RejectsBadUsbModelCode) {
+  std::vector<uint8_t> blob = ds5::daemon::Options{}.Encode();
+  blob[29] = 3;
+  ds5::daemon::Options out;
+  std::string why;
+  EXPECT_FALSE(out.Decode(blob.data(), blob.size(), why));
+  EXPECT_NE(why.find("usb model"), std::string::npos) << why;
+}
+
+TEST(Snapshot, RejectsTruncatedHeader) {
+  const std::vector<uint8_t> blob = ds5::daemon::Options{}.Encode();
+  ds5::daemon::Options out;
+  std::string why;
+  EXPECT_FALSE(out.Decode(nullptr, 0, why));
+  EXPECT_FALSE(out.Decode(blob.data(), 10, why));
+  EXPECT_FALSE(out.Decode(blob.data(), 31, why));
+}
+
+TEST(Snapshot, RejectsLengthMismatch) {
+  const std::vector<uint8_t> blob = ds5::daemon::Options{}.Encode();
+  ds5::daemon::Options out;
+  std::string why;
+
+  // 少一个字节：头里的 total 仍是原长。
+  EXPECT_FALSE(out.Decode(blob.data(), blob.size() - 1, why));
+  EXPECT_NE(why.find("length"), std::string::npos) << why;
+
+  // 多一个字节但不改 total：同样按长度不符拒绝。
+  std::vector<uint8_t> longer = blob;
+  longer.push_back(0);
+  why.clear();
+  EXPECT_FALSE(out.Decode(longer.data(), longer.size(), why));
+  EXPECT_NE(why.find("length"), std::string::npos) << why;
+}
+
+// 长度自洽但内部字符串越界：不能把半个字符串读进配置。
+TEST(Snapshot, RejectsStringLongerThanSnapshot) {
+  ds5::daemon::Options src;
+  src.controller.bt_addr = "AA:BB";
+  std::vector<uint8_t> blob = src.Encode();
+  // 头 32 字节之后是 bt_addr 的长度字段（magic 4 + total 4 + 五个标量 20 +
+  // 两个 u8 + 2 字节保留）。把它改成远超剩余字节的值。
+  const uint32_t huge = 0xFFFFFFFFu;
+  std::memcpy(blob.data() + 32, &huge, sizeof huge);
+  ds5::daemon::Options out;
+  std::string why;
+  EXPECT_FALSE(out.Decode(blob.data(), blob.size(), why));
+  EXPECT_NE(why.find("truncated"), std::string::npos) << why;
+}
+
+// 长度自洽但末尾多了不属于任何字段的字节：格式错误，不是"多读一点也无所谓"。
+TEST(Snapshot, RejectsTrailingBytes) {
+  std::vector<uint8_t> blob = ds5::daemon::Options{}.Encode();
+  blob.push_back(0x7F);
+  SetTotalBytes(blob, static_cast<uint32_t>(blob.size()));
+  ds5::daemon::Options out;
+  std::string why;
+  EXPECT_FALSE(out.Decode(blob.data(), blob.size(), why));
+  EXPECT_NE(why.find("trailing"), std::string::npos) << why;
 }
 
 // 每个 loguru 级别名都要落到约定数值；TRACE 是 VERBOSE 的别名。
@@ -405,13 +355,14 @@ TEST(Usage, PrintUsageReplacesProgName) {
   EXPECT_NE(fallback.find("Usage: ds5dummy"), std::string::npos) << fallback;
 }
 
-// 用法文本对用户只说配置文件：两份路径都要出现，内部交接参数不再列出来。
+// 用法文本对用户只说配置文件：两份路径都要出现，内部角色开关与旧参数都不列。
 TEST(Usage, PointsAtBothConfigFiles) {
   const std::string usage = ds5::daemon::internal::UsageText();
   EXPECT_NE(usage.find("/etc/ds5dummy/config.yaml"), std::string::npos)
       << usage;
   EXPECT_NE(usage.find(".config/ds5dummy/config.yaml"), std::string::npos)
       << usage;
+  EXPECT_EQ(usage.find("--worker"), std::string::npos) << usage;
   EXPECT_EQ(usage.find("--bt-addr"), std::string::npos) << usage;
   EXPECT_EQ(usage.find("--ffs-path"), std::string::npos) << usage;
 }

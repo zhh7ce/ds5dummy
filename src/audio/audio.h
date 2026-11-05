@@ -89,7 +89,7 @@ using MicOpenHandler = std::function<void(bool open)>;
  *                    起来没人收数据，比不起更难查）。
  * @param host_sysfs_path 本站在主机侧的 USB 接口目录，相对 /sys，形如
  *                    `/devices/platform/dummy_hcd.0/usb9/9-1/9-1:1.0`；由
- *                    Manager 建站时解析、经 worker 的交接参数传到这里，sink 与
+ *                    Manager 建站时解析、经 worker 的配置快照传到这里，sink 与
  *                    source 共用同一个值，空串则两条流都不带 device.sysfs.path
  *                    与 alsa.card 属性。
  * @param on_lost     sink 或 source 连续恢复失败后的通知；两条流收同一个

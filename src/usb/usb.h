@@ -56,7 +56,7 @@ struct Endpoints {
  * 从设备目录出发只会命中 root hub。解析不到就是空串——它只是可选信息，不影响
  * 站点是否可用。
  *
- * @see Provision —— 唯一的产出方；audio::Start —— 最终的消费方（经 worker argv）。
+ * @see Provision —— 唯一的产出方；audio::Start —— 最终的消费方（经 worker 配置快照）。
  */
 struct Station {
   Endpoints endpoints;       ///< 三个 FunctionFS 端点 fd，所有权归调用方。
@@ -168,7 +168,7 @@ bool IsSafeGadgetPath(const std::string& path);
  * @param inherited 交接后的 fd 三元组（worker 侧即 3/4/5）。
  * @param profile 本站型号档案：ep0 线程据此应答 GET_DESCRIPTOR(Report) 与 HID
  *                class descriptor。必须与 Manager 建站时用的是同一份，所以由
- *                Manager 经交接参数（--usb-edge）传下来。
+ *                Manager 经 worker 配置快照的 usb_model 传下来。
  * @return 合法 true；任一 fd 不可用或彼此相同 false。
  */
 bool Adopt(const Endpoints& inherited,

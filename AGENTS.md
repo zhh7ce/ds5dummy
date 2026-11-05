@@ -36,9 +36,9 @@ Entertainment / DualSense Wireless Controller"，DualSense Edge 是 `054c:0df2`
 
 | 路径 | 内容 |
 |---|---|
-| `src/main.cpp` | 唯一入口：解析参数、装信号 handler、按 `--worker` 分派两个角色 |
+| `src/main.cpp` | 唯一入口：解析 argv（只剩 `--worker`/`--help`）、worker 侧读并解码配置快照、装信号 handler、分派两个角色 |
 | `src/core/` | 协议与设备静态模型：报告 ID/线尺寸、输入/输出状态编解码、CRC32、USB 描述符、设备身份 |
-| `src/daemon/` | 进程形态：`config`（YAML 解析 + 加固读取）、`discovery`（hidraw sysfs → 手柄 MAC）、`identity`（sd-login 会话 → worker 身份）、`options`（Manager→worker 的内部交接参数编解码）、`shutdown`（信号）、`manager`（root 多槽监督循环）、`worker`（数据面宿主）、`handoff`（fd 交接）、`privdrop`（降权执行） |
+| `src/daemon/` | 进程形态：`config`（YAML 解析 + 加固读取）、`discovery`（hidraw sysfs → 手柄 MAC）、`identity`（sd-login 会话 → worker 身份）、`options`（CLI 解析 + worker 配置快照的编解码）、`shutdown`（信号）、`manager`（root 多槽监督循环）、`worker`（数据面宿主）、`handoff`（fd 交接）、`privdrop`（降权执行） |
 | `src/usb/` | `gadget_setup`（configfs 装配 + mount）、`ffs_device`（端点 fd 机制）、`usb`（门面 + 线程起停）、`usb_plane`（共享运行状态）、`usb_inout`（IN/OUT 两条循环）、`usb_ep0`（ep0 循环 + Ep0Responder 实现） |
 | `src/bt/` | `bt`（门面）、`bt_link`（生命周期/缓存策略/线程起停）、`bt_plane`（共享运行状态）、`bt_rx`/`bt_tx`（两条传输线程）、`bt_detail`（后端接缝）、`bt_l2cap`/`bt_hidraw`（二选一的后端 TU） |
 | `src/bridge/` | `bridge`（转发策略）、`state_report`（63 字节输出状态影子）、`fake_mac`（0x09 合成）、`usb_report`/`audio_report`/`mic_report`/`power_report`（四种报告的字节布局） |
@@ -102,18 +102,30 @@ Ctrl-C 时 Manager 给每个 worker 各发一次 SIGTERM（只发一次，避免
 
 ### fd 交接（不是 socket）
 
-fork 之后子进程继承三个端点 fd，`src/daemon/handoff.cpp` 把它们挪到**固定的
-3/4/5**（`kEp0Target`/`kEpInTarget`/`kEpOutTarget`；从 3 起是因为 stdio 占 0/1/2），
-`close_range` 清掉其余继承 fd，然后按 `privdrop` 切身份，最后 `execv` 自身。
-配置经 `BuildWorkerArgv` 重建 argv 下传，与 `internal::ParseArgv` 互为逆运算，所以
-worker 解析到的就是 Manager 下发的生效配置（用户级字段已由 YAML 覆盖过）。
+fork 之后子进程继承四条通道，`src/daemon/handoff.cpp` 把它们挪到**固定的
+3/4/5/6**（`kEp0Target`/`kEpInTarget`/`kEpOutTarget`/`kConfigFdTarget`；从 3 起是因为
+stdio 占 0/1/2）：三个端点 fd 加一条配置快照 fd。源 fd 若正好占着别的通道的目标号，
+先 `F_DUPFD` 逃到 7 以上，再逐条 `dup2`；随后 `close_range` 清掉 6 之上的其余继承
+fd，清掉四个目标上的 `FD_CLOEXEC`（它们必须活过 execv），然后按 `privdrop` 切身份，
+最后 `execv` 自身，argv 只剩 `{self_path, "--worker"}`。
+
+配置不再走 argv。Manager 把生效配置（用户级字段已由 YAML 覆盖过）编成一份**变长
+快照**——`Options::Encode`，定长标量头 + 长度前缀的字符串与
+`插件名.键路径 → 值` 条目，条目的 map 顺序让同一份配置每次编码都逐字节相同——写进
+`memfd_create` 出的无名字文件（`MFD_ALLOW_SEALING`），加上
+`F_SEAL_SHRINK|F_SEAL_GROW|F_SEAL_WRITE|F_SEAL_SEAL` 后交接。worker 的新镜像在
+`loguru::init` 之前用 `handoff::ReadConfigFd`（`fstat` 只收非空普通文件、1 MiB 上限，
+再 `pread` 读满）取回字节，交 `Options::Decode` 做**纯结构**校验
+（magic、`total_bytes` 必须等于实长、字符串不得越过剩余字节、不许有尾随字节），
+然后把解出的字段写进 `Options` 并关掉 fd 6。取值不在这里校验：配置层在更早的一步
+已经收口。解码失败在 loguru 起来之前打到 stderr 并退出 2。
 
 fork 之后、execv 之前的路径**禁止内存分配与 loguru 调用**（父进程已有 loguru 日志线程
 跑过 malloc，锁状态不可信）。因此 `handoff.h`/`privdrop.h` 每个判断都有
-`const char**` 的无分配重载。这条路径上的失败用 `_exit(kExecExitBase + stage)`
-上报，`kExecExitBase = 120`，`ExecStage` = `kBadPlan(1)`/`kMove(2)`/`kCloseRange(3)`/
-`kDropPrivs(4)`/`kExec(5)`；`ReportChildExit` 靠区间把它和 worker 正常退出码
-（0/1/2）区分开。
+`const char**` 的无分配重载；快照的编码、memfd 读写与解码都不在这段路径上，用的是
+分配版。这条路径上的失败用 `_exit(kExecExitBase + stage)` 上报，`kExecExitBase = 120`，
+`ExecStage` = `kBadPlan(1)`/`kMove(2)`/`kCloseRange(3)`/`kDropPrivs(4)`/`kExec(5)`；
+`ReportChildExit` 靠区间把它和 worker 正常退出码（0/1/2）区分开。
 
 ### 降权 worker
 
@@ -124,25 +136,29 @@ passwd 主组，`list` 用配置条目里的 gid（省略时等于 uid）），`
 组），最后用 `setuid(0)` 反向验证：必须失败。
 
 worker（`src/daemon/worker.cpp`）认领 fd（`usb::Adopt`）、建蓝牙链路、起全部数据面
-线程、跑 100 ms 主循环直到退出。它不读配置文件：`bt_addr`、`bt_wait_s`、`no_audio`、
-`haptics_gain`、`speaker_gain`、`verbosity`、`usb_edge`（本站在 USB 上呈现为 Edge：
-最终型号由发现结果与配置里的 `usb_model` 叠加后折成这个开关）由 Manager 从两份配置与
-发现结果读出后写进交接 argv，
-`host_sysfs_path`（`--sysfs-path`）由 Manager 建站时从 sysfs 解析出本站的 USB 接口目录后
-写入，worker 只转交给音频的 sink 与 source——它已降权，也不认识 configfs 坐标，自己查不到；`usb_report_interval_ms` 的数值整个进 argv（`--usb-report-interval-ms`），因为 IN 线程的发送节拍要靠它在 worker 侧自己排，描述符里那个 `bInterval` 不构成节奏。它连 PipeWire 用的是桌面用户的身份，所以需要
+线程、跑 100 ms 主循环直到退出。它不读配置文件：每站的数据面设置就是配置层的
+`ControllerConfig`（`bt_addr`、`bt_wait_s`、`audio`、`haptics_gain`、`speaker_gain`、
+`usb_report_interval_ms`、`usb_model`、`host_sysfs_path` 与插件袋），Manager 从两份配置
+与发现结果叠加、把 `usb_model` 的 auto 定成具体型号后整份交给它——`Options::controller`
+与它是同一个类型，交接前一次赋值，不逐字段改名或取反。`bt_addr` 与 `host_sysfs_path`
+是配置层不写的两个运行期字段：前者由 Manager 按发现结果（或根级 `bt_addr`）定成本站
+MAC，后者在建站时从 sysfs 解析出本站的 USB 接口目录写入；worker 只把后者转交给
+音频的 sink 与 source——它已降权，也不认识 configfs 坐标，自己查不到；
+`usb_report_interval_ms` 也在快照里，因为 IN 线程的发送节拍要靠它在 worker 侧自己排，
+描述符里那个 `bInterval` 不构成节奏。它连 PipeWire 用的是桌面用户的身份，所以需要
 `XDG_RUNTIME_DIR`；`RestoreXdgRuntimeDir()` 在环境变量丢了的时候按当前 uid（或
 `SUDO_UID`）回落到 `/run/user/<uid>`。插件配置里的 `~/` 在 worker 侧展开，所以
 `RestoreHome()` 在同一步把 `HOME` 改成当前 uid 的 passwd 家目录——Manager 以
 root 起，继承下来的 `HOME` 是 root 的。
 
-插件袋也走 argv：`--plugin-config <插件名>.<点分键路径>=<值>` 一条一个键，由 Manager 从合并后的
+插件袋也走同一份快照：每个 `插件名.点分键路径` 一条长度前缀的条目，由 Manager 从合并后的
 `plugins:` 那一节压出来，daemon 只搬字符串、不认识任何键名（见 §10）。worker 在连上手柄
 之后、`bt::StartThreads()` 之前 `plugin::Start()`，把交出的输入钩子逐个
 `bridge::AddStateHook()`；在两条传输线程都 join 之后先 `bridge::ClearStateHooks()` 再
 `plugin::Stop()`——钩子还在别的线程上跑的时候不能释放实例。
 
-`main.cpp` 刻意不让 `loguru::init` 扫 argv：级别由 `options` 自己解析
-（`ParseVerbosity`），因为 loguru 的名字表不认 `DEBUG`，遇到不认识的值是
+`main.cpp` 刻意不让 `loguru::init` 扫 argv：日志级别的唯一来源是配置（由配置层解析成
+数值、随快照下来），而 loguru 的名字表不认 `DEBUG`，遇到不认识的值是
 `CHECK_F` 直接 abort。`stdout` 设成行缓冲，否则重定向到管道时 gadget/bridge/audio
 的里程碑交错会丢。
 
@@ -334,7 +350,7 @@ configfs 的 `UDC` 属性反查本站：`/sys/class/udc/dummy_udc.N` canonical �
 不属于本站。真声卡那一级是 `…/1-1/1-1:1.3/sound/card1`——我们背后没有 ALSA 卡，接口目录
 就是这棵树上父链正确、且与真机最同形的东西。路径**去掉 `/sys` 前缀**（形如
 `/devices/platform/dummy_hcd.0/usb9/9-1/9-1:1.0`，与 PipeWire 真设备上 `device.sysfs.path`
-的口径一致）存进 `Station`，经 `--sysfs-path` 交给 worker 写进两条流的节点属性。这一步是
+的口径一致）存进 `Station`，随配置快照交给 worker 写进两条流的节点属性。这一步是
 可选信息：等不到只留空并记 WARNING，站点照常可用。
 换算只认 `dummy_udc` 前缀（真实控制器的名字换不出配对目录，返回空而不是猜）。
 
@@ -428,8 +444,8 @@ dummy_hcd 不按它轮询（见上面那段），所以它既不限制也不产�
     全量透传。缺了 bus/VID/PID 这组，Wine 的 winepulse 只能落到 `ROOT\MEDIA` 匿名回落，
     `is_dualsense_audio_device()` 那条判据（bus 精确 strcmp "usb"，VID/PID 按 16 进制读回）
     就不成立。
-  - `Station::host_sysfs_path` 非空时写成 `device.sysfs.path`（Manager 建站时解析、经 worker
-    argv 传下来，见 §7），并从同一段路径里的 `dummy_hcd.<N>` 推出 `alsa.card` 与
+  - `Station::host_sysfs_path` 非空时写成 `device.sysfs.path`（Manager 建站时解析、随配置
+    快照传下来，见 §7），并从同一段路径里的 `dummy_hcd.<N>` 推出 `alsa.card` 与
     `api.alsa.card`（两个键同值，读方是"或"）：那个序号是本站虚拟主控制器的编号，与真
     ALSA 卡索引在"同一主机内唯一、按站稳定"这个含义上同构，GE-Proton 用它给同型号两只
     手柄定 Canonical 身份。解析不出序号就不写，不交出一个猜来的 0。
@@ -641,13 +657,18 @@ configure 失败是设计选择**——静默退化成 HID-only 会让除了在�
 ## 13. 测试
 
 `tests/CMakeLists.txt` 把被测源文件直接编进一个 `ds5dummy_tests` 二进制，
-`gtest_discover_tests` 让 ctest 看到逐个用例（当前 319 个，两个后端各跑一遍）。
+`gtest_discover_tests` 让 ctest 看到逐个用例（当前 321 个，两个后端各跑一遍）。
 **硬性约束：全部测试必须能在无 root、无手柄的环境下跑** —— 需要特权或硬件的验证是人工
 清单，不进 CI/单测。因此 bt 的测试只覆盖门面到后端的纯转发契约、`tx` 的入队/seq/CRC/
 背压、feature 缓存策略，硬件往返一律不测；`daemon/discovery` 与 `usb` 的测试自己搭临时
 sysfs 树（假 `uevent` 文件、假 `dummy_udc.N/udc/dummy_udc.N` 与同索引兄弟目录
 `dummy_hcd.N/usbM/<M>-1`，即真机上的那对兄弟形状；设备目录下面的接口目录
 `<M>-1:1.0` 也照样摆出来），不碰真 `/sys`。
+
+交接侧同样自给自足：`tests/options_test.cpp` 让配置快照编码后再解码，逐字段对账，
+并证明坏 magic、截断、头里的总长与实际不符、字符串越界、尾随字节都被拒；
+`tests/handoff_test.cpp` 用自己建的 memfd 与 pipe 证明快照读写往返、seal 之后写不进
+（`EPERM`）、非普通文件被拒，以及四条通道的挪位计划（共用号、占 stdio 都被拒）。
 
 插件装载链的最后一环由 `tests/fixtures/plugin_probe.cpp` 补上：CMake 把它单独编成
 MODULE（`ds5dummy_plugin_probe`，不链接测试二进制），测试把它拷进 `mkdtemp` 出来的

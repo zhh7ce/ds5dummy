@@ -90,9 +90,8 @@ sudo ./scripts/setup.sh            # 加载内核模块、确保 configfs 可用
 ## 配置
 
 设置分两份 YAML：root 写的系统配置 `/etc/ds5dummy/config.yaml`，和登录用户自己家目录
-里的 `~/.config/ds5dummy/config.yaml`。旧的 `--bt-addr`、`--bt-wait`、`--no-audio`、
-`-v` 仍会被解析，但随后全部被两份配置里的生效值覆盖，不属于用户界面；改完
-配置要 `sudo systemctl restart ds5dummy`（配置只在启动时读一次）。
+里的 `~/.config/ds5dummy/config.yaml`。程序没有用户级命令行开关，所有生效值都来自
+这两份配置；改完配置要 `sudo systemctl restart ds5dummy`（配置只在启动时读一次）。
 
 ### 系统配置（`/etc/ds5dummy/config.yaml`，root 属主）
 
@@ -270,15 +269,14 @@ inactive。停止用 `sudo systemctl stop ds5dummy`。
 sudo ./build/ds5dummyd
 ```
 
-不需要用户级参数：身份从当前活跃图形会话推导，手柄地址等生效值来自用户配置；
-`--bt-addr`、`--bt-wait`、`--no-audio`、`-v` 仍会被解析，但随后被配置覆盖，
-等于不生效。
+不需要用户级参数：身份从当前活跃图形会话推导，手柄地址等生效值来自用户配置，
+命令行上也没有可覆盖它们的开关。
 看到 `Press Ctrl+C to exit.` 后，**按一下手柄的 PS 键**让它连上蓝牙：Manager 按系统配置
 里的间隔（默认 3 秒）扫描一次系统，发现的每只新手柄都会自动多出一台 USB 手柄；程序本身
 不会自己退出。
 
-> `--help` 只打印程序名下的用法与两份配置的路径。`--worker`、`--ep0/--ep-in/--ep-out`
-> 等是 Manager 与 worker 之间的内部交接参数，不要手填。
+> `--help` 只打印程序名下的用法与两份配置的路径。`--worker` 是 Manager 交给降权
+> worker 的内部入口，配置随一条被交接的 fd 一起传下，不要手填。
 
 ---
 

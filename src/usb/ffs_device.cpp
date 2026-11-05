@@ -129,7 +129,7 @@ bool FfsDevice::Open(const std::string& ffs_path,
   // ep0：之后 ep0 线程睡在 ffs_ep0_read() 里等 SETUP，必须能在主机控制
   // 超时前应答，所以打开即阻塞是常态而非异常。
   // 三处 O_CLOEXEC 是 fd 交接的前提：Manager 侧 fork+execv 前由
-  // ApplyPlan() 清掉 dup 到 3/4/5 目标上的该标志，其余 fd 一律不出子进程。
+  // ApplyPlan() 清掉 dup 到 3/4/5/6 目标上的该标志，其余 fd 一律不出子进程。
   ep0_fd_ = ::open(ep0_path.c_str(), O_RDWR | O_CLOEXEC);
   if (ep0_fd_ < 0) {
     DS5DUMMY_LOG(ERROR, "[ffs] Failed to open ep0: {}", strerror(errno));

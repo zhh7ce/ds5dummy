@@ -30,6 +30,7 @@
 #include "core/debug.h"
 #include "core/device/descriptors.h"
 #include "daemon/config.h"
+#include "daemon/handoff.h"
 #include "daemon/identity.h"
 #include "daemon/shutdown.h"
 #include "loguru.hpp"
@@ -192,18 +193,20 @@ class WorkerSession {
    * @note 副作用：起线程、开 socket、连 PipeWire；全部在本函数内成对回收。
    */
   int Run() {
+    // Manager 交接前已把 auto 解决成具体型号；nullopt 只可能来自默认构造的
+    // 快照（测试），按普通 DualSense 处理。
     const core::device::ControllerModel model =
-        options_.usb_edge ? core::device::ControllerModel::kEdge
-                          : core::device::ControllerModel::kDualSense;
+        options_.controller.usb_model.value_or(
+            core::device::ControllerModel::kDualSense);
     if (!usb::Adopt(endpoints_, core::device::ProfileFor(model))) {
       DS5DUMMY_LOG(ERROR,
             "[worker] Cannot adopt inherited FunctionFS fds — this process "
-            "must be started by the root Manager "
-            "(--worker --ep0/--ep-in/--ep-out)");
+            "must be started by the root Manager, which places the endpoints "
+            "and the config snapshot on fds 3/4/5/6 before exec");
       return 1;
     }
 
-    if (options_.bt_addr.empty()) {
+    if (options_.controller.bt_addr.empty()) {
       DS5DUMMY_LOG(ERROR,
             "[worker] 'bt_addr' is missing: there is nothing to bridge "
             "without a controller. Set it in ~/{}/{} and restart the service "
@@ -229,7 +232,7 @@ class WorkerSession {
     // 启动时音频就没起来（常见于 PipeWire 还没就绪）也排进同一条重试路径：
     // 音频缺席绝不能拖住 HID，但也不该让整个 worker 重启才能再试。
     std::optional<std::chrono::steady_clock::time_point> audio_retry_at;
-    if (!options_.no_audio && !audio_started_) {
+    if (options_.controller.audio && !audio_started_) {
       audio_retry_at = std::chrono::steady_clock::now() +
                        std::chrono::seconds(kAudioRetrySeconds);
     }
@@ -285,11 +288,11 @@ class WorkerSession {
     DS5DUMMY_LOG(INFO,
           "[worker] Waiting up to {} s for the DualSense at {} (press the PS "
           "button to connect it now)",
-          options_.bt_wait_s, options_.bt_addr.c_str());
+          options_.controller.bt_wait_s, options_.controller.bt_addr.c_str());
 
     // 设备模型 + 0x36 影子的初始化，必须早于任何线程回调进 bridge。
-    bridge::Init(options_.bt_addr,
-                 static_cast<uint8_t>(options_.speaker_gain));
+    bridge::Init(options_.controller.bt_addr,
+                 static_cast<uint8_t>(options_.controller.speaker_gain));
     // 上行麦克风的去处：bridge 在 bt 读线程上把 Opus 包交给 audio 的有界
     // 队列。它只在主机开始录音后被调用，所以 audio 没起来时这条路径根本
     // 不会触发（开关永远为 false）。
@@ -303,7 +306,8 @@ class WorkerSession {
 #if defined(BT_BACKEND_L2CAP)
         // 三类成因各对应一条可执行命令，按实测出现频率排列。
         DS5DUMMY_LOG(ERROR, "[worker] No L2CAP channel to {} within {} s.",
-              options_.bt_addr.c_str(), options_.bt_wait_s);
+              options_.controller.bt_addr.c_str(),
+              options_.controller.bt_wait_s);
         DS5DUMMY_LOG(ERROR, "[worker] Common causes:");
         DS5DUMMY_LOG(ERROR,
               "[worker]   - Controller has an active LE link: 'bluetoothctl "
@@ -316,11 +320,12 @@ class WorkerSession {
               "(agent on)");
 #else
         DS5DUMMY_LOG(ERROR, "[worker] No hidraw node for {} within {} s.",
-              options_.bt_addr.c_str(), options_.bt_wait_s);
+              options_.controller.bt_addr.c_str(),
+              options_.controller.bt_wait_s);
         DS5DUMMY_LOG(ERROR, "[worker] Common causes:");
         DS5DUMMY_LOG(ERROR,
               "[worker]   - Controller is connected: 'bluetoothctl connect "
-              "{}'", options_.bt_addr.c_str());
+              "{}'", options_.controller.bt_addr.c_str());
         DS5DUMMY_LOG(ERROR,
               "[worker]   - DKMS module is loaded: 'sudo modprobe "
               "hid_playstation_ds5dummy'");
@@ -337,7 +342,7 @@ class WorkerSession {
     // 一组裸函数指针。位置卡在传输线程之前——注册完的钩子会马上开始在 bt 读线程
     // 上被调。worker 不认识任何插件名，也不认识任何键名：整份交下去就完事。
     for (const plugin::StateInHook hook :
-         plugin::Start(options_.plugins, plugin_host_,
+         plugin::Start(options_.controller.plugins, plugin_host_,
                        plugin::Directories())) {
       bridge::AddStateHook(hook);
     }
@@ -360,7 +365,7 @@ class WorkerSession {
     // 音频是可降级的一路：起不来只降级成 HID-only，不影响已经就绪的 HID 桥。
     // 先清通知位，避免上一轮残留让本次运行立刻误判成"音频已失效"。
     audio_failed_ = false;
-    if (!options_.no_audio && !StartAudio()) {
+    if (options_.controller.audio && !StartAudio()) {
       DS5DUMMY_LOG(WARNING,
             "[worker] Audio downlink unavailable, continuing HID-only");
     }
@@ -383,7 +388,8 @@ class WorkerSession {
     usb_handlers.on_output_closed = [this] { stop_all_ = true; };
     if (!usb::StartThreads(
             usb_handlers,
-            std::chrono::milliseconds(options_.usb_report_interval_ms))) {
+            std::chrono::milliseconds(
+                options_.controller.usb_report_interval_ms))) {
       DS5DUMMY_LOG(ERROR, "[worker] Cannot start USB data-plane threads");
       return false;
     }
@@ -393,12 +399,12 @@ class WorkerSession {
 
   /**
    * @brief 起音频链（下行 encoder+sink，上行 decoder+source）。
-   * @return 成功 true；no_audio 关闭了音频或 audio::Start 任一步失败 false。
+   * @return 成功 true；audio 关闭了音频或 audio::Start 任一步失败 false。
    * @details 成功与失败都在 audio 内部成对收尾（失败路径会回滚已建的部分），
    *          所以本函数可以反复调用；成功时置 audio_started_，由 Stop() 负责收。
-   *          本站的主机侧 USB 接口目录（options_.host_sysfs_path）由 Manager 建站时
-   *          解析并经交接参数传下来，worker 只转交，不去 sysfs 里自己找——
-   *          它已经降权，也不认识 configfs 坐标。
+   *          本站的主机侧 USB 接口目录由 Manager 建站时解析，经配置快照放在
+   *          controller.host_sysfs_path 里传下来；worker 只转交，不去 sysfs 里
+   *          自己找——它已经降权，也不认识 configfs 坐标。
    *          三个回调的线程约束：
    *          - output 跑在 libpipewire 数据线程上，只把已编码的一段交给 bridge；
    *          - on_lost 也在音频线程上，只置一次性标志——audio::Stop 不能在音频
@@ -409,13 +415,14 @@ class WorkerSession {
    * @see Stop, audio::Start。
    */
   bool StartAudio() {
-    if (options_.no_audio) return false;
+    if (!options_.controller.audio) return false;
     if (!audio::Start(
-            options_.bt_addr, options_.haptics_gain,
+            options_.controller.bt_addr, options_.controller.haptics_gain,
             [](const uint8_t* haptics, const uint8_t* speaker) {
               bridge::OnAudioOutput(haptics, speaker);
             },
-            options_.host_sysfs_path, [this] { audio_failed_ = true; },
+            options_.controller.host_sysfs_path,
+            [this] { audio_failed_ = true; },
             [](bool open) { bridge::OnMicOpen(open); })) {
       return false;
     }
@@ -454,7 +461,7 @@ class WorkerSession {
 
   /**
    * @brief 在 bt_wait_s 秒内反复尝试打开到控制器的 L2CAP 通道。
-   * @return 连上 true；超时、`bt_wait_s`（用户配置值经 argv 下发）为 0 或收到
+   * @return 连上 true；超时、`bt_wait_s`（用户配置值经配置快照下发）为 0 或收到
    *         退出信号 false。
    * @note 阻塞调用，只在主循环线程上跑；每次失败后 Close 再 Open，确保不留
    *       半个 socket。
@@ -464,14 +471,14 @@ class WorkerSession {
     const auto start = std::chrono::steady_clock::now();
     for (;;) {
       if (ShutdownRequested()) return false;
-      if (bt::Open(options_.bt_addr)) return true;
+      if (bt::Open(options_.controller.bt_addr)) return true;
       bt::Close();
       // bt_wait_s == 0 表示"不等"：调试脚本要的是一次性判定。
-      if (options_.bt_wait_s <= 0) return false;
+      if (options_.controller.bt_wait_s <= 0) return false;
       const auto elapsed = std::chrono::duration_cast<std::chrono::seconds>(
                                std::chrono::steady_clock::now() - start)
                                .count();
-      if (elapsed >= options_.bt_wait_s) return false;
+      if (elapsed >= options_.controller.bt_wait_s) return false;
       // 500 ms 一轮：等人按下 PS 键的间隔，经验值；再短也只是空转 connect。
       std::this_thread::sleep_for(std::chrono::milliseconds(500));
     }
@@ -543,7 +550,7 @@ class WorkerSession {
 
 /**
  * @brief worker 进程主体：配置日志、修运行环境、跑一个 WorkerSession。
- * @param options worker 侧配置（ep*_fd 为本进程已就位的 fd 号）。
+ * @param options 快照解码出的 worker 配置。
  * @return WorkerSession 的退出码。
  * @note 副作用：setenv HOME/XDG_RUNTIME_DIR、起线程、开 socket。
  * @see RunManager。
@@ -559,7 +566,8 @@ int RunWorker(const Options& options) {
   RestoreHome();
   RestoreXdgRuntimeDir();
 
-  usb::Endpoints endpoints{options.ep0_fd, options.ep_in_fd, options.ep_out_fd};
+  // 端点号是交接协议的一部分，不跟着配置走：handoff 保证它们就在这三个号上。
+  usb::Endpoints endpoints{kEp0Target, kEpInTarget, kEpOutTarget};
   WorkerSession session(options, endpoints);
   return session.Run();
 }

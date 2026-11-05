@@ -369,9 +369,9 @@ bool FlattenPluginSettings(const YAML::Node& node, const std::string& where,
  *          嵌套在读取时就摊平成点分路径（`buttons.remap.circle`），层数对下游
  *          不可见：扁平键只有插件名那一段被认出来（它以下整段原样带走），递给
  *          插件时按 `插件名.` 前缀整段剥掉（plugin::detail::BuildSettings），
- *          交接 argv 搬的还是 `名.键路径=值` 一条字符串。所以加深只发生在配置
- *          文件里，不发生在交接格式里；层数上限是 kMaxPluginDepth，收的是递归
- *          别名与超长路径，不是形状。
+ *          快照编码搬的还是 `字符串 → 字符串`。所以加深只发生在配置文件里，不
+ *          发生在交接格式里；层数上限是 kMaxPluginDepth，收的是递归别名与超长
+ *          路径，不是形状。
  *          合并是逐扁平键覆盖：本层写了 `buttons.axis.invert_rstick_x` 就替换
  *          下层的同名键，同组里没写的键、别的组与别的插件都原样留下。
  * @see FlattenPluginSettings —— 插件名以下那些层的递归。
@@ -475,9 +475,10 @@ bool ReadUsbModel(const YAML::Node& node, const std::string& where,
  * @param why 失败时的原因。
  * @return 成功 true。
  * @details 只写出现的键，未出现的键保留入参里的值——三层叠加就是这样逐层
- *          覆盖出来的。允许的键与 worker 的交接参数一一对应，两个例外是
- *          usb_model（Manager 把它叠加成型号，再折成 `--usb-edge`）与 plugins
- *          （整份交给 worker，键的含义由插件自己读）。
+ *          覆盖出来的。允许的键与 ControllerConfig 里用户可写的字段一一对应；
+ *          bt_addr 与 host_sysfs_path 是 Manager 盖上的运行期事实，配置层不收；
+ *          usb_model 在交接前由 Manager 用发现结果解决掉 auto，plugins 则整份
+ *          交给 worker，键的含义由插件自己读。
  */
 bool ApplyControllerKeys(const YAML::Node& node, const std::string& where,
                          ControllerConfig& cfg, std::string& why) {

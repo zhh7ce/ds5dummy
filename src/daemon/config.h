@@ -86,7 +86,7 @@ struct SystemConfig {
   std::vector<IdentityEntry> allowed_users;
 };
 
-/// 触觉增益的允许区间。配置解析与交接 argv 解析共用这一对边界，两处不能各写一份。
+/// 触觉增益的允许区间。配置解析用它做取值校验；worker 拿到的已是校验过的值。
 inline constexpr float kHapticsGainMin = 0.0f;
 inline constexpr float kHapticsGainMax = 2.0f;
 /// 扬声器前置增益的上限（3 位字段）；下限是 0。
@@ -106,7 +106,7 @@ inline constexpr int kSpeakerGainMax = 7;
 inline constexpr int kMaxPluginDepth = 8;
 /**
  * @brief usb_report_interval_ms 的合法取值（毫秒）：0 排在最前，它是模式而不是间隔。
- * @details 配置解析与交接 argv 解析共用这一张表，两处不能各写一份。这个值
+ * @details 配置解析用它做取值校验；快照只搬运已经校验过的值。这个值
  *          一路直用、全程不做除法：1/2/4 ms 就是全速中断端点 bInterval 的
  *          字节值，也是 IN 线程两份重发之间的间隔。0 是 real-time 档——只在
  *          收到新的蓝牙样本时写一份，描述符仍取最快的 1 ms。
@@ -128,13 +128,22 @@ enum class BtTargetMode {
 
 /**
  * @brief 一只手柄的生效设置，同时也是 global: 默认层的载体。
- * @details 字段与 worker 的交接参数一一对应；usb_model 是例外——Manager 先把它
- *          叠加成"本站型号"，再折成 worker 的 `--usb-edge` 开关。plugins 也是
- *          例外，它整份交下去、由插件自己读，Manager 不认识里面的键。log_level
- *          与 bt_addr 不在这里：前者只作用于 Manager 进程，后者决定服务哪只手柄。
- * @note 纯数据，无行为；拷贝即配置快照。
+ * @details 它同时是 worker 数据面配置的唯一定义：`daemon::Options` 内嵌一份本
+ *          结构，Manager 因此可以把叠加好的设置整份直接拷贝过去，不必逐字段
+ *          改名或取反。YAML 解析只填其中的用户可写键；另外两个字段是起站时
+ *          由 Manager 盖上的运行期事实，配置层从不读它们：
+ *          - bt_addr：本站目标手柄的 MAC（规范大写）。用户配置根级的 bt_addr
+ *            是"服务哪些手柄"的模式选择器，解析后由 Manager 折成每站一个值。
+ *          - host_sysfs_path：本站 bind 后从 sysfs 反查到的 USB 接口目录。
+ *          usb_model 在交接前由 Manager 用发现结果解决掉 auto（`std::nullopt`
+ *          因此只出现在配置层与默认构造的值里）。plugins 整份交下去、由插件
+ *          自己读，Manager 不认识里面的键。log_level 不在这里：它只作用于进程。
+ * @note 纯数据，无行为；拷贝即一份完整的 worker 配置。
  */
 struct ControllerConfig {
+  /// 本站目标手柄的 BD_ADDR（规范大写）。配置层不填；Manager 起站时按发现
+  /// 结果或用户配置的根级 bt_addr 写入，worker 用它连蓝牙。
+  std::string bt_addr;
   int bt_wait_s = 60;  ///< worker 重试 BT 连接的秒数；0 = 不等
   bool audio = true;   ///< false = 不建音频下链，只桥接 HID
   /// 触觉振幅倍率，[kHapticsGainMin, kHapticsGainMax]；1.0 = 原样，0 = 静音。
@@ -153,6 +162,11 @@ struct ControllerConfig {
   /// （见 core::device::ModelForHidIdentity）；写出型号则强制本站按它呈现，
   /// 不受发现结果影响。它同时决定 PID、产品串与 report descriptor。
   std::optional<core::device::ControllerModel> usb_model;
+  /// 本站在主机侧被枚举出来的 USB 接口目录，相对 /sys（形如
+  /// `/devices/platform/dummy_hcd.0/usb9/9-1/9-1:1.0`）。配置层不填；Manager
+  /// 建站后写入，worker 只把它挂到 PipeWire 节点的 device.sysfs.path 上。
+  /// 空 = 没解析出来，worker 不写这个属性。
+  std::string host_sysfs_path;
   /// 插件配置：`插件名.点分键路径` → 标量文本（YAML 里的嵌套在读取时摊平）。
   /// 来源是根级的 `plugins:`、`global: plugins:` 与 `controllers.<MAC>.plugins:`
   /// 三处，按同一顺序逐层合并，只覆盖写了的那个叶子（见 plugin/plugin.h）。本
@@ -199,10 +213,9 @@ bool IsValidBtAddr(const std::string& addr);
 /**
  * @brief 把 kUsbReportIntervals 写成面向用户的取值清单。
  * @return 形如 "0 (real-time), 1, 2 or 4" 的单行文本。
- * @details 配置解析与交接 argv 解析的"间隔取值非法"两处错误文本共用它，清单
- *          由表生成而不是手写，新增档位不会再多出一处要同步的文案。
- * @see ReadUsbReportInterval（config.cpp）、daemon/options.cpp 的
- *      --usb-report-interval-ms。
+ * @details 配置解析的"间隔取值非法"错误文本用它，清单由表生成而不是手写，
+ *          新增档位不会再多出一处要同步的文案。
+ * @see ReadUsbReportInterval（config.cpp）。
  */
 std::string UsbReportIntervalChoices();
 

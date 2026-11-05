@@ -1,10 +1,12 @@
 /**
  * @file daemon/options.h
- * @brief worker 交接用的内部命令行编解码
- * @details 用户级设置全部来自 YAML 配置（见 daemon/config.h），命令行只剩
- *          Manager 写、worker 读的那一组交接参数：三个继承 fd 号加上由配置
- *          推导出的生效值。解析结果与 argv 重建互为逆运算，是特权分离/交接里
- *          唯一能被单测完整覆盖的一环。本模块刻意不碰任何 syscall。
+ * @brief 进程命令行与 worker 配置快照的编解码
+ * @details 用户级设置全部来自 YAML 配置（见 daemon/config.h），命令行只剩两个
+ *          用户可见开关：`--worker` 与 `--help`。Manager 与 worker 之间的配置
+ *          不走命令行：Manager 把生效值编成一份变长二进制快照（定长标量头 +
+ *          长度前缀的字符串与插件条目），写进一个 memfd 经 handoff 交下去，
+ *          worker 的新镜像读回同一份快照。两侧共享同一份结构定义，因此不需要
+ *          ABI 版本号，也不存在"把已解析的配置展平再解析"的往返。
  * @details 不负责：配置文件的读取与身份选择（config / identity 模块）、参数
  *          的落地使用（各模块自己读 Options 字段）、fd 交接本身（handoff 模块）、
  *          日志级别的应用（main 与 Manager 写 loguru）。
@@ -13,116 +15,85 @@
 
 #pragma once
 
+#include <cstddef>
+#include <cstdint>
 #include <string>
 #include <vector>
 
-#include "plugin/plugin.h"
+#include "daemon/config.h"
 
 namespace ds5::daemon {
 
 /**
  * @brief 解析后的进程配置，一个进程一生一份。
- * @details 默认值即 worker 侧"还没交接"的形态：worker 关闭、三个继承 fd 号为
- *          -1。ep*_fd 在 Manager 解析时保持 -1，由 Manager 在交接前显式写入目标
- *          fd 号（handoff 固定 3/4/5），再经 BuildWorkerArgv 变成命令行传下去
- *          ——所以 worker 解析到的号就是 handoff 挪过去的号。用户级设置
- *          （MAC、等待秒数、音频开关、两个增益、插件配置、日志级别）由
- *          Manager 从
- *          配置文件读出后写进这里交接，worker 自己不读配置文件。另有一个
- *          不来自配置、只来自本运行时刻的字段 host_sysfs_path：Manager 建站
- *          时从 sysfs 解析到的 USB 接口目录，同样经 argv 单向传给 worker。USB
- *          报告的发送间隔整个交下去：worker 的 IN 线程要靠它自己按这个间隔发，
- *          描述符里的 bInterval 只是给主机看的声明。
- * @note 纯数据，无行为；拷贝即配置快照。error 非空表示解析失败，其余字段不应
- *       被使用。
- * @see ParseArgs, BuildWorkerArgv。
+ * @details 数据面设置整份放在 controller 里，类型就是配置层的 ControllerConfig：
+ *          Manager 把叠加好的每站设置直接赋进去，worker 解出来的也是同一个
+ *          结构，两侧不维护第二份字段表，也不做改名或取反。这里只额外放四个
+ *          进程级字段：命令行角色、用法开关、解析错误与日志级别。
+ *          Manager 在拷贝之前已经把 controller 里的运行期事实填齐——bt_addr、
+ *          host_sysfs_path，以及用发现结果解决掉 auto 之后的 usb_model。
+ * @note error 非空表示解析失败，其余字段不应被使用。Encode/Decode 是它唯一的
+ *       行为，只负责跨 exec 的字节化与还原，不解释任何字段含义。
+ * @see ParseArgs。
  */
 struct Options {
-  bool worker = false;  ///< --worker：降权子进程入口，不建 gadget
+  bool worker = false;     ///< --worker：降权子进程入口，不建 gadget
   bool show_help = false;  ///< --help：只打印用法，不进入任何流程
-  bool no_audio = false;   ///< --no-audio：不建 PipeWire sink，只桥接 HID
-  /// --usb-edge：虚拟 USB 设备按 DualSense Edge 呈现（054c:0df2 + 453 字节
-  /// report descriptor）。Manager 按发现阶段判出的型号置位；worker 侧只用来选
-  /// ep0 应答的描述符，默认 false 即普通 DualSense。
-  bool usb_edge = false;
-  std::string bt_addr;     ///< --bt-addr：桥接必需的控制器 BD_ADDR，空=未指定
-  /// -v：解析后的 loguru stderr 级别（越大越啰嗦）。刻意自己解析而不是让
-  /// loguru::init 扫 argv——它遇到不认识的值是 CHECK_F 失败直接 abort 进程，
-  /// 而 -v DEBUG 这种写法太自然了，必须是普通报错。
+  /// loguru stderr 级别（越大越啰嗦）。Manager 从配置读出后写进快照，worker
+  /// 的新镜像直接沿用——execv 会重置 loguru 的全部状态，这个值必须跟着快照走。
   int verbosity = 0;
-  int bt_wait_s = 60;  ///< --bt-wait：worker 重试 BT 连接的秒数；0 = 不等
-  /// 插件配置：--plugin-config 的 `插件名.键=值` 逐条解出来的结果，键即
-  /// `插件名.键名`。本模块与 Manager 都不认识里面的键；整份交下去是为了让
-  /// worker 把属于某个插件的键递给它（见 plugin/plugin.h）。空 = 配置没写，
-  /// 每个插件用自己的默认值。
-  plugin::Settings plugins;
-  /// --haptics-gain：触觉振幅倍率，[config::kHapticsGainMin,
-  /// kHapticsGainMax]；1.0 = 原样。乘在编码线程的 int8 量化之前。
-  float haptics_gain = 1.0f;
-  /// --speaker-gain：控制器侧扬声器前置增益，[0, config::kSpeakerGainMax]；
-  /// 2 是固件初值。写进 SetStateData 的 byte[37] 低 3 位，由手柄放大。
-  int speaker_gain = 2;
-  /// --usb-report-interval-ms：虚拟手柄两份 USB 输入报告之间的间隔（毫秒），
-  /// 取值只能是 config.h 的 kUsbReportIntervals。1/2/4 是重发档——IN 线程按
-  /// 这个间隔把持有的那一份反复发出去；0 是 real-time 档，只在新的蓝牙样本
-  /// 到达时写一份。同一个数值在 Manager 建站时还写进描述符的 bInterval，
-  /// 但那个字节不构成节奏——dummy_hcd 不兑现它，真实节奏只能由 worker 保证。
-  int usb_report_interval_ms = 1;
-  /// --sysfs-path：本站在主机侧被枚举出来的 USB 接口目录，相对 /sys（形如
-  /// `/devices/platform/dummy_hcd.0/usb9/9-1/9-1:1.0`）。Manager 建站时解析，
-  /// worker 只把它写进 PipeWire sink 的 device.sysfs.path；空 = 没解析出来，
-  /// worker 不写这个属性。worker 自己无法解析：那是 root 侧 configfs 的知识。
-  std::string host_sysfs_path;
-
-  /// --ep0/--ep-in/--ep-out：worker 侧继承到的 fd 号。Manager 解析时保持 -1，
-  /// 由 BuildWorkerArgv 的调用方在交接前写入目标号（handoff 固定 3/4/5）。
-  int ep0_fd = -1;     ///< ep0 fd 号
-  int ep_in_fd = -1;   ///< interrupt-IN fd 号
-  int ep_out_fd = -1;  ///< interrupt-OUT fd 号
+  /// 本站生效的手柄级设置。字段含义与默认值见 daemon/config.h 的
+  /// ControllerConfig；Manager 在 StartSlot 里把 bt_addr、host_sysfs_path 与
+  /// 解决掉 auto 的 usb_model 填齐后整份拷进来，两侧不再逐字段对照。
+  ControllerConfig controller;
 
   std::string error;  ///< 空 = 解析成功；非空是给用户看的错误文本
+
+  /**
+   * @brief 把 verbosity 与 controller 编成交给 worker 的二进制快照。
+   * @return 自描述的字节串：固定标量头 + 长度前缀的字符串与插件条目。
+   * @details 布局（全部本机字节序，两侧是同一个镜像）：
+   *          - `u32 magic`（ASCII "DS5W"）
+   *          - `u32 total_bytes`（整份快照的长度，解码端据此拒绝截断与尾随数据）
+   *          - `i32 verbosity`、`i32 bt_wait_s`、`i32 speaker_gain`、
+   *            `i32 usb_report_interval_ms`、`f32 haptics_gain`
+   *          - `u8 audio`、`u8 usb_model`（0 = 未定，1 = 普通，2 = Edge）、
+   *            `u8 reserved[2]`
+   *          - `u32 bt_addr_len` + 字节、`u32 sysfs_len` + 字节
+   *          - `u32 plugin_count`，随后每项 `u32 key_len` + 字节、
+   *            `u32 value_len` + 字节。
+   *          plugins 是有序 map，同一份配置重复编码得到逐字节相同的快照。
+   *          worker / show_help / error 是进程内产物，不编码。
+   * @note 只定长的是头里的标量；字符串与插件条目完全变长，插件键的数量没有上限。
+   * @see Decode。
+   */
+  std::vector<uint8_t> Encode() const;
+
+  /**
+   * @brief 从快照补回 verbosity 与 controller。
+   * @param data 快照首字节，来自交接下来的 memfd。
+   * @param size 快照长度（memfd 的 st_size）。
+   * @param why 失败时写入面向用户的整句错误原因。
+   * @return 结构完整 true；magic 不符、长度不一致、字符串越界或尾随字节 false。
+   * @details 只写被编码的那两个字段；worker / show_help / error 保持原值（调用方
+   *          在读取快照前已经用 ParseArgs 填好了它们）。失败时本对象不被修改。
+   *          只做结构校验，不做取值校验：快照由同一个镜像的 Encode 写出，配置层
+   *          在更早的一步已经把取值收口。
+   * @note 会分配内存（字符串与 map），只在 worker 启动路径调用。
+   * @see Encode。
+   */
+  bool Decode(const uint8_t* data, size_t size, std::string& why);
 };
 
 /**
- * @brief 解析完整 argc/argv，内部跳过 argv[0] 后交给 internal::ParseArgv。
+ * @brief 解析命令行：只认 `--worker` 与 `--help`，跳过 argv[0]。
  * @param argc main 的参数个数；<=0 时按空参数表处理。
  * @param argv main 的参数数组，argv[0] 为程序名，不计入选项。
  * @return 配置结果；失败时 Options.error 非空且其余字段不可信。
- * @note 未知选项与缺值都通过 error 报告，不打印、不退出，由调用方决定用法提示。
- * @see internal::ParseArgv（直接喂字符串数组的入口）。
+ * @note 未知选项通过 error 报告，不打印、不退出，由调用方决定用法提示。用户级
+ *       设置已经全部搬到 YAML，旧命令行开关因此落到"未知选项"而不是被静默忽略。
  */
 Options ParseArgs(int argc, char* argv[]);
-
-/**
- * @brief 由 o 重建一份可被 internal::ParseArgv 原样读回的 argv。
- * @param o 已解析的配置。ep*_fd 必须已是 worker 侧的目标号，否则产出的
- *          "--ep0 -1" 之类的负值会被解析器判为非法。
- * @param self_path 作为 argv[0] 的可执行文件路径。
- * @return 完整 argv（含 argv[0]）。
- * @details 用于 Manager 把配置交接给 fork+execv 的 worker：产出与解析互为逆
- *          运算，因此 worker 与 Manager 对同一次运行看到同一份配置。
- * @note show_help 与 error 是解析期产物，不参与重建；--worker 一律写入。
- */
-std::vector<std::string> BuildWorkerArgv(const Options& o,
-                                         const std::string& self_path);
-
-/**
- * @brief 把字符串数组转成 execv 需要的、NULL 结尾的 char* 数组。
- * @param av 字符串数组。
- * @return NULL 结尾的指针数组。
- * @warning 返回的指针指向 av 内各元素的缓冲区，故 av 必须比返回值活得久。
- * @warning 必须在 fork 之前调用（子进程不得再分配内存）。
- */
-std::vector<char*> ToArgv(const std::vector<std::string>& av);
-
-/**
- * @brief 用法文本本体（不含程序名）。
- * @return 多行用法说明。
- * @warning 本项目只提供 internal::UsageText 的定义，命名空间直下的这个声明
- *          没有实现，调用它会链接失败。
- * @see internal::UsageText。
- */
-std::string UsageText();
 
 /**
  * @brief 把用法文本连同程序名打到 stdout。
@@ -133,20 +104,10 @@ std::string UsageText();
 void PrintUsage(const char* prog);
 
 // ---------------------------------------------------------------------------
-// 实现细节 — core 之外只有 tests/options_test.cpp 直接使用
+// 实现细节 — daemon 模块之外只有 tests/options_test.cpp 直接使用
 // ---------------------------------------------------------------------------
 
 namespace internal {
-
-/**
- * @brief 解析 args（不含 argv[0]）。
- * @param args 参数列表，已剥掉程序名。
- * @return 配置结果；失败时 Options.error 非空且首个错误即返回。
- * @details 与 BuildWorkerArgv 互为逆运算：后者产出的 argv 必须能被本函数原样
- *          读回。main 走 ParseArgs；本函数留作直接喂字符串数组的入口（测试用）。
- * @note 选项名由表判定，字段落位由本函数内的分支链判定，两处需同步维护。
- */
-Options ParseArgv(const std::vector<std::string>& args);
 
 /**
  * @brief 把 loguru 的级别名或整数字符串解析成写入 g_stderr_verbosity 的数值。
@@ -157,7 +118,6 @@ Options ParseArgv(const std::vector<std::string>& args);
  * @details 数值与 loguru::Verbosity 枚举逐项对应（OFF=-9 起，TRACE=2 止），
  *          整数形式不做夹取，便于临时调到枚举之外的级别。配置文件的
  *          log_level 也复用本函数，两侧因此不会出现两套级别表。
- * @see ParseArgv 的 -v 分支。
  */
 bool ParseVerbosity(const std::string& text, int& out);
 
@@ -175,9 +135,9 @@ const char* VerbosityName(int level);
 
 /**
  * @brief 用法文本本体（不含程序名）：一句话说明加两份配置的路径。
- * @return 多行用法说明，首行是 "Usage: ds5dummy [--worker]"。
- * @details 选项表不再出现在用法里——对用户暴露的只有配置文件，命令行参数是
- *          Manager 与 worker 之间的内部契约。两份路径来自 daemon/config.h 的
+ * @return 多行用法说明，首行是 "Usage: ds5dummy [--help]"。
+ * @details 命令行不再向用户暴露配置项——对用户暴露的只有配置文件；`--worker`
+ *          是 Manager 的内部入口，不列出来。两份路径来自 daemon/config.h 的
  *          常量，与真正的读取点同源。
  * @see PrintUsage —— 会替换首行的程序名。
  */

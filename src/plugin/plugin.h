@@ -30,9 +30,9 @@
  * @endcode
  *
  * daemon 层在读取时就把嵌套摊平成 @ref Settings（键是 `插件名.段.段…`）：校验形状
- * （每段名字都是 token、叶子必须是非空标量、深度有上限）、逐层合并、经交接 argv
- * 下发。它不认识任何段名的含义，也不校验取值——那属于插件自己；"这一组有几层、
- * 每层叫什么"只由插件解释。配置里出现没有对应 `.so` 的插件名不是错误：
+ * （每段名字都是 token、叶子必须是非空标量、深度有上限）、逐层合并、经 worker 的
+ * 配置快照下发。它不认识任何段名的含义，也不校验取值——那属于插件自己；"这一组有
+ * 几层、每层叫什么"只由插件解释。配置里出现没有对应 `.so` 的插件名不是错误：
  * 那几条键没有接收方，装配照常。
  *
  * @note 进程级单实例，与 bridge/bt/usb 在同一个 worker 进程里；多手柄靠多个
@@ -46,7 +46,7 @@
  *       保证"版本号不对的 .so 不会被打进进程"，不保证插件行为正确。
  * @see plugin/plugin_api.h —— 插件作者要 include 的那一份契约。
  * @see daemon/config.cpp —— 读 plugins: 那一节的地方。
- * @see daemon/options.cpp —— --plugin-config 的编解码。
+ * @see daemon/options.cpp —— worker 配置快照里 plugins 的编解码。
  */
 
 #pragma once
@@ -73,7 +73,7 @@ namespace plugin {
  *       前缀匹配没有歧义；前缀之后的那些段原样交给插件，层数由配置文件决定、
  *       由插件自己解释（daemon 只把嵌套映射摊平成 @ref kKeySeparator 分隔的路径，
  *       见 daemon/config.cpp 的 FlattenPluginSettings）。
- * @note 用有序容器：同一份配置在每一次装载、每一条交接 argv、每一行横幅里都
+ * @note 用有序容器：同一份配置在每一次装载、每一份交接快照、每一行横幅里都
  *       给出同一个顺序，下游因此不需要各自再排一遍。同组的条目因为共享前缀，
  *       在这个顺序里自然相邻。
  */
@@ -89,44 +89,15 @@ inline constexpr const char* kSystemPluginDir = "/usr/lib/ds5dummy/plugins";
 inline constexpr const char* kUserPluginDir = ".config/ds5dummy/plugins";
 
 /**
- * @brief 拼出扁平配置键。
- * @param plugin_name 插件名，必须是 @ref IsToken 认得的形态。
- * @param key_path 该插件的键路径，每段同样是 token。
- * @return `插件名.键路径`。
- */
-inline std::string MakeKey(const std::string& plugin_name,
-                           const std::string& key_path) {
-  return plugin_name + kKeySeparator + key_path;
-}
-
-/**
- * @brief 拆开扁平配置键：第一个 '.' 之前是插件名，之后是键路径。
- * @param flat_key 形如 `idle.off_after_minutes` 或 `buttons.remap.circle`。
- * @param plugin_name 出参：分隔符之前的部分。
- * @param key_path 出参：分隔符之后的部分，自身可以带点。
- * @return 两侧都非空时 true；没有 '.' 或任一侧为空 false。
- */
-inline bool SplitKey(const std::string& flat_key, std::string& plugin_name,
-                     std::string& key_path) {
-  const size_t dot = flat_key.find(kKeySeparator);
-  if (dot == std::string::npos || dot == 0 || dot + 1 == flat_key.size()) {
-    return false;
-  }
-  plugin_name = flat_key.substr(0, dot);
-  key_path = flat_key.substr(dot + 1);
-  return true;
-}
-
-/**
  * @brief 一段名字的合法形态：插件名、以及配置里插件名之下的每一段。
  * @param text 待校验字符串。
  * @return 非空、长度 <= 32、只含字母/数字/'_'/'-' 时 true。
- * @details 判据不只为了好看：交接 argv 把配置压成 `插件名.键路径=值` 一条字符串
- *          传递，`.` 与 `=` 是分隔符，任何一段名字里带上它就没法原样解回来（也
- *          因此"写成一个带点的键"不是"写成嵌套"的另一种拼法——前者在这里被拒）。
- *          长度上限挡住"把整段说明写进键名"。配置解析与 argv 解析共用这一条判据，
- *          两侧不会各自演化。描述符里插件名的校验也走这里。
- * @see daemon/options.cpp 的 --plugin-config。
+ * @details 判据是"一段可辨识的标识符"：扁平键用 `.` 分隔插件名与下面各段名字，
+ *          任何一段里带上分隔符就没法原样拆回来（也因此"写成一个带点的键"不是
+ *          "写成嵌套"的另一种拼法——前者在这里被拒）。长度上限挡住"把整段说明写
+ *          进键名"；配置解析与目录扫描共用这一条判据，两侧不会各自演化。描述符
+ *          里插件名的校验也走这里。
+ * @see daemon/config.cpp —— 读 plugins: 那一节时用它校验形状。
  */
 inline bool IsToken(const std::string& text) {
   if (text.empty() || text.size() > 32) return false;

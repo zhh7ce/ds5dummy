@@ -1,23 +1,27 @@
 /**
  * @file daemon/handoff.h
  * @brief root Manager 与降权 worker 之间的 fd 交接协议
- * @details 本模块负责把 Manager 手里的三个 FunctionFS 端点 fd 安置到固定的
- *          3/4/5 号、让它们活过 execv、关掉其余继承来的 fd，然后把身份切换
- *          交给 privdrop 并 execv 自身。交接完成后 worker 只需要在 argv 里
- *          读到三个数字，不必知道 Manager 当年拿到的是几号。
+ * @details 本模块负责把 Manager 手里的三条 FunctionFS 端点通道与一份配置快照
+ *          安置到固定的 3/4/5/6 号、让它们活过 execv、关掉其余继承来的 fd，
+ *          然后把身份切换交给 privdrop 并 execv 自身。交接完成后 worker 只需要
+ *          按固定号取用：3/4/5 是端点，6 是配置快照，不必知道 Manager 当年拿到
+ *          的是几号。
  * @details 不负责：gadget 的建立与描述符写入（usb 模块）、目标身份的选取
- *          （privdrop 模块）、进程退出码的语义解释（manager.cpp 的
- *          ReportChildExit）。
+ *          （privdrop 模块）、快照的内容（options 模块）、进程退出码的语义解释
+ *          （manager.cpp 的 ReportChildExit）。
  * @note 层次：daemon。线程模型：只在单线程上下文调用；PrepareAndExec 运行在
  *       fork 之后、execv 之前的子进程里，那条路径禁止内存分配与 loguru
- *       调用，因此每个核心判断都提供 const char** 的无分配重载。
+ *       调用，因此每个核心判断都提供 const char** 的无分配重载。快照的
+ *       memfd 读写发生在 fork 之前与 execv 之后，可以使用分配。
  */
 
 #pragma once
 
 #include <sys/types.h>
 
+#include <cstdint>
 #include <string>
+#include <vector>
 
 namespace ds5::daemon {
 
@@ -29,18 +33,24 @@ inline constexpr int kEp0Target = 3;
 inline constexpr int kEpInTarget = 4;
 /// @brief 交接后 interrupt-OUT（主机→设备报告）的固定 fd 号。
 inline constexpr int kEpOutTarget = 5;
+/// @brief 交接后 worker 配置快照（memfd）的固定 fd 号。
+/// @details 紧接三个端点之后，worker 的新镜像在初始化日志之前从这里读回整份
+///          生效配置。快照本身是加过 seal 的匿名 memfd，内容与 fd 号都由
+///          Manager 在 fork 前备好。
+inline constexpr int kConfigFdTarget = 6;
 
 /**
- * @brief Manager 手里那份端点 fd 的编号快照（fork 之后、挪位之前）。
- * @details 只是三个 int 的值语义快照，不持有 fd、不关闭 fd：源 fd 由 Manager
- *          的 slot 持有（usb::Provision 把所有权交给调用方），交接完成后父侧
- *          副本由 slot 自己关掉；本结构只描述"从哪儿挪到哪儿"。
+ * @brief Manager 手里那份交接 fd 的编号快照（fork 之后、挪位之前）。
+ * @details 只是四个 int 的值语义快照，不持有 fd、不关闭 fd：源 fd 由 Manager
+ *          的 slot 持有（usb::Provision 把端点所有权交给调用方），交接完成后
+ *          父侧副本由 slot 自己关掉；本结构只描述"从哪儿挪到哪儿"。
  * @note 由 Manager 在 fork 前填好；子进程只读。
  */
 struct HandoffPlan {
   int ep0_fd = -1;     ///< ep0 源 fd；-1 表示未设置，PlanOk 会拒绝。
   int ep_in_fd = -1;   ///< interrupt IN 源 fd。
   int ep_out_fd = -1;  ///< interrupt OUT 源 fd。
+  int config_fd = -1;  ///< 配置快照 memfd 的源 fd。
 };
 
 // 下面每个函数都有两个版本：带 std::string& why 的给父进程/日志用，带
@@ -59,11 +69,11 @@ bool PlanOk(const HandoffPlan& p, std::string& why);
 bool PlanOk(const HandoffPlan& p, const char** why);  ///< 无分配重载，见组注释。
 
 /**
- * @brief 把三个源 fd 挪到 3/4/5，并保证它们活过 execv。
- * @details 挪位前先把"占住了别的通道目标号"的源 fd 用 F_DUPFD 逃到 6 以上，
+ * @brief 把四个源 fd 挪到 3/4/5/6，并保证它们活过 execv。
+ * @details 挪位前先把"占住了别的通道目标号"的源 fd 用 F_DUPFD 逃到 7 以上，
  *          否则按顺序 dup2 会有一条通道的目标被中途覆盖；挪完再逐个清掉目标
  *          上的 FD_CLOEXEC，因为源 fd 可能带 O_CLOEXEC 打开。
- * @param p 源 fd 快照，只读；成功时 3/4/5 已指向对应通道。
+ * @param p 源 fd 快照，只读；成功时 3/4/5/6 已指向对应通道。
  * @param why 失败原因。
  * @return 全部成功 true；任一步 syscall 失败 false，此时 fd 状态只保证
  *         "已完成的步骤不回滚"——调用方随后 _exit 或重建实例。
@@ -75,16 +85,41 @@ bool ApplyPlan(const HandoffPlan& p, const char** why);  ///< 无分配重载。
 
 /**
  * @brief 关掉编号大于 keep_up_to 的全部 fd。
- * @details 3/4/5 已由 ApplyPlan 保下来，剩下的都是 Manager 留下的描述符
+ * @details 3/4/5/6 已由 ApplyPlan 保下来，剩下的都是 Manager 留下的描述符
  *          （configfs 目录fd、FunctionFS 挂载、loguru 的日志文件等），一律不带进
  *          worker：worker 需要日志时以自己的身份重新打开同一个文件。
- * @param keep_up_to 保留的最大 fd 号，通常是 kEpOutTarget；非负。
+ * @param keep_up_to 保留的最大 fd 号，通常是 kConfigFdTarget；非负。
  * @param why 失败原因。
  * @return close_range 成功 true。
  * @error close_range 返回非 0（EINVAL/EBADF 等）时 false，why 带 errno。
  */
 bool CloseAbove(int keep_up_to, std::string& why);
 bool CloseAbove(int keep_up_to, const char** why);  ///< 无分配重载。
+
+/**
+ * @brief 把配置快照写进一个带 MFD_CLOEXEC|MFD_ALLOW_SEALING 的匿名 memfd。
+ * @param blob 已编码的快照字节。
+ * @param why 失败时写入原因。
+ * @return 成功返回 fd（调用方持有并负责在 fork 之后关闭自己的副本）；失败 -1。
+ * @details 写完加 `F_SEAL_SHRINK|F_SEAL_GROW|F_SEAL_WRITE|F_SEAL_SEAL`：交接
+ *          之后内容不可变，worker 侧只会读。fd 带 CLOEXEC 只是为了在出错的
+ *          路径上不泄漏；正常路径由 ApplyPlan 显式清掉它。
+ * @note 在 fork 之前调用，允许分配内存。
+ * @see ReadConfigFd, kConfigFdTarget。
+ */
+int MakeConfigFd(const std::vector<uint8_t>& blob, std::string& why);
+
+/**
+ * @brief 从交接来的 memfd 读回完整的配置快照。
+ * @param fd 快照 fd，正常是 kConfigFdTarget。
+ * @param why 失败时写入原因。
+ * @return 快照内容；失败返回空 vector。
+ * @details 先 fstat 取长度并对上限设防，再用 pread 逐段读满——不依赖文件偏移，
+ *          因此 Manager 侧写完后不需要再 lseek。读完由调用方关闭 fd。
+ * @note 在 worker 的新镜像里调用，允许分配内存。
+ * @see MakeConfigFd。
+ */
+std::vector<uint8_t> ReadConfigFd(int fd, std::string& why);
 
 /**
  * @brief 子进程的交接收尾：挪 fd → 关遗留 fd → 降权 → execv 自身。
@@ -112,7 +147,7 @@ bool CloseAbove(int keep_up_to, const char** why);  ///< 无分配重载。
  *          区分"worker 还没跑起来"和"worker 跑过又退出了"。
  */
 enum class ExecStage : int {
-  kBadPlan = 1,     ///< 计划本身不合法：源 fd 未设置、撞 stdio 或三者同号。
+  kBadPlan = 1,     ///< 计划本身不合法：源 fd 未设置、撞 stdio 或彼此同号。
   kMove = 2,        ///< dup2/F_DUPFD/F_SETFD 失败，fd 没挪到位。
   kCloseRange = 3,  ///< close_range 失败，遗留 fd 没清干净。
   kDropPrivs = 4,   ///< setgroups/setgid/setuid 失败，身份没降下来。

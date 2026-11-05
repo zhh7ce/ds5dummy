@@ -9,8 +9,8 @@ pkgname=ds5dummy_hidraw
 _srcdir="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 # 版本跟随 checkout，由下面的 pkgver() 现查。makepkg 会把结果写回本文件并把
 # pkgrel 重置为 1，所以这里留占位值；改动提交后重新 makepkg 就是升级。
-pkgver=0.r16.g2ad1a98
-pkgrel=2
+pkgver=0.r11.g334b952
+pkgrel=1
 pkgdesc="Bridge a BT DualSense to a virtual USB device (BlueZ HIDRAW backend)"
 arch=('x86_64')
 url="https://github.com/zhh7ce/ds5dummy"
