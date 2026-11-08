@@ -51,16 +51,22 @@ namespace {
 ///        上一站的残骸清干净，又不至于让"改错了配置重跑"变成几分钟的等待。
 constexpr int kRestartBackoffMs = 2000;
 
+/// @brief 可中断等待与拆站回收循环共用的睡眠切片毫秒数。
+/// @details 100 ms 是响应性与唤醒次数的折中：信号最多晚这么一点被看到，回收
+///          循环也不会以整拍（默认 3 s）为粒度才发现 worker 已经退出。
+constexpr int kSleepSliceMs = 100;
+
 /**
  * @brief 可中断的退避等待：Ctrl-C 到来时 Manager 可能正睡在这里。
  * @param ms 总等待毫秒数；<=0 时立即返回。
- * @note 切成 100 ms 一段是为了响应性：usleep 整段睡下去会让信号最多晚 ms 毫秒
- *       才被看到。
+ * @note 切成 @ref kSleepSliceMs 一段是为了响应性：usleep 整段睡下去会让信号
+ *       最多晚 ms 毫秒才被看到。
  * @see ShutdownRequested。
  */
 void BackoffSleep(int ms) {
-  for (int slept = 0; slept < ms && !ShutdownRequested(); slept += 100) {
-    usleep(100 * 1000);
+  for (int slept = 0; slept < ms && !ShutdownRequested();
+       slept += kSleepSliceMs) {
+    usleep(kSleepSliceMs * 1000);
   }
 }
 
@@ -237,7 +243,9 @@ class ManagerSupervisor {
     TerminateWorkers();
     while (!slots_.empty()) {
       ReapWorkers();
-      if (!slots_.empty()) BackoffSleep(tick_ms_);
+      // 走到这里时退出标志已经置起，BackoffSleep 会立即返回，回收循环就成了
+      // 对 waitpid 的忙等。拆站必须走完，没有"提前醒"的语义，所以固定切片睡。
+      if (!slots_.empty()) usleep(kSleepSliceMs * 1000);
     }
     DS5DUMMY_LOG(INFO, "[manager] Shutting down");
     return 0;
