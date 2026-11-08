@@ -81,7 +81,7 @@ bool GadgetSetup(const std::string& ffs_path, const std::string& instance,
  * @param instance GadgetSetup 用过的实例名。
  * @return 绑定成功 true；没有空闲 dummy_udc 时也返回 false（先于写属性）。
  * @details "空闲"按 configfs 现状判定：已被别的 gadget 绑走的 UDC 不再分配，
- *          所以 N 只手柄各占一个 dummy_udc.N。这要求 dummy_hcd 的 num_dummy
+ *          所以 N 只手柄各占一个 dummy_udc.N。这要求 dummy_hcd 的 num
  *          不小于同时服务的手柄数。
  */
 bool GadgetBind(const std::string& instance);

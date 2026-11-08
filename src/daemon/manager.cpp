@@ -639,7 +639,7 @@ int RunManager(const Options& options) {
   if (!usb::HasDummyUdc()) {
     DS5DUMMY_LOG(ERROR,
           "[manager] No dummy_udc.N in /sys/class/udc — load it first: "
-          "sudo modprobe dummy_hcd is_high_speed=0 num_dummy=<controllers>");
+          "sudo modprobe dummy_hcd is_high_speed=0 num=<controllers>");
     return 1;
   }
 

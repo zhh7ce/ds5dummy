@@ -69,6 +69,11 @@ sudo pacman -U hid-playstation-ds5dummy-dkms-*.pkg.tar.zst
 `/usr/share/doc/ds5dummy/user-config.example.yaml`。重启或执行
 `sudo systemctl restart systemd-modules-load bluetooth` 让模块配置生效。
 
+模块配置里 `dummy_hcd` 的 `num` 默认是 3，即同时最多桥接 3 只手柄。要接更多就改
+`/etc/modprobe.d/ds5dummy.conf` 里的 `num=`，然后停服务、重载模块再启动
+（`sudo systemctl stop ds5dummy`、`sudo modprobe -r dummy_hcd && sudo modprobe dummy_hcd`），
+或者直接重启。`num` 是模块加载参数，运行中改不了。
+
 ### 2. 源码构建
 
 ```bash
@@ -338,7 +343,7 @@ systemd 不会重启；改掉那一行（并让用户登录）后 `sudo systemct
 
 **`No dummy_udc.N in /sys/class/udc — load it first`**
 内核模块没加载或 UDC 数量不够：`sudo modprobe dummy_hcd is_high_speed=0
-num_dummy=<要同时桥接的手柄数>`，或跑 `sudo ./scripts/setup.sh`。仍然失败说明内核没编
+num=<要同时桥接的手柄数>`，或跑 `sudo ./scripts/setup.sh`。仍然失败说明内核没编
 `CONFIG_USB_DUMMY_HCD`。
 
 **等满 `bt_wait_s`（默认 60 秒）还是连不上手柄（`No L2CAP channel to ... within 60 s`）**

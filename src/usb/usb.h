@@ -124,7 +124,7 @@ GadgetId ResolveGadgetId(const std::string& mac, const std::string& ffs_base);
  *                    不排数据。
  * @return 成功 true；false 时已完成回滚（含 detach 本组的 FunctionFS 挂载）。
  * @note 仅 root 权限可调用（写 configfs、mount）。UDC 由 GadgetBind 从空闲的
- *       dummy_udc.N 里挑一个，所以并发 gadget 数受 dummy_hcd 的 num_dummy 限制。
+ *       dummy_udc.N 里挑一个，所以并发 gadget 数受 dummy_hcd 的 num 限制。
  * @note bind 之后本函数会**同步等待**主机侧把设备枚举出来（上限见实现里的
  *       预算）：那段等待只是读 sysfs，描述符由内核 f_fs 直接应答，不需要
  *       用户态参与。等不到也只把 host_sysfs_path 留空并记 WARNING——站点

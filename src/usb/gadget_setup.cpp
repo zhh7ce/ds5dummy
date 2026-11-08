@@ -358,7 +358,7 @@ bool GadgetBind(const std::string& instance) {
   if (udc.empty()) {
     DS5DUMMY_LOG(ERROR,
           "[gadget] ERROR: No free dummy_hcd UDC. Load/expand dummy_hcd: "
-          "sudo modprobe dummy_hcd is_high_speed=0 num_dummy=<controllers>");
+          "sudo modprobe dummy_hcd is_high_speed=0 num=<controllers>");
     return false;
   }
 

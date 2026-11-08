@@ -332,7 +332,7 @@ class 请求的应答经回调参数里的 `Ep0Responder` 完成（f_fs 的应�
 `/dev/ffs-ds5`。`gadget_setup.cpp` 会自己 mount configfs（并把只读挂载 remount 成 rw）
 和每站的 FunctionFS，`scripts/setup.sh` 只准备内核模块与 configfs，不再挂载 FunctionFS。
 `GadgetBind` 在 `/sys/class/udc` 里挑一个没被任何 configfs gadget 占用的 `dummy_udc.N`，
-所以 `num_dummy` 要 ≥ 同时服务的手柄数。进入 `mkdir`/`mount`/`symlink` 的路径字符串
+所以 `num` 要 ≥ 同时服务的手柄数。进入 `mkdir`/`mount`/`symlink` 的路径字符串
 必须过 `IsSafeGadgetPath`（只放行字母/数字/`.`/`_`/`/`/`-`，并显式拒绝含 `..` 的串），
 `gadget_setup.cpp` 里还会再挡一遍。
 
@@ -721,9 +721,10 @@ worker 退出）；恢复后见标记就 `systemctl start`。留在 `/run` 的�
 所以睡眠中崩溃不会让下次开机凭空拉起服务。绑定中的 FunctionFS gadget 和蓝牙链路都
 过不了挂起周期，停掉重建比原地恢复可靠。
 
-模块参数对两个后端都一样是 `options dummy_hcd is_high_speed=0 num_dummy=1`（虚拟 UDC 只
-跑 full-speed，因为本项目提供的是 FS 描述符；`num_dummy` 是同时能服务的手柄数上限，
-多手柄要调大）。差别在 HID 侧：
+模块参数对两个后端都一样是 `options dummy_hcd is_high_speed=0 num=3`（虚拟 UDC 只
+跑 full-speed，因为本项目提供的是 FS 描述符；`num` 是同时能服务的手柄数上限，缺省
+3，要接更多手柄就改这一行，它是加载参数、改完要停服务后重载 `dummy_hcd`）。差别在
+HID 侧：
 - `pkg/ds5dummy_hidraw` 的 modules-load 里装的是 `hid_playstation_ds5dummy`（DKMS 补丁，
   把真蓝牙 DualSense/Edge 留在 hidraw-only 并合成 `1998:1221`/`1998:1103`，其余机型与 USB 设备不受影响），`hidp` **必须**可用、不能 blacklist；
 - `pkg/ds5dummy_l2cap` 装的是 in-tree `hid_playstation`，让 BlueZ 先建 HID session 再交接
@@ -775,7 +776,7 @@ worker 退出）；恢复后见标记就 `systemctl start`。留在 `/run` 的�
    开始上行"的端到端时序尚未在手柄上跑过；source 的断线自愈也只验证到编译与状态机
    层面，没有在 PipeWire 重启下实跑过。
 10. 多手柄路径只有单测级证据：`daemon/discovery` 的解析有测试，但"发现 → 多站并发 →
-    各自重试 → 整族拆除"没有在多只手柄（或多适配器）上跑过；`num_dummy` 不够时看到的是
+    各自重试 → 整族拆除"没有在多只手柄（或多适配器）上跑过；`num` 不够时看到的是
     单站 Provision 失败加 2 s 退避，而不是启动期报错。
 11. 发现依据是 hidraw 节点。L2CAP 后端拿到 PSM 后内核 HIDP 会话不复存在，节点随之消失；
     此时 worker 若死掉，Manager 已从 `slots_` 里删掉该 MAC，要等 BlueZ 重新建出节点才会
