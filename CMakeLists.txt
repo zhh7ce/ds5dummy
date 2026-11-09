@@ -1,6 +1,40 @@
 cmake_minimum_required(VERSION 3.16)
 project(ds5dummy LANGUAGES CXX)
 
+# dist 目标的版本号：与五个 PKGBUILD 的 pkgver() 同一条规则
+# （<tag>.r<距 tag 的提交数>.g<短哈希>，还没打 tag 时 tag 段为 0）。不缓存：
+# 每次 configure 现查，否则同一个构建目录里换了提交还会用旧版本号。
+# 不是 git 仓库（发行版 tarball、手动拷贝的目录）时留 0。-DDS5DUMMY_VERSION=...
+# 可以显式覆盖。
+if(NOT DEFINED DS5DUMMY_VERSION)
+    set(DS5DUMMY_VERSION "0")
+    find_package(Git QUIET)
+    if(GIT_FOUND)
+        execute_process(
+            COMMAND ${GIT_EXECUTABLE} -C ${CMAKE_SOURCE_DIR} describe --tags --long --abbrev=7
+            OUTPUT_VARIABLE _ds5_describe OUTPUT_STRIP_TRAILING_WHITESPACE
+            ERROR_QUIET RESULT_VARIABLE _ds5_git_rc)
+        if(_ds5_git_rc EQUAL 0)
+            string(REGEX REPLACE "^v" "" _ds5_ver "${_ds5_describe}")
+            string(REGEX REPLACE "-([0-9]+)-(g[0-9a-f]+)$" ".r\\1.\\2" _ds5_ver "${_ds5_ver}")
+            set(DS5DUMMY_VERSION "${_ds5_ver}")
+        else()
+            execute_process(
+                COMMAND ${GIT_EXECUTABLE} -C ${CMAKE_SOURCE_DIR} rev-list --count HEAD
+                OUTPUT_VARIABLE _ds5_count OUTPUT_STRIP_TRAILING_WHITESPACE
+                ERROR_QUIET RESULT_VARIABLE _ds5_count_rc)
+            execute_process(
+                COMMAND ${GIT_EXECUTABLE} -C ${CMAKE_SOURCE_DIR} rev-parse --short=7 HEAD
+                OUTPUT_VARIABLE _ds5_sha OUTPUT_STRIP_TRAILING_WHITESPACE
+                ERROR_QUIET RESULT_VARIABLE _ds5_sha_rc)
+            if(_ds5_count_rc EQUAL 0 AND _ds5_sha_rc EQUAL 0)
+                set(DS5DUMMY_VERSION "0.r${_ds5_count}.g${_ds5_sha}")
+            endif()
+        endif()
+    endif()
+endif()
+message(STATUS "ds5dummy version: ${DS5DUMMY_VERSION}")
+
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
@@ -149,8 +183,10 @@ if(BT_BACKEND STREQUAL "L2CAP")
 
     add_executable(ds5dummyd ${DS5DUMMY_CORE_SRC} src/bt/bt_l2cap.cpp)
     target_include_directories(ds5dummyd PRIVATE ${DS5DUMMY_MODULE_INCLUDE_DIRS} third_party ${BLUEZ_INCLUDE_DIRS})
-    target_link_libraries(ds5dummyd PRIVATE Threads::Threads ${BLUEZ_LIBRARIES} fmt)
+    target_link_libraries(ds5dummyd PRIVATE Threads::Threads ${BLUEZ_LIBRARIES})
     target_compile_definitions(ds5dummyd PRIVATE BT_BACKEND_L2CAP)
+    # 分发包里随后端走的 systemd 单元与内核模块清单。
+    set(DS5DUMMY_PKG_DIR "${CMAKE_SOURCE_DIR}/pkg/ds5dummy_l2cap")
 
 else()
     # 默认 HIDRAW
@@ -158,8 +194,31 @@ else()
 
     add_executable(ds5dummyd ${DS5DUMMY_CORE_SRC} src/bt/bt_hidraw.cpp)
     target_include_directories(ds5dummyd PRIVATE ${DS5DUMMY_MODULE_INCLUDE_DIRS} third_party)
-    target_link_libraries(ds5dummyd PRIVATE Threads::Threads fmt)
+    target_link_libraries(ds5dummyd PRIVATE Threads::Threads)
     target_compile_definitions(ds5dummyd PRIVATE BT_BACKEND_HIDRAW)
+    set(DS5DUMMY_PKG_DIR "${CMAKE_SOURCE_DIR}/pkg/ds5dummy_hidraw")
+endif()
+
+# ---------------------------------------------------------------------------
+# 便携构建（DS5DUMMY_PORTABLE）：产物要能在构建机之外的发行版上跑
+#   1. fmt 走头文件模式：唯一的 fmt 符号来自 loguru，动态 libfmt.so.12 在
+#      SteamOS 那类系统上没有。
+#   2. libstdc++ 静态链进二进制：代码里用了 std::format，动态 libstdc++ 会把
+#      GLIBCXX_3.4.35 写进版本需求，而 SteamOS 只有 3.4.34。只静态这一份，
+#      libgcc_s.so.1 仍动态（各发行版都带）。
+#   3. RPATH 用 $ORIGIN/../lib：yaml-cpp 按 SONAME 随包放在前缀的 lib/ 里，
+#      它的版本号各发行版不同（Arch 是 .so.0.9，SteamOS 是 .so.0.8），
+#      DT_RUNPATH 不传给被依赖库，所以只影响我们这一层。
+# glibc、PipeWire、systemd、BlueZ 保持动态：它们要么是系统 ABI，要么背后有
+# SPA 插件/守护进程/logind 这类必须与宿主同一份的状态。
+# ---------------------------------------------------------------------------
+option(DS5DUMMY_PORTABLE "Build a redistributable binary (bundled yaml-cpp, static libstdc++)" OFF)
+if(DS5DUMMY_PORTABLE)
+    target_compile_definitions(ds5dummyd PRIVATE FMT_HEADER_ONLY=1)
+    target_link_options(ds5dummyd PRIVATE -static-libstdc++)
+    set_target_properties(ds5dummyd PROPERTIES INSTALL_RPATH "$ORIGIN/../lib")
+else()
+    target_link_libraries(ds5dummyd PRIVATE fmt)
 endif()
 
 target_compile_definitions(ds5dummyd PRIVATE
@@ -271,6 +330,92 @@ if(DS5DUMMY_BUILD_TOOLS)
     # 判定仍然由上面的 buttons_check 给出，Python 只负责读取、写回与起服务。
     message(STATUS "Diagnostic tools enabled: spike_l2cap, spike_rumble, mini_gadget, audio_dump, buttons_check")
 endif()
+
+# ---------------------------------------------------------------------------
+# 可重定位分发（不装系统目录）：前缀内布局
+#   bin/ds5dummyd  lib/  plugins/  share/{doc,licenses,ds5dummy}  install.sh
+# 这些 install() 只服务于 dist：它用 DESTDIR 暂存、--prefix / 把上面这套布局
+# 铺成 tarball 的根，所以 DESTINATION 全是前缀相对路径。装到哪个前缀由
+# scripts/install.sh 决定（默认 ~/DS5Dummy），CMake 自己不碰系统目录。
+#   cmake --build build --target dist
+#   → build/dist/ds5dummy-<version>-linux-<arch>.tar.gz
+# 随包插件与面板同目录（plugin::Directories 会扫描 <prefix>/plugins），
+# 宿主配置与单元模板在 share/ds5dummy 下，由 install.sh 落到 /etc。
+# ---------------------------------------------------------------------------
+install(TARGETS ds5dummyd RUNTIME DESTINATION bin)
+install(TARGETS ds5dummy_idle ds5dummy_buttons LIBRARY DESTINATION plugins)
+install(FILES
+    plugin/idle/idle.panel.js
+    plugin/buttons/buttons.panel.js
+    DESTINATION plugins)
+install(FILES plugin/buttons/README.md DESTINATION share/doc/ds5dummy RENAME buttons.md)
+install(FILES pkg/user-config.example.yaml DESTINATION share/doc/ds5dummy)
+# 系统级配置模板由 install.sh 落到 /etc/ds5dummy/config.yaml（只在缺失时）。
+install(FILES pkg/ds5dummy.system.yaml DESTINATION share/ds5dummy RENAME config.yaml)
+install(FILES ${DS5DUMMY_PKG_DIR}/ds5dummy.service DESTINATION share/ds5dummy)
+install(FILES ${DS5DUMMY_PKG_DIR}/ds5dummy.modules-load.conf DESTINATION share/ds5dummy)
+install(FILES ${DS5DUMMY_PKG_DIR}/ds5dummy.modprobe.conf DESTINATION share/ds5dummy)
+install(PROGRAMS pkg/ds5dummy.sleep-hook DESTINATION share/ds5dummy)
+install(PROGRAMS scripts/teardown.sh DESTINATION share/ds5dummy)
+install(FILES LICENSE NOTICE DESTINATION share/licenses/ds5dummy)
+# install.sh 就在前缀根上（用户解包后直接跑它）。DESTINATION 不能用 "."（CMake
+# 当作没给），只能写成绝对根：dist 传 --prefix /，配上 DESTDIR 正好落在 tarball
+# 的顶层。
+install(PROGRAMS scripts/install.sh DESTINATION /)
+
+if(DS5DUMMY_PORTABLE)
+    # yaml-cpp 的 .so 按它自己的 SONAME 命名：DT_NEEDED 用的是 SONAME，
+    # 存成 libyaml-cpp.so 或带完整版本的别名，加载器都找不到。
+    find_library(YAMLCPP_RUNTIME_LINK NAMES yaml-cpp
+        HINTS ${YAMLCPP_LIBRARY_DIRS} NO_DEFAULT_PATH)
+    if(NOT YAMLCPP_RUNTIME_LINK)
+        message(FATAL_ERROR
+            "DS5DUMMY_PORTABLE: yaml-cpp runtime library not found in ${YAMLCPP_LIBRARY_DIRS}")
+    endif()
+    get_filename_component(YAMLCPP_RUNTIME_FILE "${YAMLCPP_RUNTIME_LINK}" REALPATH)
+    find_program(READELF_EXECUTABLE NAMES readelf)
+    if(NOT READELF_EXECUTABLE)
+        message(FATAL_ERROR
+            "DS5DUMMY_PORTABLE: readelf (binutils) is required to read the yaml-cpp SONAME")
+    endif()
+    execute_process(COMMAND ${READELF_EXECUTABLE} -d "${YAMLCPP_RUNTIME_FILE}"
+        OUTPUT_VARIABLE _ds5_yaml_dynamic OUTPUT_STRIP_TRAILING_WHITESPACE)
+    string(REGEX MATCH "SONAME[^[]*\\[([^]]+)\\]" _ds5_yaml_soname "${_ds5_yaml_dynamic}")
+    set(YAMLCPP_SONAME "${CMAKE_MATCH_1}")
+    if(NOT YAMLCPP_SONAME)
+        message(FATAL_ERROR "DS5DUMMY_PORTABLE: ${YAMLCPP_RUNTIME_FILE} has no SONAME")
+    endif()
+    install(FILES "${YAMLCPP_RUNTIME_FILE}" DESTINATION lib RENAME "${YAMLCPP_SONAME}")
+
+    # 分发这份 .so 就得带上它的 MIT 许可证文本。发行版把文本放在 licenses/ 下；
+    # 找不到只警告，那是构建机的打包疏漏，不值得让整个构建失败。
+    find_file(YAMLCPP_LICENSE_FILE NAMES LICENSE COPYING
+        PATHS /usr/share/licenses/yaml-cpp /usr/share/doc/yaml-cpp NO_DEFAULT_PATH)
+    if(YAMLCPP_LICENSE_FILE)
+        install(FILES "${YAMLCPP_LICENSE_FILE}" DESTINATION share/licenses/yaml-cpp)
+    else()
+        message(WARNING "yaml-cpp license text not found; ship it alongside the tarball")
+    endif()
+endif()
+
+# tarball 名与产物目录。tar 显式查找：这个目标要在任意发行版的构建机上跑。
+set(DS5DUMMY_DIST_NAME "ds5dummy-${DS5DUMMY_VERSION}-linux-${CMAKE_HOST_SYSTEM_PROCESSOR}")
+set(DS5DUMMY_DIST_DIR "${CMAKE_BINARY_DIR}/dist")
+set(DS5DUMMY_DIST_STAGE "${DS5DUMMY_DIST_DIR}/${DS5DUMMY_DIST_NAME}")
+find_program(TAR_EXECUTABLE NAMES tar)
+if(NOT TAR_EXECUTABLE)
+    message(FATAL_ERROR "tar is required for the dist target")
+endif()
+add_custom_target(dist
+    COMMAND ${CMAKE_COMMAND} -E rm -rf "${DS5DUMMY_DIST_DIR}"
+    COMMAND ${CMAKE_COMMAND} -E make_directory "${DS5DUMMY_DIST_STAGE}"
+    COMMAND ${CMAKE_COMMAND} -E env "DESTDIR=${DS5DUMMY_DIST_STAGE}"
+            ${CMAKE_COMMAND} --install "${CMAKE_BINARY_DIR}" --prefix / --strip
+    COMMAND ${TAR_EXECUTABLE} -C "${DS5DUMMY_DIST_DIR}" -czf
+            "${DS5DUMMY_DIST_DIR}/${DS5DUMMY_DIST_NAME}.tar.gz" "${DS5DUMMY_DIST_NAME}"
+    DEPENDS ds5dummyd ds5dummy_idle ds5dummy_buttons
+    COMMENT "Packing ${DS5DUMMY_DIST_NAME}.tar.gz into ${DS5DUMMY_DIST_DIR}"
+    VERBATIM)
 
 # ---------------------------------------------------------------------------
 # 源码文档（Doxygen，可选）

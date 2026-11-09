@@ -1,0 +1,157 @@
+# Maintainer: DS5Dummy Project
+#
+# DS5Dummy 的预编译包：打包时用便携参数（-DDS5DUMMY_PORTABLE=ON）编出同一份
+# dist 二进制，再按 Arch 的目录位置铺开。用户拿到的是 .pkg.tar.zst，不需要工具链
+# ——SteamOS 的镜像剥掉了开发文件（cmake/boost 那套跑不起来），这个包就是给它装的。
+#
+# 与 pkg/ds5dummy_hidraw 的区别只在产物：那个包链系统的 yaml-cpp 与动态
+# libstdc++，只能在同版本的 Arch 上跑；这个包把 libstdc++ 静态链进去、fmt 走头文件
+# 模式、yaml-cpp 按 SONAME 随包。二进制本身的 GLIBCXX 需求为零、GLIBC 上限 2.38；
+# 随包那份 yaml-cpp 最高要 GLIBCXX_3.4.30（SteamOS 是 3.4.34），GLIBC_2.32。
+#
+# 布局（为什么二进制不直接放 /usr/bin）：
+#   随包的 yaml-cpp 是构建机上那一份的 SONAME（Arch 是 libyaml-cpp.so.0.9，
+#   SteamOS 只有 .so.0.8），而便携构建的 RPATH 是 $ORIGIN/../lib。二进制放
+#   /usr/bin 时 RPATH 落到 /usr/lib，那里只有 SteamOS 自己的 .so.0.8，找不到
+#   随包的那份。所以整棵树装进私有前缀 /usr/lib/ds5dummy：
+#     bin/ds5dummyd  lib/libyaml-cpp.so.*  plugins/  teardown.sh
+#   /usr/bin/ds5dummyd 是指向 bin/ 的符号链接（单元文件里的 ExecStart 不用改；
+#   /proc/self/exe 会解析成真实路径，插件前缀因此仍是 /usr/lib/ds5dummy）。
+#   插件放在私有前缀的 plugins/ 下，与宿主编译期的系统插件目录是同一个路径，
+#   随包的两份 .so 与面板都能被扫到。
+#
+# Build: cd pkg/ds5dummy_bin && makepkg -d
+# Install on Arch or SteamOS: sudo pacman -U ds5dummy_bin-*.pkg.tar.zst
+# （SteamOS 装 unit 前要 steamos-readonly disable；A/B 镜像更新会清掉 /usr 与
+#   /etc 里的文件，更新后重装一次本包即可。）
+
+pkgname=ds5dummy_bin
+# Project source lives two directories up from this PKGBUILD.
+_srcdir="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+pkgver=0
+pkgrel=1
+pkgdesc="Bridge a BT DualSense to a virtual USB device (prebuilt, HIDRAW backend)"
+arch=('x86_64')
+url="https://github.com/zhh7ce/ds5dummy"
+license=('GPL-3.0-or-later')
+provides=('ds5dummy')
+conflicts=('ds5dummy' 'ds5dummy_hidraw' 'ds5dummy_l2cap')
+replaces=('ds5dummy')
+# yaml-cpp 不在这里：随包那份在 /usr/lib/ds5dummy/lib 下，与宿主自己的版本互不干扰。
+# fmt 只在构建期要（FMT_HEADER_ONLY 之后没有动态依赖）。
+depends=('bluez' 'pipewire' 'opus' 'libsamplerate' 'systemd-libs')
+makedepends=('cmake' 'pkgconf' 'boost' 'fmt' 'git')
+optdepends=(
+  'dummy_hcd: kernel module (CONFIG_USB_DUMMY_HCD=m)'
+  'hid-playstation-ds5dummy-dkms: hidraw-only Bluetooth DualSense support'
+  'ds5dummy-config: local web page for editing the plugin settings'
+)
+backup=(
+  'etc/modprobe.d/ds5dummy.conf'
+  'etc/modules-load.d/ds5dummy.conf'
+  'etc/ds5dummy/config.yaml'
+)
+install='ds5dummy.install'
+
+# <tag>.r<距 tag 的提交数>.g<短哈希>；还没打 tag 时 tag 段为 0、提交数取总数。
+# pkgver 里不能有 "-"，所以把 git 输出里的分隔符换成点。
+# 不是 git 仓库（发行版 tarball、手动拷贝的目录）时保留文件里的 pkgver。
+# CMake 的 DS5DUMMY_VERSION 用同一条规则，所以 dist tarball 的名字与 pkgver 一致。
+pkgver() {
+  local ver
+  if ! git -C "$_srcdir" rev-parse --git-dir >/dev/null 2>&1; then
+    printf '%s\n' "$pkgver"
+    return 0
+  fi
+  if ver=$(git -C "$_srcdir" describe --tags --long --abbrev=7 2>/dev/null); then
+    printf '%s\n' "$ver" | sed -E 's/^v//; s/-([0-9]+)-(g[0-9a-f]+)/.r\1.\2/'
+  else
+    printf '0.r%s.g%s\n' \
+      "$(git -C "$_srcdir" rev-list --count HEAD)" \
+      "$(git -C "$_srcdir" rev-parse --short=7 HEAD)"
+  fi
+}
+
+build() {
+  # 便携构建 + dist：dist 目标自己用 DESTDIR 暂存、--prefix / 铺出前缀相对布局，
+  # 再 --strip 打成 tarball，所以这里跟两个源码包一样只需一次 cmake。
+  cmake -B "$srcdir/build-bin" -S "$_srcdir" \
+    -DCMAKE_BUILD_TYPE=Release \
+    -DBT_BACKEND=HIDRAW \
+    -DDS5DUMMY_PORTABLE=ON \
+    -DDS5DUMMY_STRICT=ON \
+    -DDS5DUMMY_DEBUG=OFF \
+    -DDS5DUMMY_DEBUG_LOG=OFF \
+    -DDS5DUMMY_BUILD_TOOLS=OFF
+  cmake --build "$srcdir/build-bin" --target dist
+}
+
+package() {
+  local dists=("$srcdir"/build-bin/dist/ds5dummy-*-linux-"$CARCH".tar.gz)
+  if (( ${#dists[@]} != 1 )) || [[ ! -f ${dists[0]} ]]; then
+    error "expected exactly one ds5dummy-*-linux-$CARCH.tar.gz, found ${#dists[@]}"
+  fi
+
+  local unpack="$srcdir/unpack"
+  rm -rf "$unpack"
+  mkdir -p "$unpack"
+  bsdtar -xf "${dists[0]}" -C "$unpack"
+  local trees=("$unpack"/ds5dummy-*-linux-"$CARCH")
+  if (( ${#trees[@]} != 1 )) || [[ ! -d ${trees[0]} ]]; then
+    error "expected exactly one unpacked tree in $unpack, found ${#trees[@]}"
+  fi
+  local tree=${trees[0]}
+
+  install -d \
+    "$pkgdir/usr/bin" \
+    "$pkgdir/usr/lib/ds5dummy/bin" \
+    "$pkgdir/usr/lib/ds5dummy/lib" \
+    "$pkgdir/usr/lib/ds5dummy/plugins" \
+    "$pkgdir/usr/lib/systemd/system" \
+    "$pkgdir/usr/lib/systemd/system-sleep" \
+    "$pkgdir/etc/modprobe.d" \
+    "$pkgdir/etc/modules-load.d" \
+    "$pkgdir/etc/ds5dummy" \
+    "$pkgdir/usr/share/doc/ds5dummy" \
+    "$pkgdir/usr/share/licenses/$pkgname"
+
+  # 二进制与其随包库必须保持 bin/ 与 lib/ 的兄弟关系：RPATH 是 $ORIGIN/../lib。
+  install -m755 "$tree/bin/ds5dummyd" "$pkgdir/usr/lib/ds5dummy/bin/ds5dummyd"
+  ln -s ../lib/ds5dummy/bin/ds5dummyd "$pkgdir/usr/bin/ds5dummyd"
+  install -m644 "$tree"/lib/libyaml-cpp.so.* "$pkgdir/usr/lib/ds5dummy/lib/"
+
+  install -m755 "$tree"/plugins/*.so "$pkgdir/usr/lib/ds5dummy/plugins/"
+  install -m644 "$tree"/plugins/*.panel.js "$pkgdir/usr/lib/ds5dummy/plugins/"
+
+  install -m755 "$tree/share/ds5dummy/teardown.sh" \
+    "$pkgdir/usr/lib/ds5dummy/teardown.sh"
+
+  install -m644 "$tree/share/ds5dummy/ds5dummy.service" \
+    "$pkgdir/usr/lib/systemd/system/ds5dummy.service"
+  install -m755 "$tree/share/ds5dummy/ds5dummy.sleep-hook" \
+    "$pkgdir/usr/lib/systemd/system-sleep/ds5dummy"
+  install -m644 "$tree/share/ds5dummy/ds5dummy.modprobe.conf" \
+    "$pkgdir/etc/modprobe.d/ds5dummy.conf"
+  install -m644 "$tree/share/ds5dummy/ds5dummy.modules-load.conf" \
+    "$pkgdir/etc/modules-load.d/ds5dummy.conf"
+  install -m644 "$tree/share/ds5dummy/config.yaml" \
+    "$pkgdir/etc/ds5dummy/config.yaml"
+
+  install -m644 "$tree/share/doc/ds5dummy/buttons.md" \
+    "$pkgdir/usr/share/doc/ds5dummy/buttons.md"
+  install -m644 "$tree/share/doc/ds5dummy/user-config.example.yaml" \
+    "$pkgdir/usr/share/doc/ds5dummy/user-config.example.yaml"
+
+  install -m644 "$tree/share/licenses/ds5dummy/LICENSE" \
+    "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
+  install -m644 "$tree/share/licenses/ds5dummy/NOTICE" \
+    "$pkgdir/usr/share/licenses/$pkgname/NOTICE"
+  # 分发随包的 yaml-cpp 就带上它的 MIT 文本；dist 里有没有取决于构建机。
+  if compgen -G "$tree/share/licenses/yaml-cpp/*" >/dev/null; then
+    install -d "$pkgdir/usr/share/licenses/$pkgname/yaml-cpp"
+    install -m644 "$tree"/share/licenses/yaml-cpp/* \
+      "$pkgdir/usr/share/licenses/$pkgname/yaml-cpp/"
+  fi
+
+  rm -rf "$unpack"
+}

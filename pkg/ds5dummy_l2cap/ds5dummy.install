@@ -30,16 +30,26 @@ _post_bluetooth() {
     fi
 }
 
+# 装完就把服务拉起来：enable 让它跟着开机，--now 立刻启动。Manager 在没有活跃
+# 图形会话、或 dummy UDC 还没就绪时会退出 1，systemd 每 2 秒重拉，不算安装失败。
+_enable_service() {
+    if command -v systemctl >/dev/null 2>&1; then
+        systemctl enable --now ds5dummy.service 2>/dev/null && return 0
+    fi
+    echo "!! ds5dummy.service is not running; enable it with:"
+    echo "     systemctl enable --now ds5dummy.service"
+}
+
 post_install() {
     _load_modules
     _post_bluetooth
+    _enable_service
     echo ":: ds5dummy (L2CAP backend) installed."
     echo "   Loaded: dummy_hcd, libcomposite, usb_f_fs."
     echo "   BlueZ input plugin disabled; hidp blacklisted."
     echo "   System config: /etc/ds5dummy/config.yaml (root-owned; identity policy)"
     echo "   User config:   ~/.config/ds5dummy/config.yaml (controller MAC, audio)"
     echo "   Example:       /usr/share/doc/ds5dummy/user-config.example.yaml"
-    echo "   Then: systemctl enable --now ds5dummy.service"
 }
 
 post_upgrade() {

@@ -3,7 +3,8 @@
  * @brief plugin 模块的单测：目录扫描、标记识别、装载与分派（无需 root/手柄）
  *
  * 覆盖的是"插件目录里一个 .so 能不能变成一个会跑回调的插件"这条链路：
- * - 目录扫描：只认 `.so` 普通文件，不存在/为空的目录不影响启动；
+ * - 目录扫描：只认 `.so` 普通文件，不存在/为空的目录不影响启动；目录顺序是
+ *   系统 → 可执行文件前缀（便携分发） → 用户，后者覆盖前者；
  * - 标记识别：没有 `.ds5_plugin` 节的 .so 在 dlopen 之前就被跳过；
  * - dlopen 路径：真加载测试期间构建出来的 .so，并证明它的钩子真的被调用过；
  * - 同名去重与目录优先级、版本号不符的 .so 在装载点被拒；
@@ -162,6 +163,44 @@ TEST_F(PluginTest, ListPluginsOnlyReturnsSoRegularFiles) {
 
 TEST_F(PluginTest, ListPluginsOnMissingDirectoryIsEmpty) {
   EXPECT_TRUE(plugin::detail::ListPlugins(root_ + "/nope").empty());
+}
+
+/// 临时换掉 HOME，析构时恢复：Directories() 读的就是这个环境变量。
+struct HomeOverride {
+  std::string saved;
+  bool had = false;
+
+  explicit HomeOverride(const char* value) {
+    const char* old = std::getenv("HOME");
+    had = old != nullptr;
+    if (had) saved = old;
+    ::setenv("HOME", value, 1);
+  }
+  ~HomeOverride() {
+    if (had) {
+      ::setenv("HOME", saved.c_str(), 1);
+    } else {
+      ::unsetenv("HOME");
+    }
+  }
+};
+
+// 顺序就是装载优先级：用户目录必须排在最后才可能覆盖随包插件；中间那一层是
+// 便携分发的前缀（按 /proc/self/exe 现推，测试二进制的上一个目录就是构建目录）。
+TEST_F(PluginTest, DirectoriesPutTheUserDirLastAndDeriveThePrefix) {
+  const HomeOverride home("/tmp/ds5dummy-test-home");
+  const std::vector<std::string> dirs = plugin::Directories();
+
+  ASSERT_EQ(dirs.size(), 3u);
+  EXPECT_EQ(dirs[0], plugin::kSystemPluginDir);
+
+  std::error_code ec;
+  const fs::path exe = fs::read_symlink("/proc/self/exe", ec);
+  ASSERT_FALSE(ec) << ec.message();
+  EXPECT_EQ(dirs[1], (exe.parent_path().parent_path() / "plugins").string());
+
+  EXPECT_EQ(dirs[2],
+            std::string("/tmp/ds5dummy-test-home/") + plugin::kUserPluginDir);
 }
 
 TEST_F(PluginTest, HasMarkerRejectsAFileThatIsNotElf) {

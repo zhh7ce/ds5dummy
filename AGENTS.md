@@ -49,9 +49,10 @@ Entertainment / DualSense Wireless Controller"，DualSense Edge 是 `054c:0df2`
 | `tests/` | googletest 单测（`ctest`，无 root、无硬件） |
 | `tools/` | 诊断程序：`spike_l2cap`、`spike_rumble`、`mini_gadget`、`audio_dump`(+`dump_sink.*`)、几个 `spike_*` 特权/交接探针；`buttons_check` 是 buttons 配置的只读校验器（共用 `buttons_config`，不装载 `.so`），`buttons_web.py` + `buttons_web.html` 是本地配置页面（Python 回环服务、固定地址 `127.0.0.1:8777`、无令牌；壳画服务状态、配置层选择与只读的当前状态，并取回每层的插件节推给面板——面板不读文件、不发请求；插件界面由插件目录里的 `<插件名>.panel.js` 提供，没有面板的插件退回通用键值编辑器；判定仍调 `buttons_check`），`panels/core.js` 是随工具的 core 面板；`win_audio_probe.cpp` 是唯一的 Windows 侧探针（mingw 交叉编译，在 Wine/Proton 前缀里读 MMDevice 与 setupapi，不参与 Linux 构建） |
 | `pkg/ds5dummy_hidraw`、`pkg/ds5dummy_l2cap` | 两个互斥的 Arch 包：systemd 单元、`/etc/ds5dummy/config.yaml`、`/usr/share/doc/ds5dummy/user-config.example.yaml`、modprobe/modules-load 配置、install 钩子，以及随包插件与它们的配置面板 |
+| `pkg/ds5dummy_bin` | 预编译包：打包时用便携参数编出 dist 二进制，按 Arch 目录铺开（`/usr/lib/ds5dummy/{bin,lib,plugins}` + `/usr/bin` 符号链接 + 单元/模块配置/`/etc` 配置），供装不了工具链的机器装（SteamOS） |
 | `pkg/ds5dummy-config` | 独立的配置工具包：`ds5dummy-config` 入口、`buttons_web.py` + `buttons_web.html`、core 面板与 `buttons_check`；构建只编校验器，不依赖数据面的库 |
 | `pkg/hid-playstation-ds5dummy/` | 内核 `hid-playstation` 的 DKMS 补丁（hidraw 后端用），只接管蓝牙 DualSense/Edge，合成 VID/PID（`1998:1221`/`1998:1103`）；DualShock 4 与所有 USB 设备走原驱动路径。PKGBUILD 只依赖 `dkms`，头文件由用户按内核自装 |
-| `scripts/` | `setup.sh`/`teardown.sh`（整站准备/清理；teardown 扫 `ds5dummy*` 整族并卸载每个 `ffs-ds5*` 挂载）、`setup-dummy-hcd.sh`/`teardown-dummy-hcd.sh`（只喂 `tools/mini_gadget` 的最小版） |
+| `scripts/` | `setup.sh`/`teardown.sh`（整站准备/清理；teardown 扫 `ds5dummy*` 整族并卸载每个 `ffs-ds5*` 挂载）、`setup-dummy-hcd.sh`/`teardown-dummy-hcd.sh`（只喂 `tools/mini_gadget` 的最小版）、`install.sh`（可重定位分发 `dist` 的安装脚本：整棵树复制到家目录前缀、单元指向该前缀）、`verify.sh`（双后端 + ASan 的发布前验证） |
 | `third_party/` | loguru（vendored，不改注释不格式化） |
 
 ---
@@ -552,9 +553,11 @@ UDC、插件目录、系统里的手柄、系统配置 YAML 与重启提示）�
 导出名开始；旧 `.so` 的版本号对不上，装载点当场拒掉。
 
 **装载由目录决定，不由配置决定**：`plugin::Directories()` 给出系统目录
-`/usr/lib/ds5dummy/plugins` 与 `$HOME/.config/ds5dummy/plugins`（`HOME` 缺失时只有前者），
-`Start()` 按这个顺序扫描、按文件名排序，每个 `.so` 依次过三关。同名插件以后出现的目录
-为准（用户覆盖系统），同一目录内的同名只留第一个并记 WARNING。最终按插件名排序装载，
+`/usr/lib/ds5dummy/plugins`、可执行文件所在前缀的 `plugins/`（按 `/proc/self/exe` 现推，
+装到 `/usr` 时那一层不存在、扫描代价为零）与 `$HOME/.config/ds5dummy/plugins`（`HOME`
+缺失时少最后一项；与前两层重复的路径只留一条，Arch 包把整棵树装在
+`/usr/lib/ds5dummy` 时前缀层就是系统目录本身），`Start()` 按这个顺序扫描、按文件名排序，每个 `.so` 依次过三关。
+同名插件以后出现的目录为准（用户覆盖随包的那两份），同一目录内的同名只留第一个并记 WARNING。最终按插件名排序装载，
 所以顺序只取决于目录内容。配置里没有 `path` 这样的保留键——
 `global.plugins.插件名.…` 与 `controllers.<MAC>.plugins.插件名.…` 只决定这个插件
 拿到的取值，不决定它存不存在。
@@ -663,10 +666,15 @@ ctest --test-dir build
 发布前跑 `./scripts/verify.sh`：双后端 `-Werror` 构建 + ctest，再用 HIDRAW 跑一遍
 ASan+UBSan；构建树在 `build/verify-{hidraw,l2cap,asan}`，无需 root、手柄或 PipeWire 设备。
 
+可重定位的分发包另走一条命令（`DS5DUMMY_PORTABLE=ON` 见下表）：
+`cmake --build build --target dist`，产物在 `build/dist/ds5dummy-<version>-linux-<arch>.tar.gz`，
+由 `scripts/install.sh` 装到家目录前缀，形状见 §14。
+
 | 变量 | 默认 | 说明 |
 |---|---|---|
 | `BT_BACKEND` | `HIDRAW` | `HIDRAW` 或 `L2CAP`，链接期二选一；L2CAP 额外 `pkg_check_modules(BLUEZ REQUIRED bluez)` |
 | `DS5DUMMY_STRICT` | `ON` | 追加 `-Wpedantic -Wsign-conversion -Wold-style-cast` |
+| `DS5DUMMY_PORTABLE` | `OFF` | 分发用：`FMT_HEADER_ONLY`、`-static-libstdc++`、`INSTALL_RPATH=$ORIGIN/../lib`，并把 yaml-cpp 按 SONAME 随包（`dist` 目标的构建参数） |
 | `DS5DUMMY_DEBUG` | Debug 为 `ON` | 编译诊断代码：计数器、写耗时、5 s 统计窗口；关闭时相关符号不存在 |
 | `DS5DUMMY_DEBUG_LOG` | Debug 为 `ON` | 编译 `DS5DUMMY_DLOG(...)` 调试日志语句；关闭时参数不被求值。生产日志走始终编译的 `DS5DUMMY_LOG` |
 | `DS5DUMMY_BUILD_TOOLS` | `OFF` | `tools/` 下的诊断程序 |
@@ -785,6 +793,37 @@ MODULE（`ds5dummy_plugin_probe`，不链接测试二进制），测试把它拷
 PipeWire/Opus/BlueZ 这些数据面依赖。它不硬依赖后端：两个后端是仓库外的本地文件包，
 pacman 解析不了 `ds5dummy` 虚包，所以只在 `optdepends` 里列出两个后端。
 
+**可重定位分发**（`cmake --build build --target dist`，产物
+`build/dist/ds5dummy-<version>-linux-<arch>.tar.gz`）是给"装不进系统目录"的场合用的
+备用形状，不替代上面四个包：`install()` 规则铺出前缀相对布局
+（`bin/ds5dummyd`、`lib/`、`plugins/`、`share/`、根上的 `install.sh`），`dist` 用
+DESTDIR 暂存、`--prefix /` 再打成 tarball；装到哪个前缀由 `scripts/install.sh` 决定
+（默认 `$SUDO_USER` 家目录下的 `DS5Dummy/`），它只把单元、睡眠钩子、模块清单与
+`/etc/ds5dummy/config.yaml`（已存在则保留）落到系统目录，`ExecStart` 按前缀改写，
+另带 `--no-start`/`--uninstall`。为什么要家目录：SteamOS 的 A/B 镜像更新整份替换根
+文件系统，`/usr` 与 `/etc` 里手装的文件都会丢，家目录不参与替换；代价是系统更新后
+要重跑一次脚本。前缀里的文件 `chown` 成 root——程序以 root 跑，可写这个二进制就等于
+交出一份 root。便携构建走 `-DDS5DUMMY_PORTABLE=ON`：`fmt` 切成头文件模式、
+`-static-libstdc++`（代码里有 `std::format`，否则要求 GLIBCXX_3.4.35，SteamOS 只有
+3.4.34）、`INSTALL_RPATH=$ORIGIN/../lib` 并随包一份按 SONAME 命名的 `libyaml-cpp.so.0.9`
+（Arch 与 SteamOS 的 yaml-cpp 版本号不同）。glibc、PipeWire、systemd、BlueZ 保持动态。
+插件目录因此多了"可执行文件所在前缀的 `plugins/`"这一层（见 §10）；系统配置路径仍是
+编译期常量 `/etc/ds5dummy/config.yaml`。版本号从 `git describe` 现查，与 `pkgver()`
+同一条规则。这套路径没有内核模块：HIDRAW 后端仍要用户自装 DKMS 包，`install.sh` 缺它时
+只警告。
+
+`pkg/ds5dummy_bin` 把同一份便携构建装成 Arch 包，产物是给装不了工具链的机器装的
+（SteamOS 的镜像剥掉了开发文件，cmake/boost 那套跑不起来）：`build()` 用
+`-DBT_BACKEND=HIDRAW -DDS5DUMMY_PORTABLE=ON` 配置后调 `dist` 目标，`package()` 解出
+那份 tarball 再铺到系统目录。二进制与它的 yaml-cpp 一起装在私有前缀
+`/usr/lib/ds5dummy/{bin,lib}`，`/usr/bin/ds5dummyd` 只是指向 `bin/` 的符号链接——
+便携构建的 RPATH 是 `$ORIGIN/../lib`，二进制放 `/usr/bin` 时它会去找 `/usr/lib`，
+而 SteamOS 那里只有 `libyaml-cpp.so.0.8`，随包的是构建机上的 0.9。`/proc/self/exe` 把
+符号链接解析成 `bin/` 里的真实路径，所以插件前缀仍算到 `/usr/lib/ds5dummy`，与编译期
+的系统插件目录是同一个路径。单元文件、模块清单与 `/etc` 配置模板都取自 tarball 的
+`share/ds5dummy/`，HIDRAW 与 L2CAP 的差异因此不必在这份 PKGBUILD 里再写一遍；
+`depends` 不含 `yaml-cpp`（随包）与 `fmt`（只在构建期用，便携构建是头文件模式）。
+
 `pkg/hid-playstation-ds5dummy` 是内核驱动的 DKMS 包（源文件与 PKGBUILD 同目录，所以
 整个目录在 `pkg/` 下）。它只 `depends=('dkms')`、不写头文件依赖，这是 Arch 的 DKMS
 打包指南的要求：一个 DKMS 包会为机器上装着的每个内核构建，头文件包随内核而变，
@@ -792,7 +831,7 @@ pacman 解析不了 `ds5dummy` 虚包，所以只在 `optdepends` 里列出两�
 （`linux-neptune-618-headers` 实测 `Provides: None`，不提供 `LINUX-HEADERS` 虚包）。
 缺头文件时由 dkms 在安装时报 `Your kernel headers for kernel ... cannot be found`。
 
-版本号不手写：四个 PKGBUILD 都用 `pkgver()`，在其中用 `git -C "$_srcdir" describe
+版本号不手写：五个 PKGBUILD 都用 `pkgver()`，在其中用 `git -C "$_srcdir" describe
 --tags --long` 现查，生成 `<tag>.r<距 tag 的提交数>.g<短哈希>`（无 tag 时 tag 段为 `0`、
 提交数取 `rev-list --count HEAD`）。makepkg 会把结果写回 PKGBUILD 并把 `pkgrel` 重置
 为 1，所以文件里留 `pkgver=0` 占位；重新 `git checkout -- <PKGBUILD>` 即可恢复。

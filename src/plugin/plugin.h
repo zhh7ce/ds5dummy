@@ -147,10 +147,17 @@ std::span<const StateInHook> Start(const Settings& settings, const ds5Host& host
 
 /**
  * @brief 默认插件目录，按优先级从低到高。
- * @return 先是 kSystemPluginDir；$HOME 可用时再跟上 $HOME/.config/ds5dummy/plugins。
+ * @return 依次是 kSystemPluginDir、可执行文件所在前缀的 `plugins/`（推不出前缀
+ *         时缺席）、$HOME 可用时的 $HOME/.config/ds5dummy/plugins。
+ * @details 中间那一层是便携分发用的：整棵树装在 `~/DS5Dummy` 这类前缀下时，
+ *          随包插件在 `<prefix>/plugins`，环境变量里没有它的位置，只能按
+ *          `/proc/self/exe` 现推；装到 `/usr` 时推出来的 `/usr/plugins` 不存在，
+ *          扫描它对不存在的目录返回空表。
  * @details HOME 由 worker 在降权之后修成目标用户的家目录（见
  *          daemon/worker.cpp 的 RestoreHome），所以这里拿到的就是用户的插件目录。
- *          HOME 不可用时只返回系统目录，用户插件这一层自然缺席。
+ *          同名插件以后出现的目录为准：用户目录覆盖随包的那两份。
+ * @note 重复的路径只留第一次出现的那一条：Arch 包把整棵树装在
+ *       `/usr/lib/ds5dummy` 时，前缀层与 kSystemPluginDir 就是同一个目录。
  */
 std::vector<std::string> Directories();
 

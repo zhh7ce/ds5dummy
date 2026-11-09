@@ -17,10 +17,13 @@
 
 #include "plugin/plugin.h"
 
+#include <algorithm>
 #include <cstddef>
 #include <cstdlib>
+#include <filesystem>
 #include <map>
 #include <string>
+#include <utility>
 #include <vector>
 
 #include "core/debug.h"
@@ -69,21 +72,49 @@ bool Add(const ds5PluginDesc* desc, const Settings& settings,
   return true;
 }
 
+/**
+ * @brief 从可执行文件位置推出安装前缀：`<prefix>/bin/ds5dummyd` → `<prefix>`。
+ * @return 前缀路径；`/proc/self/exe` 读不出来时返回空串。
+ * @details 便携分发把整棵树装在任意前缀下（默认 `~/DS5Dummy`），插件在
+ *          `<prefix>/plugins`，不在编译期固定的系统目录里。装到 `/usr/bin` 时
+ *          推出来是 `/usr`，那一层的 `plugins/` 不存在，@ref detail::ListPlugins
+ *          对不存在的目录返回空表，代价为零。
+ */
+std::string ExecutablePrefix() {
+  std::error_code ec;
+  const std::filesystem::path exe =
+      std::filesystem::read_symlink("/proc/self/exe", ec);
+  if (ec) return {};
+  return exe.parent_path().parent_path().string();
+}
+
 }  // namespace
 
 std::vector<std::string> Directories() {
   std::vector<std::string> dirs{kSystemPluginDir};
+  const std::string prefix = ExecutablePrefix();
+  if (!prefix.empty()) dirs.push_back(prefix + "/plugins");
   const char* home = std::getenv("HOME");
   if (home != nullptr && *home != '\0') {
     dirs.push_back(std::string(home) + "/" + kUserPluginDir);
   }
-  return dirs;
+  // Arch 包把整棵树装进 /usr/lib/ds5dummy 时，前缀层与系统目录是同一个路径。
+  // 去掉重复项：同一个目录扫两遍会让每个插件多一次 dlopen，并多打一行
+  // "同名覆盖"日志（两条日志里的路径还一模一样）。
+  std::vector<std::string> unique;
+  for (std::string& dir : dirs) {
+    if (std::find(unique.begin(), unique.end(), dir) == unique.end()) {
+      unique.push_back(std::move(dir));
+    }
+  }
+  return unique;
 }
 
 std::span<const StateInHook> Start(const Settings& settings, const ds5Host& host,
                                    std::span<const std::string> dirs) {
   // 候选按插件名收口：同名只留一份。后一个目录里的那份覆盖前一个目录里的
-  // （用户目录排在系统目录之后），同一个目录里出现两份时按文件名序留第一份。
+  // （优先序由 Directories 给出，用户目录排在最后），同一个目录里出现两份时
+  // 按文件名序留第一份。
   struct Found {
     std::string path;
     const ds5PluginDesc* desc;

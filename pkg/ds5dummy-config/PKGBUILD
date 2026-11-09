@@ -9,8 +9,6 @@
 pkgname=ds5dummy-config
 # Project source lives two directories up from this PKGBUILD.
 _srcdir="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
-# 版本跟随 checkout，由下面的 pkgver() 现查。makepkg 会把结果写回本文件并把
-# pkgrel 重置为 1，所以这里留占位值；改动提交后重新 makepkg 就是升级。
 pkgver=0
 pkgrel=1
 pkgdesc="Local web page for editing DS5Dummy plugin settings"
@@ -30,8 +28,13 @@ b2sums=('SKIP')
 
 # <tag>.r<距 tag 的提交数>.g<短哈希>；还没打 tag 时 tag 段为 0、提交数取总数。
 # pkgver 里不能有 "-"，所以把 git 输出里的分隔符换成点。
+# 不是 git 仓库（发行版 tarball、手动拷贝的目录）时保留文件里的 pkgver。
 pkgver() {
   local ver
+  if ! git -C "$_srcdir" rev-parse --git-dir >/dev/null 2>&1; then
+    printf '%s\n' "$pkgver"
+    return 0
+  fi
   if ver=$(git -C "$_srcdir" describe --tags --long --abbrev=7 2>/dev/null); then
     printf '%s\n' "$ver" | sed -E 's/^v//; s/-([0-9]+)-(g[0-9a-f]+)/.r\1.\2/'
   else
