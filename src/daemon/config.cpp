@@ -474,7 +474,7 @@ bool ReadUsbModel(const YAML::Node& node, const std::string& where,
  * @param cfg 入参是下层（内置默认或 global）的快照，出参是叠加本层后的值。
  * @param why 失败时的原因。
  * @return 成功 true。
- * @details 只写出现的键，未出现的键保留入参里的值——三层叠加就是这样逐层
+ * @details 只写出现的键，未出现的键保留入参里的值——两层叠加就是这样逐层
  *          覆盖出来的。允许的键与 ControllerConfig 里用户可写的字段一一对应；
  *          bt_addr 与 host_sysfs_path 是 Manager 盖上的运行期事实，配置层不收；
  *          usb_model 在交接前由 Manager 用发现结果解决掉 auto，plugins 则整份
@@ -1040,7 +1040,7 @@ bool ParseSystemConfig(const std::string& text, SystemConfig& out,
 }
 
 /**
- * @brief 解析用户配置文本（schema：enabled/bt_addr/log_level/plugins/global/
+ * @brief 解析用户配置文本（schema：enabled/bt_addr/log_level/global/
  *        controllers）。
  * @param text YAML 文本；空文本按空文档处理。
  * @param out 成功时写入结果；失败时不修改。
@@ -1065,8 +1065,8 @@ bool ParseUserConfig(const std::string& text, UserConfig& out,
         why = "user config: document root must be a mapping";
         return false;
       }
-      if (!CheckKeys(root, {"enabled", "bt_addr", "log_level", "plugins",
-                            "global", "controllers"},
+      if (!CheckKeys(root, {"enabled", "bt_addr", "log_level", "global",
+                            "controllers"},
                      "user config", why)) {
         return false;
       }
@@ -1104,16 +1104,6 @@ bool ParseUserConfig(const std::string& text, UserConfig& out,
         int level = 0;
         if (!ReadLogLevel(log_level, "user config", level, why)) return false;
         cfg.log_level = level;
-      }
-
-      // 根级 `plugins:` 是插件那一族的默认层：先合进 defaults，global.plugins
-      // 与 controllers.<MAC>.plugins 再在它之上逐键覆盖。默认层是空的：装载由
-      // 插件目录决定（见 plugin/plugin.h），这一节只负责把键交给同名插件。
-      const YAML::Node root_plugins = root["plugins"];
-      if (root_plugins &&
-          !ReadPlugins(root_plugins, "user config", cfg.defaults.plugins,
-                       why)) {
-        return false;
       }
 
       // `global:` 只写键不写值时按"无覆盖"处理，与 identity: 同一种宽容。

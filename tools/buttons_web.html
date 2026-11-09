@@ -1,0 +1,1191 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>DS5Dummy 配置</title>
+<script>
+  // 主题：右上角的亮色 / 暗色切换。手动选择存在 localStorage，没有选择时
+  // 跟随系统的 prefers-color-scheme；首帧前就定好，避免先闪一下另一套配色。
+  const THEME_KEY = 'ds5-theme';
+
+  function storedTheme(){
+    try {
+      const saved = localStorage.getItem(THEME_KEY);
+      return saved === 'light' || saved === 'dark' ? saved : '';
+    } catch (error){
+      return '';
+    }
+  }
+
+  function systemTheme(){
+    return window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches
+      ? 'dark' : 'light';
+  }
+
+  function markThemeButtons(){
+    const theme = document.documentElement.dataset.theme || 'light';
+    for (const button of document.querySelectorAll('[data-theme-set]')){
+      const active = button.dataset.themeSet === theme;
+      button.classList.toggle('active', active);
+      button.setAttribute('aria-pressed', String(active));
+    }
+  }
+
+  function setTheme(theme, persist){
+    document.documentElement.dataset.theme = theme;
+    if (persist){
+      try { localStorage.setItem(THEME_KEY, theme); } catch (error){ /* 私密模式没有存储 */ }
+    }
+    markThemeButtons();
+  }
+
+  setTheme(storedTheme() || systemTheme(), false);
+  if (window.matchMedia){
+    const query = window.matchMedia('(prefers-color-scheme: dark)');
+    const follow = () => {
+      if (!storedTheme()) setTheme(systemTheme(), false);
+    };
+    if (query.addEventListener) query.addEventListener('change', follow);
+    else if (query.addListener) query.addListener(follow);
+  }
+</script>
+<!--
+  配置工具的壳：顶部是服务、配置文件、当前状态与配置层（全局 / 某只手柄），下面
+  按面板分标签。页面只在这里读文件、取每层的插件节，再把各自的那一份推给面板；
+  面板不读配置文件、不发请求、也不判断自己处在全局还是某只手柄之下。基础配置面板
+  随工具走；其余标签来自插件目录——每个 <插件名>.so 旁边的 <插件名>.panel.js 在
+  启动时被取回并注册，没有脚本的插件落成通用键值编辑器。
+
+  版面照 DS5Dongle 的网页配置（ds5.awalol.eu.org）：设备条 + 分节卡片；卡片、
+  悬停说明、标签与 toast 的控件语言取自上游 DS5Dongle-Studio 的
+  ds5-config-portal.html。读写走本地回环服务的 JSON API，权威判定由服务调用
+  buttons_check（插件自己的语法层）给出，页面不实现语法。
+
+  手柄示意图不是装饰：上面的图是「源」，下面的图是「目标」。接上手柄时按住哪些键，
+  那一组就是当前规则的源（单键规则取其中一个，组合键与宏取整组）；没接手柄就点图，
+  效果相同。上下两幅图都只是 SVG，不依赖 WebHID 也能用。
+-->
+<style>
+  /* 两套配色共用同一组变量；<head> 里的脚本在首帧前定好 data-theme，
+     手动选择存在 localStorage，没有选择时跟随系统的 prefers-color-scheme。 */
+  :root {
+    color-scheme:light;
+    --bg:#f5f7fa; --card:#fff; --field:#f8fafc; --band:#f7f9fb;
+    --border:#e3e9f0; --line:#edf1f5;
+    --text:#111827; --sub:#5f6b7a;
+    --accent:#343434; --on-accent:#fff;
+    --cta:#2563eb; --on-cta:#fff;
+    --green:#1a7f37; --red:#be123c; --warn:#8a4b0a;
+    --featured-border:#d9e2ec;
+    --hover-tint:rgba(17,24,39,.05); --accent-soft:rgba(17,24,39,.08);
+    --red-tint:rgba(190,18,60,.06); --banner-text:#9f1239;
+    --shadow:0 6px 22px rgba(15,23,42,.12);
+    --pad-line:rgba(17,24,39,.55); --pad-line-strong:rgba(17,24,39,.78);
+    --pad-well:rgba(17,24,39,.14); --pad-shape:rgba(17,24,39,.03);
+    --pad-icon:rgba(17,24,39,.55); --pad-arrow:rgba(17,24,39,.4);
+    --live-ink:#fff; --warn-glow:rgba(138,75,10,.35);
+  }
+  :root[data-theme="dark"] {
+    color-scheme:dark;
+    --bg:#0f1115; --card:#1a1d24; --field:#11141a; --band:#151920;
+    --border:#2a2f3a; --line:#333;
+    --text:#e6e8ec; --sub:#9aa0aa;
+    --accent:#4ea1ff; --on-accent:#fff;
+    --cta:#4ea1ff; --on-cta:#fff;
+    --green:#3fb950; --red:#f85149; --warn:#d29922;
+    --featured-border:#2f3b4d;
+    --hover-tint:rgba(78,161,255,.07); --accent-soft:rgba(78,161,255,.18);
+    --red-tint:rgba(248,81,73,.08); --banner-text:#ffb7b1;
+    --shadow:0 6px 22px rgba(0,0,0,.5);
+    --pad-line:rgba(226,232,240,.55); --pad-line-strong:rgba(226,232,240,.7);
+    --pad-well:rgba(226,232,240,.16); --pad-shape:rgba(255,255,255,.03);
+    --pad-icon:rgba(226,232,240,.55); --pad-arrow:rgba(226,232,240,.4);
+    --live-ink:#0b0f16; --warn-glow:rgba(210,153,34,.8);
+  }
+  * { box-sizing:border-box; }
+  body { margin:0; font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif; background:var(--bg); color:var(--text); padding:0; }
+  .app-shell { width:min(1180px, calc(100% - 32px)); margin:0 auto; padding:24px 0 40px; }
+  h1 { font-size:22px; margin:0 0 4px; }
+  .subtitle { color:var(--sub); font-size:13px; margin:0 0 16px; }
+  .dot { width:10px; height:10px; border-radius:50%; background:var(--red); flex-shrink:0; }
+  .dot.on { background:var(--green); }
+  .card { background:var(--card); border:1px solid var(--border); border-radius:10px; padding:16px; margin-bottom:16px; }
+  .subdiv { margin:16px 0 8px; padding-top:12px; border-top:2px solid var(--border);
+            font-size:12px; font-weight:700; text-transform:uppercase; letter-spacing:.6px;
+            color:var(--text); }
+  .tpair { display:grid; grid-template-columns:repeat(2, minmax(0,1fr)); gap:0 22px; align-items:start; }
+  .tcolhead { font-size:11px; text-transform:uppercase; letter-spacing:.5px; color:var(--sub);
+              padding-bottom:6px; margin-bottom:4px; border-bottom:1px solid var(--line); }
+  .tcell { min-width:0; }
+  .subdiv-light { margin:12px 0 2px; padding-top:8px; border-top:1px solid var(--line);
+                  font-size:11px; color:var(--sub); }
+  .tshared { margin-top:12px; padding-top:8px; border-top:1px solid var(--line); }
+  .card-title { font-size:12px; text-transform:uppercase; letter-spacing:.5px; color:var(--sub); margin-bottom:12px; }
+  .row { display:flex; align-items:center; justify-content:space-between; padding:10px 0; border-bottom:1px solid var(--border); }
+  .row:last-child { border-bottom:none; }
+  .row .label { font-size:15px; }
+  .row .hint { font-size:12px; color:var(--sub); margin-top:2px; }
+  .row.sel { background:var(--hover-tint); }
+  /* Hover glossary for each setting. The marker sits after the label; the popover
+     is a CSS ::after so there is no per-field JS and nothing to wire into events.
+     No ancestor sets overflow:hidden, so the popover is never clipped. */
+  .desc { position:relative; display:inline-flex; align-items:center; justify-content:center;
+          width:15px; height:15px; margin-left:7px; border-radius:50%;
+          border:1px solid var(--sub); color:var(--sub);
+          font-size:10px; font-weight:700; font-style:normal; line-height:1;
+          cursor:help; vertical-align:middle; user-select:none; }
+  .desc:hover { border-color:var(--accent); color:var(--accent); }
+  .desc::after { content:attr(data-tip); position:absolute; left:50%; top:calc(100% + 9px);
+          transform:translateX(-50%); width:max-content; min-width:180px; max-width:300px;
+          background:var(--card); color:var(--text); border:1px solid var(--border);
+          border-radius:8px; padding:9px 11px; font-size:12.5px; font-weight:400; line-height:1.45;
+          text-align:left; white-space:normal; box-shadow:var(--shadow);
+          opacity:0; visibility:hidden; transition:opacity .12s; pointer-events:none; z-index:60; }
+  .desc::before { content:''; position:absolute; left:50%; top:calc(100% + 3px);
+          transform:translateX(-50%); border:6px solid transparent; border-bottom-color:var(--border);
+          opacity:0; visibility:hidden; transition:opacity .12s; z-index:61; }
+  .desc:hover::after, .desc:hover::before { opacity:1; visibility:visible; }
+  input[type=number], select { background:var(--field); border:1px solid var(--border); color:var(--text); border-radius:8px; padding:8px 10px; font-size:14px; width:150px; text-align:right; }
+  select { text-align:left; }
+  .btn { border:none; border-radius:8px; padding:9px 16px; font-size:14px; font-weight:600; cursor:pointer; }
+  .btn-primary { background:var(--cta); color:var(--on-cta); }
+  .btn-green { background:var(--green); color:var(--on-accent); }
+  .btn-outline { background:transparent; border:1px solid var(--border); color:var(--text); }
+  .btn:disabled { opacity:.45; cursor:not-allowed; }
+  .actions { display:flex; gap:10px; margin-top:8px; }
+  .toast { position:fixed; bottom:24px; left:50%; transform:translateX(-50%) translateY(100px); background:var(--card); border:1px solid var(--border); padding:12px 20px; border-radius:8px; transition:transform .3s; max-width:min(560px, calc(100vw - 48px)); }
+  .toast.show { transform:translateX(-50%) translateY(0); }
+  .toast.err { border-color:var(--red); }
+  .info-text { color:var(--sub); font-size:14px; line-height:1.5; }
+
+  /* --- 页面骨架：照 DS5 Bridge 的设备条与分节卡片 --- */
+  .app-header { display:flex; align-items:flex-end; justify-content:space-between; gap:16px; flex-wrap:wrap; margin-bottom:14px; }
+  .app-header h1 { font-size:20px; margin:0; }
+  .theme-switch { display:inline-flex; gap:2px; padding:2px; background:var(--card);
+                  border:1px solid var(--border); border-radius:999px; }
+  .theme-switch button { appearance:none; border:none; background:transparent; color:var(--sub);
+                  font:600 12.5px system-ui; padding:5px 12px; border-radius:999px; cursor:pointer; }
+  .theme-switch button:hover { color:var(--text); }
+  .theme-switch button.active { background:var(--accent); color:var(--on-accent); }
+  .device-strip-card { background:var(--card); border:1px solid var(--border); border-radius:12px; margin-bottom:14px; }
+  .device-strip { display:grid; grid-template-columns:minmax(0,1fr) auto; align-items:center; gap:12px; padding:12px 16px; }
+  .device-main { display:flex; align-items:flex-start; gap:10px; min-width:0; }
+  .device-main .device-label { font-size:11px; text-transform:uppercase; letter-spacing:.5px; color:var(--sub); }
+  .device-main strong { display:block; font-size:13.5px; font-weight:600; line-height:1.4; }
+  .device-meta { color:var(--sub); font-size:12px; margin-top:2px; overflow-wrap:anywhere; }
+  .device-actions { display:flex; gap:8px; align-items:center; flex-wrap:wrap; }
+  .device-actions select { width:auto; padding:7px 10px; font-size:13px; }
+  .device-actions .btn { padding:7px 14px; }
+  .device-strip + .device-strip, .device-strip + .device-addrow { border-top:1px solid var(--border); }
+  .device-actions input[type=text] { width:180px; padding:7px 10px; font-size:13px;
+        font-family:ui-monospace,SFMono-Regular,Menlo,monospace; }
+  .layer-pill { margin-left:8px; }
+  .config-sections { display:grid; grid-template-columns:minmax(0,1fr) minmax(0,1.18fr); align-items:start; gap:14px; }
+  .config-column { display:flex; flex-direction:column; gap:14px; min-width:0; }
+  .config-section { background:var(--card); border:1px solid var(--border); border-radius:12px; padding:14px 16px; min-width:0; }
+  .config-section-featured { border-color:var(--featured-border); }
+  .config-section-heading { display:flex; align-items:flex-start; gap:10px; margin-bottom:10px; }
+  .config-section-icon { width:28px; height:28px; flex:none; display:grid; place-items:center; color:var(--accent); }
+  .config-section-heading h3 { margin:0; font-size:15px; line-height:1.25; }
+  .config-section-heading p { margin:3px 0 0; color:var(--sub); font-size:12px; line-height:1.45; }
+  @media (max-width: 900px) {
+    .config-sections { grid-template-columns:1fr; }
+    .device-strip { grid-template-columns:1fr; }
+  }
+
+  /* --- buttons：搜索、标签、字段行 --- */
+  .searchwrap { display:flex; align-items:center; gap:8px; margin:0 0 14px; }
+  .searchwrap input[type=search] { flex:1; min-width:0; width:auto; text-align:left;
+        background:var(--field); border:1px solid var(--border); color:var(--text);
+        border-radius:8px; padding:9px 12px; font-size:14px; }
+  .searchwrap input[type=search]:focus { outline:none; border-color:var(--accent); }
+  .searchwrap input[type=search]::placeholder { color:var(--sub); }
+  .searchwrap .hits { font-size:12px; color:var(--sub); white-space:nowrap; }
+  .nohits { color:var(--sub); font-size:14px; line-height:1.6; margin:0; }
+  .nohits b { color:var(--text); font-weight:600; }
+  .tabbar { display:flex; gap:4px; flex-wrap:wrap; }
+  .tabbar.center { justify-content:center; margin:0 0 10px; }
+  .tab { appearance:none; border:1px solid var(--border); background:transparent; color:var(--sub);
+         padding:7px 15px; border-radius:8px; font:500 13px system-ui; cursor:pointer;
+         display:inline-flex; align-items:center; }
+  .tab:hover { color:var(--text); border-color:var(--sub); }
+  .tab.active { background:var(--accent); border-color:var(--accent); color:var(--on-accent); }
+  .count { display:inline-block; margin-left:6px; font-size:11px; opacity:.7; }
+  .chips { display:flex; flex-wrap:wrap; gap:6px; align-items:center; }
+  .chip { display:inline-flex; align-items:center; gap:6px; background:var(--field); border:1px solid var(--border); border-radius:999px; padding:3px 6px 3px 10px; font-size:12.5px; }
+  .chip button { appearance:none; border:none; background:transparent; color:var(--sub); cursor:pointer; font-size:14px; line-height:1; padding:0 3px; }
+  .chip button:hover { color:var(--red); }
+  .chip .tok { color:var(--sub); font-size:11px; }
+  .chip[data-token] { cursor:pointer; }
+  .chip.live { border-color:var(--accent); color:var(--accent); }
+  .chip.sel { border-color:var(--warn); color:var(--warn); }
+  .mini { font-size:12px; color:var(--sub); line-height:1.45; }
+  .outcome { font-size:12px; white-space:nowrap; }
+  .addrow { display:flex; gap:8px; margin-top:12px; }
+  .yaml { background:var(--field); border:1px solid var(--border); border-radius:8px; padding:12px; font:12px/1.5 ui-monospace,SFMono-Regular,Menlo,monospace; color:var(--sub); overflow:auto; max-height:320px; margin:0; white-space:pre; }
+  .kv { display:grid; grid-template-columns:96px minmax(0,1fr); gap:8px 12px; margin:0; font-size:13px; }
+  .kv dt { color:var(--sub); }
+  .kv dd { margin:0; overflow-wrap:anywhere; }
+  .banner { border:1px solid var(--red); background:var(--red-tint); color:var(--banner-text); border-radius:10px; padding:10px 14px; margin-bottom:14px; font-size:13px; line-height:1.45; white-space:pre-wrap; }
+  .spin { color:var(--sub); font-size:14px; }
+  input[type=text] { background:var(--field); border:1px solid var(--border); color:var(--text); border-radius:8px; padding:8px 10px; font-size:14px; }
+  input[type=text]:focus, input[type=number]:focus, select:focus { outline:none; border-color:var(--accent); }
+
+  /* --- 手柄示意图：两块画布，上面取源、下面设目标 --- */
+  .band { background:var(--band); border:1px solid var(--border); border-radius:10px; padding:10px 12px 12px; margin-bottom:12px; }
+  .band-head { display:flex; align-items:center; gap:10px; flex-wrap:wrap; margin-bottom:4px; }
+  .band-title { font-size:13px; font-weight:600; display:flex; align-items:baseline; gap:8px; flex-wrap:wrap; }
+  .band-title .mini { font-weight:400; }
+  .band-tools { margin-left:auto; display:flex; align-items:center; gap:8px; flex-wrap:wrap; }
+  .band-tools .btn { padding:5px 11px; font-size:12.5px; }
+  .band-tools label { display:inline-flex; align-items:center; gap:5px; cursor:pointer; }
+  .band-tools input[type=checkbox] { width:auto; margin:0; }
+  .band-foot { font-size:12px; color:var(--sub); line-height:1.4; margin-top:6px; overflow-wrap:anywhere; }
+  .padrows { display:grid; grid-template-columns:repeat(2, minmax(0,1fr)); gap:12px; align-items:start; }
+  .padrows .band { margin-bottom:0; }
+  @media (max-width: 900px) { .padrows { grid-template-columns:1fr; } }
+  .padwrap { margin:4px 0 0; display:flex; justify-content:center; }
+  svg.pad { display:block; width:min(100%, 440px); height:auto; }
+  svg.pad .shell { fill:none; stroke:var(--pad-line-strong); stroke-width:4; stroke-linecap:round; stroke-linejoin:round; }
+  svg.pad .well { fill:none; stroke:var(--pad-well); stroke-width:3; }
+  svg.pad .hit { cursor:pointer; }
+  svg.pad .hit .grab { fill:transparent; stroke:none; pointer-events:all; }
+  svg.pad .hit .shape { fill:var(--pad-shape); stroke:var(--pad-line); stroke-width:4;
+        stroke-linecap:round; stroke-linejoin:round; transition:fill .08s, stroke .08s; }
+  svg.pad .hit .icon { fill:none; stroke:var(--pad-icon); stroke-width:4;
+        stroke-linecap:round; stroke-linejoin:round; transition:stroke .08s; pointer-events:none; }
+  svg.pad .hit .icon-fill { fill:var(--pad-icon); stroke:none; transition:fill .08s; pointer-events:none; }
+  svg.pad .hit .arrow { fill:var(--pad-arrow); stroke:none; transition:fill .08s; pointer-events:none; }
+  svg.pad .hit:hover .shape { fill:var(--accent-soft); stroke:var(--accent); }
+  svg.pad .hit:hover .icon { stroke:var(--accent); }
+  svg.pad .hit:hover .icon-fill, svg.pad .hit:hover .arrow { fill:var(--accent); }
+  svg.pad .hit.live .shape { fill:var(--accent); stroke:var(--accent); }
+  svg.pad .hit.live .icon { stroke:var(--live-ink); }
+  svg.pad .hit.live .icon-fill, svg.pad .hit.live .arrow { fill:var(--live-ink); }
+  svg.pad .hit.bare.live .icon-fill { fill:var(--accent); }
+  svg.pad .hit.sel .shape { stroke:var(--warn); }
+  svg.pad .hit.sel { filter:drop-shadow(0 0 7px var(--warn-glow)); }
+  svg.pad .hit.off { opacity:.16; pointer-events:none; cursor:default; }
+  svg.pad .hit.off .shape { fill:none; }
+  svg.pad .hit.off .grab { pointer-events:none; }
+  svg.pad .caption { fill:var(--sub); font-size:21px; text-anchor:middle; letter-spacing:1px;
+        pointer-events:none; user-select:none; }
+  svg.pad .edge-label { fill:var(--sub); font-size:26px; text-anchor:middle; dominant-baseline:middle;
+        pointer-events:none; user-select:none; }
+  svg.pad .hit.live .edge-label { fill:var(--live-ink); }
+  .band.muted .padwrap { opacity:.4; }
+  .band.muted svg.pad .hit, .band.muted svg.pad .hit .grab { pointer-events:none; }
+  .ctx { font-size:13px; color:var(--sub); line-height:1.5; text-align:center; margin:0 0 2px; }
+  .ctx b { color:var(--text); font-weight:600; }
+  .ctxlive { font-size:12px; color:var(--accent); text-align:center; min-height:17px; margin-bottom:10px; }
+
+  /* --- 壳：面板标签、基础配置表单与通用键值行 --- */
+  [hidden] { display:none !important; }
+  .panel-host { display:block; }
+  .shell-tabs { margin:20px 0 14px; }
+  .toolbar-line { display:flex; align-items:center; gap:10px; margin:0 0 10px; }
+  .toolbar-line label { font-size:12px; color:var(--sub); display:inline-flex; align-items:center; gap:6px; }
+  .toolbar-line select { width:auto; padding:7px 10px; font-size:13px; }
+  .formgrid { display:grid; grid-template-columns:repeat(2, minmax(0,1fr)); gap:10px 14px; }
+  .field { display:flex; flex-direction:column; gap:4px; min-width:0; }
+  .field label { font-size:12px; color:var(--sub); display:flex; align-items:center; gap:4px; }
+  .field input, .field select { width:100%; text-align:left; }
+  .macrow { border:1px solid var(--border); border-radius:10px; padding:10px 12px; margin-top:10px; background:var(--band); }
+  .macrow-head { display:flex; align-items:center; justify-content:space-between; gap:8px; margin-bottom:8px; }
+  .macrow-head code { font-size:13px; }
+  .pill { display:inline-flex; align-items:center; gap:6px; border-radius:999px; padding:2px 10px;
+          font-size:12px; border:1px solid var(--border); color:var(--sub); }
+  .pill.ok { border-color:var(--green); color:var(--green); }
+  .pill.bad { border-color:var(--red); color:var(--red); }
+  .pill.warn { border-color:var(--warn); color:var(--warn); }
+  .kvrows { display:flex; flex-direction:column; gap:6px; }
+  .kvrow { display:grid; grid-template-columns:minmax(140px, 0.9fr) minmax(0, 2fr) auto;
+           gap:8px; align-items:center; font-size:13px; }
+  .kvrow code { overflow-wrap:anywhere; }
+  .kvrow input[type=text] { width:100%; }
+  .kvrow .btn { padding:5px 10px; font-size:12px; }
+  .addrow input[type=text] { flex:1; min-width:0; }
+  @media (max-width: 900px) {
+    .formgrid { grid-template-columns:1fr; }
+    .kvrow { grid-template-columns:minmax(100px, 1fr) minmax(0, 1.4fr) auto; }
+  }
+</style>
+</head>
+<body>
+<div class="app-shell" id="app"><p class="spin">读取中…</p></div>
+<div class="toast" id="toast"></div>
+<script>
+"use strict";
+
+// ---------------------------------------------------------------------------
+// 配置工具的壳
+//
+// 壳只做四件事：读写本地服务、维护「有未保存修改 → 保存」的闸门、画顶部的
+// 设备条与面板标签，以及把每个面板挂到自己的 <section> 里。面板自己是不
+// 知道文件格式的——它们只把改动交给 DS5.saveAll。
+//
+// 面板来源：
+//   panel/core.js         随本工具，基础配置与当前状态
+//   <插件名>.panel.js     与 <插件名>.so 同目录，启动时按插件清单加载
+//   没有面板脚本的插件     壳自己给一个通用的键值编辑器
+// ---------------------------------------------------------------------------
+
+/// 同时用于文本与属性位置：五个字符都转义，任何动态值都不直接拼进 HTML。
+function esc(s){
+  return String(s == null ? '' : s)
+    .replace(/&/g,'&amp;').replace(/"/g,'&quot;').replace(/'/g,'&#39;')
+    .replace(/</g,'&lt;').replace(/>/g,'&gt;');
+}
+const escAttr = esc;
+
+/// 悬停说明的标记；没有说明就不画。
+function desc(tip){
+  return tip ? `<span class="desc" data-tip="${escAttr(tip)}" aria-label="${escAttr(tip)}">i</span>` : '';
+}
+
+let toastTimer = null;
+function showToast(message, isError){
+  const node = document.getElementById('toast');
+  node.textContent = message;
+  node.className = 'toast show' + (isError ? ' err' : '');
+  clearTimeout(toastTimer);
+  toastTimer = setTimeout(() => { node.className = 'toast' + (isError ? ' err' : ''); }, 3600);
+}
+
+async function api(path, options){
+  const response = await fetch(path, Object.assign({ credentials: 'same-origin' }, options));
+  let payload = null;
+  try { payload = await response.json(); } catch (error) { payload = null; }
+  if (!response.ok){
+    const error = new Error(payload && payload.error ? payload.error : '请求失败 ' + response.status);
+    error.status = response.status;
+    throw error;
+  }
+  return payload;
+}
+
+function post(path, body){
+  return api(path, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  });
+}
+
+function clone(value){ return JSON.parse(JSON.stringify(value)); }
+
+// ---------------------------------------------------------------------------
+// 壳与面板之间的契约
+//
+// 壳是唯一读写配置的地方：它按当前层向服务取全部插件节，再把每一节推给对应
+// 的面板。面板只消费推给它那一份（`ctx`），不读文件、不发请求，也不知道自己
+// 处在全局还是某只手柄之下；改动收集回来时由壳补上插件名与层。
+// ---------------------------------------------------------------------------
+
+/// 全局唯一的面板登记处。面板文件在加载时调用 DS5.define 注册自己。
+const DS5 = {
+  state: null,
+  panels: new Map(),
+  busy: false,
+  /// 当前编辑的层：`global` 或 `controllers.<MAC>`。所有面板都跟着它取同一层。
+  layer: 'global',
+  /// 页面上临时添加、文件里还没有的手柄；保存过之后服务端的层清单会接上。
+  extraLayers: [],
+  /// 当前层的插件节：插件名 → `api/plugin` 的那一份 payload。
+  sections: new Map(),
+
+  /// 面板共用的工具；面板不重复实现一份转义、请求或提示。
+  esc,
+  desc,
+  showToast,
+  api,
+  post,
+  clone,
+
+  /// 登记一个面板；`id` 同时是它 `<section>` 的后缀。
+  define(panel){
+    if (!panel || typeof panel.id !== 'string' || !panel.id) return;
+    this.panels.set(panel.id, panel);
+  },
+
+  /// 面板的输入变了：只更新保存按钮，不重建别的面板。
+  changed(){ updateChrome(); },
+
+  /// 汇总所有面板的修改并写盘；成功之后取回新状态并让每个面板重读一遍。
+  async saveAll(){
+    if (this.busy || !this.state) return;
+    // 新加的手柄先把 `controllers.<MAC>:` 这一行写出来，随后的键才有地方落。
+    const edits = pendingLayers().map(entry => ({ kind: 'controller', mac: entry.mac }));
+    for (const panel of this.panels.values()){
+      if (!panel.dirty || !panel.dirty()) continue;
+      const items = panel.collect ? panel.collect() : [];
+      if (!items || items.length === 0){
+        showToast((panel.title || panel.id) + ' 还有改不了的内容；先按提示改好。', true);
+        return;
+      }
+      for (const item of items){
+        // 插件面板只交自己那一节里的草稿：插件名、层与路径前缀都由壳补齐。
+        if (item.kind === 'plugin'){
+          edits.push({ kind: 'plugin', name: panel.id, layer: this.layer, items: item.items });
+        } else if (item.kind === 'section_set' || item.kind === 'section_remove'){
+          const section = this.sections.get(panel.id);
+          const base = section && Array.isArray(section.path) ? section.path : null;
+          if (!base){
+            showToast((panel.title || panel.id) + ' 这一节还没读到；先重新读取。', true);
+            return;
+          }
+          const path = base.concat(item.keys || []);
+          edits.push(item.kind === 'section_set'
+            ? { kind: 'scalar', path, value: item.value }
+            : { kind: 'remove', path });
+        } else {
+          edits.push(item);
+        }
+      }
+    }
+    if (edits.length === 0){ showToast('没有要保存的修改。'); return; }
+
+    this.busy = true;
+    updateChrome();
+    try {
+      const result = await post('api/save', { hash: this.state.hash, edits });
+      this.state = await api('api/state');
+      const configured = new Set(this.state.layers
+        .filter(entry => entry.configured)
+        .map(entry => entry.id));
+      this.extraLayers = this.extraLayers.filter(entry => !configured.has(entry.id));
+      if (!this.state.layers.some(entry => entry.id === this.layer) &&
+          !this.extraLayers.some(entry => entry.id === this.layer)){
+        this.layer = 'global';
+      }
+      this.sections = await fetchSections(this.state, this.layer);
+      this.busy = false;
+      updateStatusCard();
+      updateChrome();
+      await refreshPanels(true);
+      updateChrome();
+      showToast('已保存。运行 ' + result.restart + ' 让新配置生效。');
+    } catch (error){
+      this.busy = false;
+      updateChrome();
+      showToast(error.status === 409
+        ? '磁盘上的配置改过了；点「重新读取」再来。'
+        : '保存失败：' + error.message, true);
+    }
+  },
+
+  /// 丢掉页面上的改动，重新读磁盘与运行状态。
+  async reloadData(){
+    if (this.busy) return;
+    if (anyDirty() && !confirm('还有未保存的修改，重新读取会丢掉它们。继续？')) return;
+    try {
+      this.state = await api('api/state');
+      this.extraLayers = [];
+      if (!this.state.layers.some(entry => entry.id === this.layer)) this.layer = 'global';
+      this.sections = await fetchSections(this.state, this.layer);
+      await refreshPanels(true);
+      updateStatusCard();
+      updateChrome();
+      showToast('已重新读取磁盘上的配置与运行状态。');
+    } catch (error){
+      showToast('读取失败：' + error.message, true);
+    }
+  },
+};
+window.DS5 = DS5;
+
+/// 取某一层里每个插件的一节；某一节读不出来只影响那一节。
+async function fetchSections(state, layerId){
+  const sections = new Map();
+  const plugins = (state && state.panels) || [];
+  await Promise.all(plugins.map(async plugin => {
+    const query = '?name=' + encodeURIComponent(plugin.id) +
+                  '&layer=' + encodeURIComponent(layerId);
+    try {
+      sections.set(plugin.id, await api('api/plugin' + query));
+    } catch (error){
+      sections.set(plugin.id, { error: error.message });
+    }
+  }));
+  return sections;
+}
+
+/// 插件面板看到的那一节：去掉层标识与路径前缀。面板按自己的字段消费，
+/// 路径前缀留在壳里——收草稿时由壳按 `section.path` 拼回去。
+function pluginSectionView(section){
+  if (!section) return null;
+  const { path, layer, layers, ...view } = section;
+  return view;
+}
+
+/// 一个面板这一轮拿到的状态。基础配置要整份基础视图与当前层；插件面板只要
+/// 自己那一节与随节带回的词表，外加壳提供的按层校验入口。
+function panelCtx(entry){
+  if (entry.id === 'core'){
+    return {
+      base: (DS5.state && DS5.state.base) || {},
+      layer: DS5.layer,
+      entry: layerEntry(DS5.layer),
+    };
+  }
+  const section = pluginSectionView(DS5.sections.get(entry.id) || null);
+  return {
+    section,
+    catalog: section ? section.catalog : null,
+    validate: items => post('api/validate', {
+      name: entry.id, layer: DS5.layer, items,
+    }),
+  };
+}
+
+/// 把当前层推给每个面板；`force` 为假时留着有草稿的面板。
+async function refreshPanels(force){
+  for (const entry of ENTRIES){
+    const panel = entry.panel || DS5.panels.get(entry.id);
+    if (!panel || !panel.refresh) continue;
+    try { await panel.refresh(panelCtx(entry), force); }
+    catch (error) { /* 面板把自己的读取错误画在它的节里 */ }
+  }
+}
+
+function anyDirty(){
+  if (pendingLayers().length) return true;
+  for (const panel of DS5.panels.values()) if (panel.dirty && panel.dirty()) return true;
+  return false;
+}
+
+// ---------------------------------------------------------------------------
+// 配置层：顶部的下拉框是所有面板共用的那一层
+//
+// 文件里已有的手柄（无论连没连着）与已连接但还没配过的手柄都由服务端列进
+// `state.layers`；页面上临时添加的 MAC 进 `DS5.extraLayers`，保存时补出
+// `controllers.<MAC>:` 这一行。换层时壳先取这一层的插件节，再整份推给面板，
+// 面板既不看 `DS5.layer` 也不自己画层选择器。
+// ---------------------------------------------------------------------------
+
+const MANUAL_MAC = '__manual__';
+const MAC_RE = /^[0-9A-F]{2}(:[0-9A-F]{2}){5}$/;
+
+function layerIdOfMac(mac){ return 'controllers.' + mac; }
+
+function layerMacOf(id){
+  return id.startsWith('controllers.') ? id.slice('controllers.'.length) : '';
+}
+
+/// 服务端的层清单 + 页面上刚添加、还没保存的手柄。
+function layersAll(){
+  const layers = ((DS5.state && DS5.state.layers) || []).slice();
+  for (const extra of DS5.extraLayers){
+    if (!layers.some(entry => entry.id === extra.id)) layers.push(extra);
+  }
+  return layers;
+}
+
+function layerEntry(id){
+  return layersAll().find(entry => entry.id === id) || null;
+}
+
+/// 还没写进文件的层：保存时要为它们补出 `controllers.<MAC>:` 这一行。
+function pendingLayers(){
+  const known = new Set(((DS5.state && DS5.state.layers) || [])
+    .filter(entry => entry.configured)
+    .map(entry => entry.id));
+  return DS5.extraLayers.filter(entry => !known.has(entry.id));
+}
+
+function layerOptionLabel(entry){
+  if (entry.id === 'global') return '全局（所有手柄的默认值）';
+  const tags = [];
+  if (entry.model) tags.push(entry.model);
+  if (entry.connected) tags.push('已连接');
+  if (!entry.configured) tags.push('未配置');
+  const mac = entry.mac || layerMacOf(entry.id);
+  return '手柄 ' + mac + (tags.length ? '（' + tags.join(' · ') + '）' : '');
+}
+
+function layerTitle(){
+  const entry = layerEntry(DS5.layer);
+  if (!entry || entry.id === 'global') return '全局（所有手柄的默认值）';
+  const mac = entry.mac || layerMacOf(entry.id);
+  const connected = `<span class="pill layer-pill${entry.connected ? ' ok' : ''}">` +
+                    `${entry.connected ? '已连接' : '未连接'}</span>`;
+  const configured = `<span class="pill layer-pill${entry.configured ? ' ok' : ' warn'}">` +
+                     `${entry.configured ? '文件里已有' : '还没写进文件'}</span>`;
+  return `<span style="font-family:ui-monospace,SFMono-Regular,Menlo,monospace">手柄 ` +
+         `${esc(mac)}</span>${connected}${configured}`;
+}
+
+function layerMeta(){
+  const entry = layerEntry(DS5.layer);
+  if (!entry || entry.id === 'global') return '所有手柄没写的项继承这里。';
+  const model = entry.model ? esc(entry.model) + ' · ' : '';
+  return model + '没写的键继承 <code>global</code> 与内置默认。';
+}
+
+function updateLayerRow(){
+  const title = document.getElementById('shell-layer');
+  const meta = document.getElementById('shell-layer-meta');
+  const select = document.getElementById('shell-layer-select');
+  const add = document.getElementById('shell-add');
+  if (!title || !DS5.state) return;
+  title.innerHTML = layerTitle();
+  meta.innerHTML = layerMeta();
+  if (select){
+    select.innerHTML = layersAll().map(entry =>
+      `<option value="${escAttr(entry.id)}"${entry.id === DS5.layer ? ' selected' : ''}>` +
+      `${esc(layerOptionLabel(entry))}</option>`).join('');
+  }
+  if (add) add.disabled = DS5.busy;
+}
+
+/// 换层但不问"要不要丢掉草稿"：只给刚添加的层用。
+async function applyLayer(id){
+  DS5.layer = id;
+  updateLayerRow();
+  DS5.busy = true;
+  updateChrome();
+  DS5.sections = await fetchSections(DS5.state, id);
+  DS5.busy = false;
+  await refreshPanels(true);
+  updateChrome();
+}
+
+async function switchLayer(id){
+  if (id === DS5.layer){ updateLayerRow(); return; }
+  if (anyDirty() && !confirm('还有未保存的修改，切换层会丢掉它们。继续？')){
+    updateLayerRow();
+    return;
+  }
+  await applyLayer(id);
+}
+
+function closeAddRow(){
+  const row = document.getElementById('shell-addrow');
+  if (row) row.hidden = true;
+}
+
+function openAddRow(){
+  const row = document.getElementById('shell-addrow');
+  const pick = document.getElementById('shell-addpick');
+  const box = document.getElementById('shell-addmac');
+  if (!row || !pick || !box) return;
+  // 候选是"连着、但文件里还没写"的手柄：已经写进文件的层在下拉框里直接选。
+  const configured = new Set(((DS5.state && DS5.state.layers) || [])
+    .filter(entry => entry.configured).map(entry => entry.id.toUpperCase()));
+  const pending = new Set(DS5.extraLayers.map(entry => entry.id.toUpperCase()));
+  const pads = (((DS5.state || {}).runtime || {}).pads || []).filter(pad => {
+    const mac = String(pad.mac || '').toUpperCase();
+    const id = layerIdOfMac(mac).toUpperCase();
+    return MAC_RE.test(mac) && !configured.has(id) && !pending.has(id);
+  });
+  let options = pads.map(pad => {
+    const mac = String(pad.mac).toUpperCase();
+    return `<option value="${escAttr(mac)}">${esc(mac)}` +
+           `${pad.model ? ' · ' + esc(pad.model) : ''}</option>`;
+  }).join('');
+  options += `<option value="${MANUAL_MAC}">手动输入 MAC…</option>`;
+  pick.innerHTML = options;
+  const first = pads.length ? String(pads[0].mac).toUpperCase() : MANUAL_MAC;
+  pick.value = first;
+  box.value = first === MANUAL_MAC ? '' : first;
+  row.hidden = false;
+  box.focus();
+}
+
+function addLayerFromRow(){
+  const box = document.getElementById('shell-addmac');
+  if (!box) return;
+  const mac = String(box.value || '').trim().toUpperCase();
+  if (!MAC_RE.test(mac)){
+    showToast('MAC 要写成 XX:XX:XX:XX:XX:XX。', true);
+    box.focus();
+    return;
+  }
+  const id = layerIdOfMac(mac);
+  const existing = layersAll().find(entry => entry.id.toUpperCase() === id.toUpperCase());
+  const pad = (((DS5.state || {}).runtime || {}).pads || [])
+    .find(item => String(item.mac || '').toUpperCase() === mac) || null;
+  if (existing && existing.configured){
+    closeAddRow();
+    showToast('这一层文件里已有；直接切换过去改。');
+    applyLayer(existing.id);
+    return;
+  }
+  // 连着的、或手写的 MAC：都先进待写清单，保存时补出 `controllers.<MAC>:`。
+  if (!DS5.extraLayers.some(entry => entry.id.toUpperCase() === id.toUpperCase())){
+    DS5.extraLayers.push({
+      id,
+      mac,
+      configured: false,
+      connected: Boolean(pad),
+      model: pad ? pad.model : '',
+    });
+  }
+  closeAddRow();
+  applyLayer(id);
+}
+
+// ---------------------------------------------------------------------------
+// 面板清单：core 在最前，其余按服务端给的插件名排序
+// ---------------------------------------------------------------------------
+
+let ENTRIES = [];
+let activeTab = 'core';
+
+function buildEntries(state){
+  const entries = [{ id: 'core', title: '基础配置', script: 'panel/core.js' }];
+  for (const plugin of state.panels || []){
+    entries.push({
+      id: plugin.id,
+      title: plugin.id,
+      script: plugin.has_panel ? 'panel/' + plugin.id + '.js' : '',
+      generic: !plugin.has_panel,
+    });
+  }
+  return entries;
+}
+
+function loadScript(url){
+  return new Promise((resolve, reject) => {
+    const element = document.createElement('script');
+    element.src = url;
+    element.onload = () => resolve();
+    element.onerror = () => reject(new Error(url));
+    document.head.appendChild(element);
+  });
+}
+
+async function mountAll(){
+  await Promise.all(ENTRIES.map(async entry => {
+    let failure = '';
+    if (entry.script){
+      try { await loadScript(entry.script); }
+      catch (error){ failure = '面板脚本加载失败：' + error.message; }
+    }
+    let panel = DS5.panels.get(entry.id);
+    if (!panel){
+      panel = makeGenericPanel(entry);
+      DS5.panels.set(entry.id, panel);
+      if (failure) failure += '；改用通用键值面板';
+    }
+    entry.panel = panel;
+    try { await panel.mount(entry.host, panelCtx(entry)); }
+    catch (error){
+      entry.host.innerHTML = `<div class="banner">${esc(entry.title)}：` +
+        `${esc(error && error.message ? error.message : error)}</div>`;
+    }
+  }));
+  // 面板脚本可能给了比插件名更好读的标题；标签跟着它改。
+  for (const entry of ENTRIES){
+    const button = document.querySelector(`#shell-tabs [data-tab="${entry.id}"]`);
+    if (button && entry.panel && entry.panel.title) button.textContent = entry.panel.title;
+  }
+}
+
+// ---------------------------------------------------------------------------
+// 顶部设备条与标签
+// ---------------------------------------------------------------------------
+
+function renderChrome(){
+  const state = DS5.state;
+  const app = document.getElementById('app');
+  const tabs = ENTRIES.map(entry =>
+    `<button class="tab${entry.id === activeTab ? ' active' : ''}" data-tab="${escAttr(entry.id)}">` +
+    `${esc(entry.title)}</button>`).join('');
+  app.innerHTML = `
+    <div class="app-header">
+      <div>
+        <h1>DS5Dummy <span style="font-size:13px;color:var(--sub)">配置</span></h1>
+      </div>
+      <div class="theme-switch" role="group" aria-label="主题">
+        <button type="button" data-theme-set="light">亮色</button>
+        <button type="button" data-theme-set="dark">暗色</button>
+      </div>
+    </div>
+    <div class="device-strip-card">
+      <div class="device-strip">
+        <div class="device-main">
+          <span class="dot${state.runtime.service.active === 'active' ? ' on' : ''}" id="shell-dot"></span>
+          <div style="min-width:0">
+            <div class="device-label">服务</div>
+            <strong id="shell-state">${serviceLine()}</strong>
+            <div class="device-meta" id="shell-meta">${metaLine()}</div>
+          </div>
+        </div>
+        <div class="device-actions">
+          <button class="btn btn-outline" id="shell-reload">重新读取</button>
+          <button class="btn btn-primary" id="shell-save" disabled>保存</button>
+        </div>
+      </div>
+      <div class="device-strip">
+        <div class="device-main">
+          <div style="min-width:0">
+            <div class="device-label">配置层</div>
+            <strong id="shell-layer">${layerTitle()}</strong>
+            <div class="device-meta" id="shell-layer-meta">${layerMeta()}</div>
+          </div>
+        </div>
+        <div class="device-actions">
+          <select id="shell-layer-select" aria-label="配置层"></select>
+          <button class="btn btn-outline" id="shell-add">＋ 添加手柄</button>
+        </div>
+      </div>
+      <div class="device-strip device-addrow" id="shell-addrow" hidden>
+        <div class="device-main">
+          <div style="min-width:0">
+            <div class="device-label">添加手柄</div>
+            <div class="device-meta">选一只已连接的手柄，或手写 MAC。</div>
+          </div>
+        </div>
+        <div class="device-actions">
+          <select id="shell-addpick" aria-label="已连接的手柄"></select>
+          <input type="text" id="shell-addmac" placeholder="XX:XX:XX:XX:XX:XX" spellcheck="false">
+          <button class="btn btn-primary" id="shell-addok">添加</button>
+          <button class="btn btn-outline" id="shell-addcancel">取消</button>
+        </div>
+      </div>
+    </div>
+    <div id="shell-status">${statusHTML()}</div>
+    <div class="tabbar shell-tabs" id="shell-tabs">${tabs}</div>
+    <div id="panels"></div>`;
+
+  for (const entry of ENTRIES){
+    const host = document.createElement('section');
+    host.id = 'panel-' + entry.id;
+    host.className = 'panel-host';
+    host.hidden = entry.id !== activeTab;
+    document.getElementById('panels').appendChild(host);
+    entry.host = host;
+  }
+
+  document.getElementById('shell-save').addEventListener('click', () => DS5.saveAll());
+  document.getElementById('shell-reload').addEventListener('click', () => DS5.reloadData());
+  document.getElementById('shell-layer-select').addEventListener('change', event => {
+    switchLayer(event.target.value);
+  });
+  document.getElementById('shell-add').addEventListener('click', () => openAddRow());
+  document.getElementById('shell-addcancel').addEventListener('click', () => closeAddRow());
+  document.getElementById('shell-addpick').addEventListener('change', event => {
+    const mac = event.target.value === MANUAL_MAC ? '' : event.target.value;
+    const box = document.getElementById('shell-addmac');
+    box.value = mac;
+    box.focus();
+  });
+  document.getElementById('shell-addok').addEventListener('click', () => addLayerFromRow());
+  document.getElementById('shell-addmac').addEventListener('keydown', event => {
+    if (event.key === 'Enter'){ event.preventDefault(); addLayerFromRow(); }
+    if (event.key === 'Escape'){ event.preventDefault(); closeAddRow(); }
+  });
+  for (const button of document.querySelectorAll('[data-theme-set]')){
+    button.addEventListener('click', () => setTheme(button.dataset.themeSet, true));
+  }
+  markThemeButtons();
+  for (const button of document.querySelectorAll('#shell-tabs [data-tab]')){
+    button.addEventListener('click', () => switchTab(button.dataset.tab));
+  }
+  updateChrome();
+}
+
+function serviceLine(){
+  const service = DS5.state.runtime.service;
+  if (service.error) return `<span style="color:var(--warn)">系统状态读不到：${esc(service.error)}</span>`;
+  return `服务 ${esc(service.active || '未知')} · 开机 ${esc(service.enabled || '未知')}`;
+}
+
+function metaLine(){
+  const state = DS5.state;
+  const dirty = anyDirty();
+  return `<code>${esc(state.config)}</code>${state.exists ? '' : '（不存在，保存时创建）'}` +
+         (dirty ? ' · <span style="color:var(--warn)">有未保存的修改</span>' : '');
+}
+
+/// 顶部的只读运行事实：UDC、插件目录、手柄与系统配置。
+/// 服务状态与文件路径在上方的设备条里；这几样不属于任何一层，也不随标签页变，
+/// 所以由壳画一次、换状态时重画。
+function statusHTML(){
+  const state = DS5.state || {};
+  const runtime = state.runtime || {};
+  const system = state.system || {};
+  const pads = runtime.pads || [];
+  const udc = runtime.udc || [];
+  const plugins = state.panels || [];
+
+  const padsHTML = pads.length
+    ? pads.map(pad => `<div class="kvrow"><code>${esc(pad.node)}</code>` +
+        `<span>${esc(pad.mac || '（无 MAC）')}</span><span>${esc(pad.model)}</span></div>`).join('')
+    : `<p class="info-text" style="margin:0">没看到 DualSense 的 hidraw 节点。</p>`;
+  const pluginsHTML = plugins.length
+    ? plugins.map(plugin => `<div class="kvrow"><code>${esc(plugin.id)}</code>` +
+        `<span class="mini">${plugin.has_panel ? '有面板脚本' : '通用键值面板'}</span>` +
+        `<span class="mini">${esc(plugin.so)}</span></div>`).join('')
+    : `<p class="info-text" style="margin:0">插件目录里没有 .so。</p>`;
+  let systemText = '';
+  if (!system.path) systemText = '（未知）';
+  else if (system.error) systemText = system.error;
+  else if (!system.present) systemText = '文件不存在；Manager 用内置默认。';
+  else systemText = flattenValues(system.values || {}, [], []).sort().join('\n') || '（空）';
+
+  return `<section class="config-section">
+    <div class="config-section-heading">
+      <span class="config-section-icon">${esc('i')}</span>
+      <div><h3>当前状态</h3></div>
+    </div>
+    <dl class="kv">
+      <dt>虚拟 UDC</dt><dd>${udc.length ? udc.map(esc).join(' · ') : '没有 dummy_udc；先加载 dummy_hcd'}</dd>
+      <dt>插件目录</dt><dd>${pluginsHTML}</dd>
+    </dl>
+    <div class="subdiv-light">识别到的手柄</div>
+    ${padsHTML}
+    <div class="subdiv-light">系统配置 ${esc(system.path || '')}（只读）</div>
+    <pre class="yaml">${esc(systemText)}</pre>
+    <p class="info-text" style="margin:10px 0 0">改完运行
+      <code>${esc(state.restart || 'sudo systemctl restart ds5dummy')}</code> 生效；
+      主机看到的是一次约两秒的拔插。</p>
+  </section>`;
+}
+
+/// 把一层的值摊成 `a.b: 值` 行，系统配置那一段用。
+function flattenValues(value, prefix, out){
+  if (value && typeof value === 'object' && !Array.isArray(value)){
+    for (const key of Object.keys(value)) flattenValues(value[key], prefix.concat(key), out);
+  } else {
+    out.push(prefix.join('.') + ': ' + String(value));
+  }
+  return out;
+}
+
+function updateStatusCard(){
+  const node = document.getElementById('shell-status');
+  if (node && DS5.state) node.innerHTML = statusHTML();
+}
+
+function updateChrome(){
+  const button = document.getElementById('shell-save');
+  const meta = document.getElementById('shell-meta');
+  const line = document.getElementById('shell-state');
+  const dot = document.getElementById('shell-dot');
+  if (!button || !DS5.state) return;
+  button.disabled = DS5.busy || !anyDirty();
+  button.textContent = DS5.busy ? '保存中…' : '保存';
+  if (meta) meta.innerHTML = metaLine();
+  if (line) line.innerHTML = serviceLine();
+  if (dot){
+    dot.className = 'dot' + (DS5.state.runtime.service.active === 'active' ? ' on' : '');
+  }
+  updateLayerRow();
+}
+
+function switchTab(id){
+  activeTab = id;
+  for (const entry of ENTRIES){
+    if (entry.host) entry.host.hidden = entry.id !== id;
+  }
+  for (const button of document.querySelectorAll('#shell-tabs [data-tab]')){
+    button.classList.toggle('active', button.dataset.tab === id);
+  }
+  updateChrome();
+}
+
+document.addEventListener('keydown', event => {
+  if ((event.ctrlKey || event.metaKey) && event.key === 's'){
+    event.preventDefault();
+    DS5.saveAll();
+  }
+});
+
+// ---------------------------------------------------------------------------
+// 没有面板脚本的插件：通用键值编辑器
+//
+// 服务端把这一节摊平成「点分键 → 标量原文」；这里逐行编辑，保存时按
+// 路径发 scalar/remove 修改项。它不认识插件的语法，值的合法性由保存时
+// 的 daemon 解析器整份判定。
+// ---------------------------------------------------------------------------
+
+const TOKEN_RE = /^[A-Za-z0-9_-]{1,32}$/;
+
+function makeGenericPanel(entry){
+  const view = {
+    host: null,
+    data: null,
+    original: new Map(),
+    draft: new Map(),
+    added: [],
+    error: '',
+  };
+
+  function flattenRows(){
+    const rows = [];
+    for (const [key, value] of view.original){
+      rows.push([key, view.draft.has(key) ? view.draft.get(key) : value]);
+    }
+    for (const key of view.added){
+      if (!view.original.has(key)) rows.push([key, view.draft.get(key) || '']);
+    }
+    return rows;
+  }
+
+  /// 壳推过来的这一节；面板不自己取。
+  function applyCtx(ctx){
+    const section = (ctx && ctx.section) || null;
+    view.data = section && !section.error ? section : null;
+    view.error = section && section.error ? section.error : '';
+    view.original = new Map();
+    view.draft = new Map();
+    view.added = [];
+    if (view.data && Array.isArray(view.data.flat)){
+      for (const [key, value] of view.data.flat) view.original.set(key, value);
+    }
+  }
+
+  function render(){
+    if (!view.host) return;
+    const data = view.data;
+    let body = '';
+    if (view.error) body += `<div class="banner">${esc(view.error)}</div>`;
+    if (!data){
+      if (!view.error) body += `<p class="info-text">正在读取…</p>`;
+    } else if (!data.editable || data.flat === null){
+      body += `<p class="info-text">这一节不能按行编辑：${esc(data.reason || '里面有列表或跨行标量')}</p>
+               <pre class="yaml">${esc(data.block || '（空）')}</pre>`;
+    } else {
+      const rows = flattenRows().map(([key, value]) =>
+        `<div class="kvrow" data-key="${escAttr(key)}">
+           <code>${esc(key)}</code>
+           <input type="text" data-role="value" value="${escAttr(value)}" spellcheck="false">
+           <button class="btn btn-outline" data-role="remove" title="删掉这个键">删</button>
+         </div>`).join('');
+      body += `
+        <p class="info-text" style="margin:0 0 8px">没有随包面板；点表示嵌套，取值由插件解释。</p>
+        <div class="kvrows">${rows || '<p class="nohits">这一节是空的。</p>'}</div>
+        <div class="addrow">
+          <input type="text" data-role="newkey" placeholder="新键，例如 foo.bar" spellcheck="false">
+          <input type="text" data-role="newvalue" placeholder="值" spellcheck="false">
+          <button class="btn btn-outline" data-role="add">添加</button>
+        </div>`;
+    }
+    view.host.innerHTML = `<section class="config-section">
+      <div class="config-section-heading">
+        <span class="config-section-icon">${esc('{ }')}</span>
+        <div><h3>${esc(entry.title)}</h3></div>
+      </div>
+      ${body}
+    </section>`;
+  }
+
+  function commit(){ DS5.changed(); }
+
+  view.host = null;
+  return {
+    id: entry.id,
+    title: entry.title,
+    async mount(host, ctx){
+      view.host = host;
+      applyCtx(ctx);
+      render();
+    },
+    async refresh(ctx, force){
+      if (!view.host || (!force && this.dirty())) return;
+      applyCtx(ctx);
+      render();
+    },
+    dirty(){ return view.draft.size > 0; },
+    collect(){
+      if (!view.data || !view.data.editable || view.data.flat === null) return [];
+      const edits = [];
+      for (const [key, value] of view.draft){
+        const original = view.original.has(key) ? view.original.get(key) : null;
+        if (value === (original == null ? '' : original)) continue;
+        const keys = key.split('.');
+        if (value === ''){
+          if (original != null) edits.push({ kind: 'section_remove', keys });
+        } else {
+          edits.push({ kind: 'section_set', keys, value });
+        }
+      }
+      return edits;
+    },
+    _view: view,
+    _render: render,
+    _commit: commit,
+  };
+}
+
+// ---------------------------------------------------------------------------
+// 启动
+// ---------------------------------------------------------------------------
+
+async function boot(){
+  const app = document.getElementById('app');
+  let state;
+  try {
+    state = await api('api/state');
+  } catch (error){
+    app.innerHTML = `<div class="banner">读不到配置状态：${esc(error.message)}</div>`;
+    return;
+  }
+  DS5.state = state;
+  ENTRIES = buildEntries(state);
+  renderChrome();
+  DS5.sections = await fetchSections(state, DS5.layer);
+  await mountAll();
+  updateChrome();
+
+  // 通用面板的输入事件挂在各自的 host 上；集中在这里绑一次。
+  for (const entry of ENTRIES){
+    const panel = DS5.panels.get(entry.id);
+    if (!panel || !panel._view) continue;
+    bindGeneric(entry.host, panel);
+  }
+}
+
+function bindGeneric(host, panel){
+  const view = panel._view;
+  host.addEventListener('input', event => {
+    const row = event.target.closest('[data-key]');
+    if (row && event.target.dataset.role === 'value'){
+      view.draft.set(row.dataset.key, event.target.value);
+      panel._commit();
+    }
+  });
+  host.addEventListener('click', event => {
+    const remove = event.target.closest('[data-role="remove"]');
+    if (remove){
+      const row = remove.closest('[data-key]');
+      const key = row.dataset.key;
+      if (view.original.has(key)){
+        view.draft.set(key, '');
+      } else {
+        view.draft.delete(key);
+        view.added = view.added.filter(item => item !== key);
+      }
+      panel._render();
+      panel._commit();
+      return;
+    }
+    const add = event.target.closest('[data-role="add"]');
+    if (!add) return;
+    const keyBox = host.querySelector('[data-role="newkey"]');
+    const valueBox = host.querySelector('[data-role="newvalue"]');
+    const key = (keyBox.value || '').trim();
+    const value = (valueBox.value || '').trim();
+    const segments = key.split('.');
+    if (!key || !value || segments.length > 8 || segments.some(part => !TOKEN_RE.test(part))){
+      showToast('键最多 8 层，每层 1..32 个字母、数字、下划线或减号；值不能为空。', true);
+      return;
+    }
+    if (view.original.has(key)){
+      showToast('这个键已经有了；直接改它的值。', true);
+      return;
+    }
+    view.draft.set(key, value);
+    if (!view.added.includes(key)) view.added.push(key);
+    panel._render();
+    panel._commit();
+  });
+}
+
+boot();
+</script>
+</body>
+</html>

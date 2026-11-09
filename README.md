@@ -84,7 +84,7 @@ sudo ./scripts/setup.sh            # 加载内核模块、确保 configfs 可用
 
 然后按下一节写好用户配置，再 `sudo ./build/ds5dummyd`。
 
-随包的 `idle` 插件不在主程序里：构建产物是 `build/idle.so`，要放到
+随包的两个插件不在主程序里：构建产物是 `build/idle.so` 与 `build/buttons.so`，要放到
 `/usr/lib/ds5dummy/plugins/` 或登录用户的 `~/.config/ds5dummy/plugins/` 才会被装载
 （见配置一节的“插件”）。
 
@@ -97,6 +97,7 @@ sudo ./scripts/setup.sh            # 加载内核模块、确保 configfs 可用
 设置分两份 YAML：root 写的系统配置 `/etc/ds5dummy/config.yaml`，和登录用户自己家目录
 里的 `~/.config/ds5dummy/config.yaml`。程序没有用户级命令行开关，所有生效值都来自
 这两份配置；改完配置要 `sudo systemctl restart ds5dummy`（配置只在启动时读一次）。
+重启会拆掉并重建每一站：整个虚拟 USB 设备会因此消失两秒左右，游戏里表现为一次插拔。
 
 ### 系统配置（`/etc/ds5dummy/config.yaml`，root 属主）
 
@@ -141,14 +142,16 @@ bt_addr: auto          # auto | list | "AA:BB:CC:DD:EE:FF"
 #   speaker_gain: 2
 #   usb_report_interval_ms: 1   # 0 = real-time：只在蓝牙新样本到达时发一份
 #   usb_model: auto             # auto | dualsense | edge
-
-# plugins:            # 只放插件自己的键；装不装载由插件目录决定，不在这里写路径
-#   idle:
-#     off_after_minutes: 30   # 多久没有按键就让手柄自己关机；0 = 从不
+#   plugins:                     # 只放插件自己的键；装不装载由插件目录决定
+#     idle:
+#       off_after_minutes: 30    # 多久没有按键就让手柄自己关机；0 = 从不
 
 # controllers:         # 按 MAC 覆盖单只手柄；键必须是合法 BD_ADDR
 #   "AA:BB:CC:DD:EE:FF":
 #     audio: false
+#     plugins:         # 这一层的插件覆盖，只写与 global 不同的键
+#       idle:
+#         off_after_minutes: 0
 ```
 
 | 键 | 默认 | 说明 |
@@ -158,7 +161,6 @@ bt_addr: auto          # auto | list | "AA:BB:CC:DD:EE:FF"
 | `global` | 无 | 对所有手柄生效的一组覆盖值（见下表） |
 | `controllers` | 无 | 以 MAC 为键的覆盖子树；`bt_addr: list` 时它同时是白名单，至少要有一项 |
 | `log_level` | 继承系统值 | 覆盖系统级别；写法同上。顶层键，不参与分层 |
-| `plugins` | 无 | 给插件的那一节，形状是 `插件名 → 键 → 取值`；写在这里等于对所有手柄的默认值，`global:` 与 `controllers.<MAC>:` 下面也可以写同名的子树，逐层只覆盖写了的那个键。这一节不决定装载哪些插件，只决定装上的插件拿到什么取值；程序本身不认识键名，取值原样交给插件 |
 
 下面六个键既可以写在 `global:` 下，也可以写在 `controllers.<MAC>:` 下。生效顺序是
 内置默认 ← `global` ← `controllers.<MAC>`，每层只覆盖写出来的键：
@@ -180,22 +182,39 @@ bt_addr: auto          # auto | list | "AA:BB:CC:DD:EE:FF"
 跳过并在 worker 日志里说一句；打不开或初始化失败也只让那一个插件缺席，站点照常工作。
 两个目录里有同名插件时用户目录那份生效，装载顺序按插件名排序。
 
-插件自己的键写在 `plugins.<插件名>:` 下，程序只负责把那一块原样送到插件手里；
-写错的取值只会让那一个插件回到它自己的默认值，不会让整个配置失效。目前的插件：
+插件自己的键写在 `global.plugins.<插件名>:` 下（单只手柄的覆盖写在
+`controllers.<MAC>.plugins.<插件名>:`），两层之间只覆盖写出来的键；程序只负责把
+那一块原样送到插件手里，写错的取值只会让那一个插件回到它自己的默认值，不会让整个
+配置失效。目前的插件：
 
 | 插件 | 键 | 默认 | 说明 |
 |---|---|---|---|
 | `idle` | `off_after_minutes` | `30` | 连续多少分钟没有任何按键（摇杆离开中心带、扳机、十字键、任一按键都算）之后，请手柄自己关机；`0` = 从不自动关机，范围 `0`..`60`。手柄关机后蓝牙断开，下次按下 PS 键重新连上时会被当作新的一站拉起。触摸板接触与手柄被挪动不算操作 |
+| `buttons` | 五个功能组：`remap` `axis` `turbo` `shortcut` `macro` | 无 | 改写主机看到的按键形态：映射、扳机行程、轴互换与反向、连点、组合键、宏，触发源里还可以用触摸板的半区点击与划动。整节不写等于这个插件不生效。用法、全部键名与取值语法、能照抄的例子和这份能力做不到的事都在 [plugin/buttons/README.md](plugin/buttons/README.md) |
 
-`idle` 与第三方插件没有区别，都是独立 `.so`——随包那份装在
-`/usr/lib/ds5dummy/plugins/idle.so`，源码在仓库根的 `plugin/idle/`，只 include
-`src/plugin/plugin_api.h` 与 `plugin_util.h`、不链接宿主任何符号，所以能脱离本项目编译：
+两个随包插件与第三方插件没有区别，都是独立 `.so`——随包那两份装在
+`/usr/lib/ds5dummy/plugins/idle.so` 与 `/usr/lib/ds5dummy/plugins/buttons.so`，源码在仓库根的
+`plugin/idle/` 与 `plugin/buttons/`，都只 include `src/plugin/plugin_api.h` 与
+`plugin_util.h`、不链接宿主任何符号，所以能脱离本项目编译：
 
 ```bash
 c++ -std=c++20 -fPIC -shared -I src plugin/idle/idle.cpp -o idle.so
+c++ -std=c++20 -fPIC -shared -I src plugin/buttons/*.cpp -o buttons.so
 ```
 
 自己写的插件放进 `~/.config/ds5dummy/plugins/` 就会被下一次启动装载。
+
+不想手写 YAML 时，用 `ds5dummy-config` 起一个只监听 `127.0.0.1` 的配置页面：
+页面固定在 `http://127.0.0.1:8777/`（`--port` 可换），不需要令牌。顶部一栏选当前
+编辑的是"全局（所有手柄的默认值）"还是某只手柄的覆盖；已连接但文件里还没写的手柄
+也会出现在下拉框里，也可以点「添加手柄」手写一个 MAC 为它建一层，保存时补出
+`controllers.<MAC>:`。基础配置与只读的当前状态始终在（当前状态画在标签页之上），
+插件界面按插件目录里的 `<插件名>.panel.js` 自动出现（随包两份插件各带一个；没有面板
+的插件退回通用键值编辑器）。配置文件还不存在时页面照常打开，第一次保存会建出目录
+与文件。它只写文件、不碰正在运行的服务；改完仍要
+`sudo systemctl restart ds5dummy`。从源码树运行时用
+`python3 tools/buttons_web.py`，两条路是同一个脚本。用法见
+[plugin/buttons/README.md](plugin/buttons/README.md) 的 8.2 节。
 
 插件是进程内的任意代码：它能改交给它的输入状态字节，也能自己起线程。标记与 ABI 版本号
 只证明这个文件是按这份接口编出来的，**不是**签名；程序没有"只加载可信插件"的机制——
@@ -376,11 +395,27 @@ worker 以活跃图形会话那个用户的身份运行，`XDG_RUNTIME_DIR` 由�
 
 DS5Dummy 以 **GPL-3.0-or-later** 发布，完整许可文本见 [LICENSE](LICENSE)。
 
-本项目的 bridge 是 [DS5Dongle](https://github.com/awalol/DS5Dongle) 的移植；
-DS5Dongle 以 MIT 许可发布（Copyright (c) 2026 awalol），其版权与许可声明见
-[NOTICE](NOTICE)。
+本项目的 bridge 与手柄侧的 HID report descriptor、报告字节布局移植自
+[DS5Dongle](https://github.com/awalol/DS5Dongle)；DS5Dongle 以 MIT 许可发布
+（Copyright (c) 2026 awalol），其版权与许可声明见 [NOTICE](NOTICE)。
+
+日志底层是随仓库分发的 [loguru](https://github.com/emilk/loguru)
+（Copyright (c) Emil Ernerfeldt，public domain），源码在 `third_party/`。
+
+按键映射配置页面里的 DualSense 线稿取自
+[dualsense-tester](https://github.com/daidr/dualsense-tester)；它以 MIT 许可发布
+（Copyright (c) 2023 Xuezhou Dai），版权与许可声明同样见 [NOTICE](NOTICE)。
+页面的标签页、分节卡片与控件语言沿用
+[DS5Dongle-Studio](https://github.com/artzox/DS5Dongle-Studio) 的配置门户
+（MIT，Copyright (c) 2026 awalol 与 artzox）。
 
 并同样感谢 [SAxense](https://github.com/egormanga/SAxense) 项目对高级振动的研究。
+
+运行期与构建期依赖（动态链接或头文件使用，仓库里不含它们的源码）：PipeWire / SPA
+（MIT）、BlueZ（LGPL-2.1-or-later）、Opus（BSD-3-Clause）、libsamplerate
+（BSD-2-Clause）、yaml-cpp（MIT）、libsystemd（LGPL-2.1-or-later）、Boost
+（BSL-1.0）、fmt（MIT）；测试另外用 googletest（BSD-3-Clause），配置页面用
+PyYAML（MIT）。
 
 ### 内核模块（`hid-playstation-ds5dummy/`）
 

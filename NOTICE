@@ -1,4 +1,5 @@
-DS5Dummy includes a port of the bridge from DS5Dongle:
+DS5Dummy includes a port of the bridge, as well as the DualSense HID
+report descriptors and report byte layouts, from DS5Dongle:
 
     https://github.com/awalol/DS5Dongle
 
@@ -6,11 +7,41 @@ DS5Dongle is Copyright (c) 2026 awalol and is licensed under the MIT
 License, reproduced below. The MIT-licensed material is incorporated into
 this GPL-3.0-or-later work; the MIT notice is retained as required.
 
+DS5Dummy vendors loguru, a logging library:
+
+    https://github.com/emilk/loguru
+
+loguru is Copyright (c) Emil Ernerfeldt. Its header dedicates it to the
+public domain; where that dedication is not recognized, it grants a
+perpetual, irrevocable license to copy, modify and distribute it as one
+sees fit. The unmodified sources are third_party/loguru.hpp and
+third_party/loguru.cpp.
+
+DS5Dummy's buttons configuration page embeds the DualSense line art from
+dualsense-tester:
+
+    https://github.com/daidr/dualsense-tester
+
+dualsense-tester is Copyright (c) 2023 Xuezhou Dai (daidr) and is licensed
+under the MIT License. That material is incorporated into this
+GPL-3.0-or-later work, and the MIT notice is retained as required.
+
+DS5Dummy's configuration page follows the layout and control vocabulary of
+DS5Dongle-Studio's config portal:
+
+    https://github.com/artzox/DS5Dongle-Studio
+
+DS5Dongle-Studio is Copyright (c) 2026 awalol (DS5Dongle, base project)
+and Copyright (c) 2026 artzox, and is licensed under the MIT License. No
+source code from it is copied into this repository; this note records the
+design reference.
+
 ---
 
 MIT License
 
 Copyright (c) 2026 awalol
+Copyright (c) 2023 Xuezhou Dai (daidr)
 
 Permission is hereby granted, free of charge, to any person obtaining a copy
 of this software and associated documentation files (the "Software"), to deal

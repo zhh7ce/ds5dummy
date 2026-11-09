@@ -35,6 +35,10 @@ add_executable(ds5dummy_tests
     plugin_test.cpp
     plugin_idle_test.cpp
     plugin_util_test.cpp
+    buttons_ids_test.cpp
+    buttons_settings_test.cpp
+    buttons_sense_test.cpp
+    buttons_pipeline_test.cpp
     ../src/daemon/options.cpp
     ../src/daemon/config.cpp
     ../src/daemon/discovery.cpp
@@ -56,6 +60,13 @@ add_executable(ds5dummy_tests
     ../src/plugin/plugin.cpp
     ../src/plugin/plugin_loader.cpp
     ../plugin/idle/idle.cpp
+    # buttons 的四个模块层 TU 直接编进来单测（装配层 buttons.cpp 不在其中：它和
+    # idle.cpp 都导出同名 extern "C" 的 ds5_plugin_desc，两份进同一个二进制会撞
+    # 符号；它那一层的武装与不生效路径由下面的真 .so 走装载链覆盖）。
+    ../plugin/buttons/ids.cpp
+    ../plugin/buttons/settings.cpp
+    ../plugin/buttons/sense.cpp
+    ../plugin/buttons/pipeline.cpp
     ../tools/dump_sink.cpp
     ../src/daemon/handoff.cpp
     ../src/daemon/privdrop.cpp
@@ -125,14 +136,16 @@ target_compile_definitions(ds5dummy_plugin_probe_no_marker PRIVATE
 add_dependencies(ds5dummy_tests ds5dummy_plugin_probe
                                  ds5dummy_plugin_probe_bad_abi
                                  ds5dummy_plugin_probe_no_marker
-                                 ds5dummy_idle)
+                                 ds5dummy_idle
+                                 ds5dummy_buttons)
 target_compile_definitions(ds5dummy_tests PRIVATE
     DS5DUMMY_TEST_PROBE_SO="$<TARGET_FILE:ds5dummy_plugin_probe>"
     DS5DUMMY_TEST_PROBE_BAD_ABI_SO="$<TARGET_FILE:ds5dummy_plugin_probe_bad_abi>"
     DS5DUMMY_TEST_PROBE_NO_MARKER_SO="$<TARGET_FILE:ds5dummy_plugin_probe_no_marker>"
     # 随包插件的真实产物：用例把它复制进临时插件目录，走与第三方插件完全相同的
     # 扫描 + 标记 + dlopen 路径。
-    DS5DUMMY_TEST_IDLE_SO="$<TARGET_FILE:ds5dummy_idle>")
+    DS5DUMMY_TEST_IDLE_SO="$<TARGET_FILE:ds5dummy_idle>"
+    DS5DUMMY_TEST_BUTTONS_SO="$<TARGET_FILE:ds5dummy_buttons>")
 
 # bt 契约测试链接共享门面（bt_link.cpp）加选中的那个后端 TU：
 # bt::detail::IsOpen 直接是后端符号，不碰硬件。其余 bt_* 要真链路，这里
@@ -150,3 +163,32 @@ endif()
 include(GoogleTest)
 # 构建期枚举 TEST 名，ctest 才能看到逐个用例而不是整个二进制。
 gtest_discover_tests(ds5dummy_tests)
+
+# 本地配置页面（tools/buttons_web.py + buttons_web.html）的 Python 单测：页面
+# 不参与编译，判定仍由 buttons_check 给出。缺 Python3 或 PyYAML 时整组不注册。
+find_package(Python3 COMPONENTS Interpreter QUIET)
+if(Python3_Interpreter_FOUND)
+    execute_process(
+        COMMAND ${Python3_EXECUTABLE} -c "import yaml"
+        RESULT_VARIABLE _buttons_web_pyyaml
+        OUTPUT_QUIET ERROR_QUIET)
+    if(_buttons_web_pyyaml EQUAL 0)
+        # 保存路径要 buttons_check 做权威判定；有它就一并构建并把路径交给用例。
+        # 用 `cmake -E env` 传，而不是测试的 ENVIRONMENT 属性：后者在旧 CMake 上
+        # 不展开生成器表达式。
+        set(_buttons_web_checker "")
+        if(TARGET buttons_check)
+            add_dependencies(ds5dummy_tests buttons_check)
+            set(_buttons_web_checker "$<TARGET_FILE:buttons_check>")
+        endif()
+        add_test(NAME buttons_web_python
+            COMMAND ${CMAKE_COMMAND} -E env
+                "DS5DUMMY_BUTTONS_CHECK=${_buttons_web_checker}"
+                ${Python3_EXECUTABLE}
+                ${CMAKE_CURRENT_SOURCE_DIR}/../tools/test_buttons_web.py)
+        set_tests_properties(buttons_web_python PROPERTIES
+            WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
+    else()
+        message(STATUS "buttons_web Python tests skipped: PyYAML is missing")
+    endif()
+endif()

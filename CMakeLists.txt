@@ -140,17 +140,27 @@ target_compile_definitions(ds5dummyd PRIVATE
     DS5DUMMY_DEBUG_LOG=$<BOOL:${DS5DUMMY_DEBUG_LOG}>)
 
 # ---------------------------------------------------------------------------
-# 随包插件：源码在仓库根的 plugin/（不在 src/ 里），单独编成 idle.so。
-#   它只 include 公共 ABI 头（plugin/plugin_api.h、plugin_util.h），不链接宿主
-#   任何符号——单独一条
-#       c++ -std=c++20 -fPIC -shared -I src plugin/idle/idle.cpp -o idle.so
-#   就能编出来。文件名与 plugin/plugin.h 的 kSystemPluginDir、两个 PKGBUILD 的
-#   安装位置必须一致。
+# 随包插件：源码在仓库根的 plugin/（不在 src/ 里），每个插件单独编成一个 .so。
+#   插件只 include 公共 ABI 头（plugin/plugin_api.h、plugin_util.h），不链接宿主
+#   任何符号——buttons 这一份单独一条
+#       c++ -std=c++20 -fPIC -shared -I src plugin/buttons/*.cpp -o buttons.so
+#   就能编出来。产物文件名与 plugin/plugin.h 的 kSystemPluginDir、两个 PKGBUILD
+#   的安装位置必须一致。
 # ---------------------------------------------------------------------------
 add_library(ds5dummy_idle MODULE plugin/idle/idle.cpp)
 set_target_properties(ds5dummy_idle PROPERTIES
     PREFIX "" OUTPUT_NAME "idle" SUFFIX ".so" POSITION_INDEPENDENT_CODE ON)
 target_include_directories(ds5dummy_idle PRIVATE ${DS5DUMMY_MODULE_INCLUDE_DIRS})
+
+add_library(ds5dummy_buttons MODULE
+    plugin/buttons/buttons.cpp
+    plugin/buttons/ids.cpp
+    plugin/buttons/settings.cpp
+    plugin/buttons/sense.cpp
+    plugin/buttons/pipeline.cpp)
+set_target_properties(ds5dummy_buttons PROPERTIES
+    PREFIX "" OUTPUT_NAME "buttons" SUFFIX ".so" POSITION_INDEPENDENT_CODE ON)
+target_include_directories(ds5dummy_buttons PRIVATE ${DS5DUMMY_MODULE_INCLUDE_DIRS})
 
 # ---------------------------------------------------------------------------
 # 音频下链（PipeWire sink → Opus → 0x36）—— 两个后端都要，缺库直接 configure
@@ -228,7 +238,19 @@ if(DS5DUMMY_BUILD_TOOLS)
         PkgConfig::PIPEWIRE PkgConfig::SPA PkgConfig::OPUS PkgConfig::SAMPLERATE)
     target_compile_definitions(audio_dump PRIVATE LOGURU_USE_FMTLIB=1)
 
-    message(STATUS "Diagnostic tools enabled: spike_l2cap, spike_rumble, mini_gadget, audio_dump")
+    # 配置校验：只读一份用户配置，用 buttons 插件自己的语法层解析它那一节，
+    # 逐条打出三种下场与武装摘要。不装载 .so、不需要 root/手柄/PipeWire。
+    add_executable(buttons_check tools/buttons_check.cpp
+        tools/buttons_config.cpp
+        plugin/buttons/settings.cpp plugin/buttons/ids.cpp
+        src/daemon/config.cpp src/daemon/options.cpp)
+    target_include_directories(buttons_check PRIVATE
+        ${DS5DUMMY_MODULE_INCLUDE_DIRS} ${CMAKE_SOURCE_DIR})
+    target_link_libraries(buttons_check PRIVATE PkgConfig::YAMLCPP)
+
+    # 本地配置页面是 tools/buttons_web.py + tools/buttons_web.html：页面不参与编译，
+    # 判定仍然由上面的 buttons_check 给出，Python 只负责读取、写回与起服务。
+    message(STATUS "Diagnostic tools enabled: spike_l2cap, spike_rumble, mini_gadget, audio_dump, buttons_check")
 endif()
 
 # ---------------------------------------------------------------------------

@@ -23,3 +23,5 @@ docs/doxygen/
 /pkg/**/src/
 
 /docs
+# Python 字节码（tools/ 下的页面服务与单测）
+__pycache__/

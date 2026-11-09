@@ -27,7 +27,8 @@ Entertainment / DualSense Wireless Controller"，DualSense Edge 是 `054c:0df2`
 由手柄 MAC 派生的值（见 §7）。
 麦克风开关走 HID 通道（0x32 状态报告），不走音频通道：主机打开虚拟麦克风开始
 录音时程序才让手柄开麦。
-转发之外的可选行为（现在只有一个：多久没人碰手柄就让它自己关机）由 `src/plugin/` 的
+转发之外的可选行为（现在有两个：多久没人碰手柄就让它自己关机、改写主机看到的按键
+形态）由 `src/plugin/` 的
 进程内插件承担，宿主和插件之间只隔 `plugin_api.h` 那份 C 边界（见 §10）。
 
 ---
@@ -44,9 +45,9 @@ Entertainment / DualSense Wireless Controller"，DualSense Edge 是 `054c:0df2`
 | `src/bridge/` | `bridge`（转发策略）、`state_report`（63 字节输出状态影子）、`fake_mac`（0x09 合成）、`usb_report`/`audio_report`/`mic_report`/`power_report`（四种报告的字节布局） |
 | `src/audio/` | 双向音频链：`audio`（门面）、`audio_identity`（sink/source 共用的节点名与 `device.*` 硬件身份）、`audio_port`（sink/source 共用的建流骨架与断线退避重建）、`audio_sink`（PipeWire 4 通道 sink）、`audio_encoder`（SRC + Opus + 编码线程）、`audio_decoder`（Opus 解码线程）、`audio_source`（单声道虚拟麦克风 Source） |
 | `src/plugin/` | 进程内插件的宿主侧：`plugin_api`（插件作者 include 的那份 C ABI 契约，含标记节的宏）、`plugin_util`（插件作者的可选小工具，纯头文件）、`plugin`（门面：实例表 + 输入钩子表 + 目录扫描 + `OnTick` 分派）、`plugin_loader`（目录列举、ELF 标记检查、`dlopen` 机制） |
-| `plugin/` | 随包插件源码，与宿主分开编译：`idle/` 只 include `src/plugin/` 的两份插件作者头文件，不链接宿主任何符号，`c++ -std=c++20 -fPIC -shared -I src plugin/idle/idle.cpp` 就能单独编出 `idle.so` |
+| `plugin/` | 随包插件源码，与宿主分开编译：`idle/` 只 include `src/plugin/` 的两份插件作者头文件，不链接宿主任何符号，`c++ -std=c++20 -fPIC -shared -I src plugin/idle/idle.cpp` 就能单独编出 `idle.so`；`buttons/` 同一条路（六个 TU 编成一份 `buttons.so`，它自己的程序侧说明在 `plugin/buttons/AGENTS.md`）；两个目录里还各有一份供配置页面使用的 `<插件名>.panel.js` |
 | `tests/` | googletest 单测（`ctest`，无 root、无硬件） |
-| `tools/` | 诊断程序：`spike_l2cap`、`spike_rumble`、`mini_gadget`、`audio_dump`(+`dump_sink.*`)、几个 `spike_*` 特权/交接探针；`win_audio_probe.cpp` 是唯一的 Windows 侧探针（mingw 交叉编译，在 Wine/Proton 前缀里读 MMDevice 与 setupapi，不参与 Linux 构建） |
+| `tools/` | 诊断程序：`spike_l2cap`、`spike_rumble`、`mini_gadget`、`audio_dump`(+`dump_sink.*`)、几个 `spike_*` 特权/交接探针；`buttons_check` 是 buttons 配置的只读校验器（共用 `buttons_config`，不装载 `.so`），`buttons_web.py` + `buttons_web.html` 是本地配置页面（Python 回环服务、固定地址 `127.0.0.1:8777`、无令牌；壳画服务状态、配置层选择与只读的当前状态，并取回每层的插件节推给面板——面板不读文件、不发请求；插件界面由插件目录里的 `<插件名>.panel.js` 提供，没有面板的插件退回通用键值编辑器；判定仍调 `buttons_check`），`panels/core.js` 是随工具的 core 面板；`win_audio_probe.cpp` 是唯一的 Windows 侧探针（mingw 交叉编译，在 Wine/Proton 前缀里读 MMDevice 与 setupapi，不参与 Linux 构建） |
 | `pkg/ds5dummy_hidraw`、`pkg/ds5dummy_l2cap` | 两个互斥的 Arch 包：systemd 单元、`/etc/ds5dummy/config.yaml`、`/usr/share/doc/ds5dummy/user-config.example.yaml`、modprobe/modules-load 配置、install 钩子 |
 | `hid-playstation-ds5dummy/` | 内核 `hid-playstation` 的 DKMS 补丁（hidraw 后端用），只接管蓝牙 DualSense/Edge，合成 VID/PID（`1998:1221`/`1998:1103`）；DualShock 4 与所有 USB 设备走原驱动路径 |
 | `scripts/` | `setup.sh`/`teardown.sh`（整站准备/清理；teardown 扫 `ds5dummy*` 整族并卸载每个 `ffs-ds5*` 挂载）、`setup-dummy-hcd.sh`/`teardown-dummy-hcd.sh`（只喂 `tools/mini_gadget` 的最小版） |
@@ -151,8 +152,9 @@ MAC，后者在建站时从 sysfs 解析出本站的 USB 接口目录写入；wo
 `RestoreHome()` 在同一步把 `HOME` 改成当前 uid 的 passwd 家目录——Manager 以
 root 起，继承下来的 `HOME` 是 root 的。
 
-插件袋也走同一份快照：每个 `插件名.点分键路径` 一条长度前缀的条目，由 Manager 从合并后的
-`plugins:` 那一节压出来，daemon 只搬字符串、不认识任何键名（见 §10）。worker 在连上手柄
+插件袋也走同一份快照：每个 `插件名.点分键路径` 一条长度前缀的条目，由 Manager 从
+`global.plugins` 与 `controllers.<MAC>.plugins` 合并后的那一份压出来，daemon 只搬字符串、
+不认识任何键名（见 §10）。worker 在连上手柄
 之后、`bt::StartThreads()` 之前 `plugin::Start()`，把交出的输入钩子逐个
 `bridge::AddStateHook()`；在两条传输线程都 join 之后先 `bridge::ClearStateHooks()` 再
 `plugin::Stop()`——钩子还在别的线程上跑的时候不能释放实例。
@@ -502,7 +504,7 @@ dummy_hcd 不按它轮询（见上面那段），所以它既不限制也不产�
 
 插件是这个仓库里唯一"内容由别人写"的一层。插件是**进程级单例**：没有类、没有 self、
 没有宿主替它保存的实例状态——自己的状态放在自己的静态存储里。宿主侧四个文件加上
-仓库根的一份随包插件，按角色分：
+仓库根的两份随包插件，按角色分：
 
 | 文件 | 角色 |
 |---|---|
@@ -511,6 +513,34 @@ dummy_hcd 不按它轮询（见上面那段），所以它既不限制也不产�
 | `plugin_loader.{h,cpp}` | 纯机制：`ListPlugins` 列目录里的 `.so`、`HasMarker` 只读 ELF 节表验标记、`dlopen(RTLD_NOW\|RTLD_LOCAL)` + `dlsym(kPluginEntryName)`、`ds5Setting`（键、值）数组的拼装。不持状态 |
 | `plugin.cpp` | 门面：实例表、输入钩子表、目录扫描顺序、同名去重、`OnTick` 分派 |
 | `plugin/idle/`（仓库根） | 随包插件：单独编译成 `idle.so`，静止一段时间后请手柄自己关机；与第三方插件走同一条目录扫描路径 |
+| `plugin/buttons/`（仓库根） | 随包插件：六个 TU 编成一份 `buttons.so`，改写主机看到的按键形态（映射、扳机行程、轴互换/反向/居中、连点、组合键、宏，以及触摸板的半区点击与划动）。它用 `on_state_in` **改的就是交出去的那 63 字节**，用 `on_tick` 执行关机动作；程序侧说明在 `plugin/buttons/AGENTS.md`，用法在 `plugin/buttons/README.md` |
+
+**配置页面的面板是插件的旁挂文件**：`<插件名>.panel.js` 与 `<插件名>.so` 同目录、同名，
+`tools/buttons_web.py` 启动时按插件清单把它们发给页面；识别口径与宿主 `ListPlugins`
+相同（只看普通 `.so`、用户目录覆盖系统目录），没有面板的插件退回通用键值编辑器。面板
+不参与装载、不链接宿主，`.so` 不在时面板也不会出现；它只是一段静态 JS，服务端只发登记
+过的那几个文件。随包两份插件各带一个：`buttons` 的按键映射、`idle` 的自动关机。
+
+**页面壳是唯一的读文件者，面板只收一份推来的状态**：顶部第二栏的下拉框选 `global` 或
+某只 `controllers.<MAC>`；选中后壳按这一层把 `api/state` 与每个插件的
+`api/plugin?name=…&layer=…` 都取回来，装进 `DS5.sections`，再以 `ctx` 逐个交给面板的
+`refresh`——插件面板拿到的 `ctx` 只有两样：这一层的插件节（含服务端下发的词表
+`catalog`）与一个 `validate(items)` 回调；推过去的那一节已经去掉 `layer`/`layers`/
+`path`，面板拿不到层标识。它不认 `global`/`controllers.<MAC>`、不读
+配置文件路径、不发任何请求：草稿里的插件名与层由壳在收草稿时补进
+`{kind:'plugin'}`，节内单个标量则以 `{kind:'section_set'|'section_remove'}` 交出、
+路径前缀由壳按 `section.path` 拼上。core 面板拿到的 `ctx` 是这一层的
+`base`/`layer`/`entry`（手柄层里留空的项由壳算好 `inherited` 一起给出），同样不读文件。
+面板只交回修改项，写盘与哈希复查全在壳的 `saveAll()` 里。只读的「当前状态」（虚拟
+UDC、插件目录、系统里的手柄、系统配置 YAML 与重启提示）画在页签之上的壳里，服务状态
+与文件路径留在设备条，都不随页签与层变化，因此不属于任何面板。
+
+层清单由服务端给出：文件里已有的手柄 + 已连接但还没写进文件的手柄；「添加手柄」还可以
+手写任意 MAC，页面临时记在 `extraLayers` 里，保存时先为它写一条 `controllers.<MAC>:`。
+用户配置文件不存在也一样打开页面：`read_document()` 读成空串、`state.exists` 为 false，
+页面照常列出 `global` 与已连接的手柄，首次保存时由服务端建出父目录（`0o700`）与文件
+（`0o600`）。页面固定在 `http://127.0.0.1:8777/`（`--port` 可换），不发放令牌；请求仍
+要过 `Host`/`Origin` 检查与整份文档的 `buttons_check` 判定。
 
 **三关识别**：文件里有 `.ds5_plugin` 标记节、内容逐字节是字符串 `"DS5 Plugin"`
 （`kPluginMarkerMagic`，含结尾 NUL；装载前只读 ELF 节表，不执行任何代码）→ 导出名
@@ -524,8 +554,9 @@ dummy_hcd 不按它轮询（见上面那段），所以它既不限制也不产�
 `/usr/lib/ds5dummy/plugins` 与 `$HOME/.config/ds5dummy/plugins`（`HOME` 缺失时只有前者），
 `Start()` 按这个顺序扫描、按文件名排序，每个 `.so` 依次过三关。同名插件以后出现的目录
 为准（用户覆盖系统），同一目录内的同名只留第一个并记 WARNING。最终按插件名排序装载，
-所以顺序只取决于目录内容。配置里没有 `path` 这样的保留键——一组
-`plugins.插件名.…` 只决定这个插件拿到的取值，不决定它存不存在。
+所以顺序只取决于目录内容。配置里没有 `path` 这样的保留键——
+`global.plugins.插件名.…` 与 `controllers.<MAC>.plugins.插件名.…` 只决定这个插件
+拿到的取值，不决定它存不存在。
 
 **能力靠空槽表达**：`on_tick`/`on_state_in` 为 `nullptr` 就是"这个插件不做这件事"，宿主
 跳过空槽；`init`/`stop` 必填，`init` 返回 0 表示"这一轮不生效"（配置关掉了它），宿主记
@@ -537,7 +568,7 @@ INFO 而不是 ERROR。配置是 `plugin::Settings`（`map<string,string>`，键
 段数上限是 `daemon::kMaxPluginDepth`（8，含叶子那一段），收的是递归别名而不是形状。
 拍平后没有"切片"对象：某个插件的配置就是
 键带 `插件名.` 前缀的那些条目，转成 `init` 要的 `ds5Setting`（键、值）数组时按前缀长度整段剥掉
-插件名、其余原样交给插件（层数由插件自己解释），遍历顺序就是扁平键序，不需要再排序。默认插件层是空的：随包 `idle.so` 就在系统插件目录里，默认安装
+插件名、其余原样交给插件（层数由插件自己解释），遍历顺序就是扁平键序，不需要再排序。默认的插件配置是空的：随包 `idle.so` 与 `buttons.so` 就在系统插件目录里，默认安装
 下照常装载；配置里不写它的任何键，它拿到的数组只有结尾的 `{nullptr, nullptr}`，全部走
 自己的默认值。反过来，配置里写了某个插件的键、目录里却没有同名 `.so` 时，那些键只是
 没人读，不影响别的插件。
@@ -566,7 +597,19 @@ INFO 而不是 ERROR。配置是 `plugin::Settings`（`map<string,string>`，键
 六轴不参与判定。`steady_clock` 不含挂起时间，且休眠钩子会停掉服务，所以挂起不会被算成
 静置。
 
-`plugin` 只依赖 `core` 的常量；随包 `idle.so` 的源码在仓库根的 `plugin/idle/`，只
+随包的 `buttons` 是这份契约的第二个用户，也是第一个改那 63 字节的：配置是 `buttons` 之下
+**三层**（`buttons` → 功能组 → 源或编号），靠上面那条任意层摊平送到插件手里，它拿到的键形如
+`remap.circle`、`axis.swap_lstick_rstick`、`shortcut.1`。六个 TU 一份 `.so`，按职责分：布局
+（`ids`）、规则形状（`rules`）、语法（`settings`）、跨帧判定（`sense`）、单帧执行（`pipeline`）、
+装配与线程相位（`buttons.cpp`）；判据读的是**手柄这一帧报进钩子的那份状态体**，插件不拿自己的
+改写结果喂自己。`on_state_in` 每帧一次解码、一趟写回，`on_tick` 只把识别出的关机动作搬给
+`host->power_off()`（同一个原因：那条调用同步碰控制通道，最长 2 s，不能落在读线程上）。
+因为装载顺序按插件名字典序，`buttons` 排在 `idle` 之前，**`idle` 读到的是 `buttons` 改写之后的
+字节**：按住一个被映射抹掉的键，`idle` 会认为静置。单缓冲契约的这条后果是已知的，写在
+`plugin/buttons/AGENTS.md`。
+
+`plugin` 只依赖 `core` 的常量；两份随包 `.so` 的源码在仓库根的 `plugin/idle/` 与
+`plugin/buttons/`，都只
 include `plugin_api.h` / `plugin_util.h`，不链接宿主任何符号（`core` 的字节尺寸由
 `plugin_api.h` 里的 `kPluginStateSize` 提供）——所以它可以脱离本项目编译；`bridge` 不依赖 `plugin`；`worker`
 是装配者：它注册钩子、调 `OnTick`、在拆机时清钩子。没有双向 include。
@@ -657,7 +700,7 @@ configure 失败是设计选择**——静默退化成 HID-only 会让除了在�
 ## 13. 测试
 
 `tests/CMakeLists.txt` 把被测源文件直接编进一个 `ds5dummy_tests` 二进制，
-`gtest_discover_tests` 让 ctest 看到逐个用例（当前 321 个，两个后端各跑一遍）。
+`gtest_discover_tests` 让 ctest 看到逐个用例（当前 461 个，两个后端各跑一遍）。
 **硬性约束：全部测试必须能在无 root、无手柄的环境下跑** —— 需要特权或硬件的验证是人工
 清单，不进 CI/单测。因此 bt 的测试只覆盖门面到后端的纯转发契约、`tx` 的入队/seq/CRC/
 背压、feature 缓存策略，硬件往返一律不测；`daemon/discovery` 与 `usb` 的测试自己搭临时
@@ -675,12 +718,37 @@ MODULE（`ds5dummy_plugin_probe`，不链接测试二进制），测试把它拷
 临时插件目录，再让 `plugin::Start()` 扫那个目录——走的是与真实安装完全相同的
 `ListPlugins`/`HasMarker`/`dlopen` 路径，`dlsym` 找的也是真符号表。同一份源码再编两份
 变体：`..._bad_abi`（版本号改成宿主不认的值）与 `..._no_marker`（不落标记节），分别
-证明装载点拒绝版本不符、以及不 dlopen 没有标记的 `.so`。随包的 `idle.so` 也以同样方式
-编一份给测试用（`DS5DUMMY_TEST_IDLE_SO`），证明它的标记、导出名与描述符能被真实装载，
-也证明用户目录同名覆盖与 `off_after_minutes: 0` 的退出。它们同样不需要 root 或手柄，
-也不读真实系统/用户插件目录。
+证明装载点拒绝版本不符、以及不 dlopen 没有标记的 `.so`。两份随包 `.so` 也以同样方式
+编给测试用（`DS5DUMMY_TEST_IDLE_SO`、`DS5DUMMY_TEST_BUTTONS_SO`），证明它们的标记、导出名
+与描述符能被真实装载，也证明用户目录同名覆盖、`off_after_minutes: 0` 的退出，以及
+`buttons` 那几条规则一路走到宿主最终发出去的那些字节（含"动作落在心跳而不是钩子"）。
+它们同样不需要 root 或手柄，也不读真实系统/用户插件目录。
 `tests/bridge_hook_test.cpp` 覆盖反向派发的 bridge 一侧：注册的钩子改写的是 usb 最终
 持有的那份报告、按注册顺序跑、清空后不再被调，麦克风帧不经过钩子。
+
+`buttons` 插件的四个模块层 TU（`ids`/`settings`/`sense`/`pipeline`）像 `idle.cpp` 一样直接编进
+测试二进制，按模块各一份测试；装配层 `buttons.cpp` 不在其中，它只经上面那条真实 `.so` 路径被
+测：
+`tests/buttons_ids_test.cpp`（token ↔ 位、hat 无损往返、`Invert` 的不动点，**与
+`core::protocol::DecodeInputState` 逐字段相等**——布局在插件里是第二处写法，这条断言
+防的是"按 ○ 出 ✕"这种静默错误；再加两个触摸点打包字的对账，以及半区归属锁存、划动的
+最小位移与 16:9 折算）、`tests/buttons_settings_test.cpp`（五组语法的正反例，
+每条反例只让那一条缺席并留下一行 WARNING；触摸板那族在源/目标/触发项三种角色上的取舍）、
+`tests/buttons_sense_test.cpp`（时序状态机，时钟逐帧注入；含一次划动一轮只出一个）、
+`tests/buttons_pipeline_test.cpp`（映射与轴的表算法，逐位断言；含"绑左半点击抹掉 `pad`
+位而不碰右半那一次"）。判定
+读的是帧快照而不是改写结果，所以这些测试喂的就是手柄那一帧报进钩子的字节，不需要任何
+只在测试构建里存在的拨表入口；触摸板那族喂的是测试自己摆的那两个 32 位打包字，同样
+不需要硬件。
+
+配置工具那一层的单测在 `tools/test_buttons_web.py`（缺 PyYAML 时 CTest 不注册这一项）：
+按行取/写/删/建四条路径与"原文相同则整份文件逐字节不变"（后者是承重断言）、模型解析与
+序列化往返、面板脚本（`plugin/buttons/buttons.panel.js`）里的词表与
+`plugin/buttons/ids.cpp` 的 token 表逐项对账、基础配置的标量改写/删键级联/
+`controllers.<MAC>` 新建、`discover_panels` 的目录口径、层清单（已连接但未配置的手柄、
+手写 MAC 的 `plugin_state`、保存时补条目），以及回环服务的固定地址路由、Host/Origin
+检查、409 陈旧哈希与"保存后只有这一节变化"。保存路径要 `buttons_check` 做
+权威判定，用例自己建临时目录，不需要 root、手柄或真实的用户配置目录。
 
 `tools/audio_dump` 是离线回听路径：audio 下行链 + dump sink，不链 usb/bt/bridge，手柄连不
 连都能跑，用于单独验证编码半段。
@@ -690,16 +758,27 @@ MODULE（`ds5dummy_plugin_probe`，不链接测试二进制），测试把它拷
 ## 14. 打包与内核侧
 
 两个包都装 `/usr/bin/ds5dummyd`、`/usr/lib/ds5dummy/plugins/idle.so`、
+`/usr/lib/ds5dummy/plugins/buttons.so`、`/usr/lib/ds5dummy/plugins/idle.panel.js`、
+`/usr/lib/ds5dummy/plugins/buttons.panel.js`（配置页面的面板，与 `.so` 同目录；
+缺了它页面退回通用键值编辑器，不影响装载）、
+`/usr/bin/ds5dummy-config`（配置页面入口，把参数交给
+`/usr/lib/ds5dummy/buttons_web.py`）、`/usr/lib/ds5dummy/buttons_web.html`、
+`/usr/lib/ds5dummy/panels/core.js`（页面壳与 core 面板）、`/usr/bin/buttons_check`
+（页面保存前的权威判定，也是可单独运行的只读校验器）、
+`/usr/share/doc/ds5dummy/buttons.md`
+（`buttons` 插件自己的用法文档，装自 `plugin/buttons/README.md`）、
 `/usr/lib/ds5dummy/teardown.sh`、
 `/usr/lib/systemd/system/ds5dummy.service`、`/usr/lib/systemd/system-sleep/ds5dummy`
 （休眠钩子）、`/etc/ds5dummy/config.yaml`（进 `backup=`）、
 `/usr/share/doc/ds5dummy/user-config.example.yaml`、`/etc/modprobe.d/ds5dummy.conf`、
 `/etc/modules-load.d/ds5dummy.conf`，都 `provides=('ds5dummy')`、
 `replaces=('ds5dummy')` 且互相 `conflicts`（`pkgrel` 随内容递增；makepkg 的 `pkgver()`
-回写会把它重置为 1），`depends` 含 `yaml-cpp` 与
-`systemd-libs`，构建参数固定在
+回写会把它重置为 1），`depends` 含 `yaml-cpp`、`systemd-libs`、`python` 与
+`python-yaml`（配置页面），构建参数固定在
 `-DCMAKE_BUILD_TYPE=Release -DBT_BACKEND=<对应后端> -DDS5DUMMY_STRICT=ON
--DDS5DUMMY_DEBUG=OFF -DDS5DUMMY_DEBUG_LOG=OFF -DCMAKE_INSTALL_PREFIX=/usr`。
+-DDS5DUMMY_DEBUG=OFF -DDS5DUMMY_DEBUG_LOG=OFF -DDS5DUMMY_BUILD_TOOLS=ON
+-DCMAKE_INSTALL_PREFIX=/usr`：打开 tools 只为编出 `buttons_check`，其余诊断程序
+只留在构建树里、不安装。
 
 版本号不手写：三个 PKGBUILD 都用 `pkgver()`，在其中用 `git -C "$_srcdir" describe
 --tags --long` 现查，生成 `<tag>.r<距 tag 的提交数>.g<短哈希>`（无 tag 时 tag 段为 `0`、
@@ -805,3 +884,17 @@ HID 侧：
     同样没实机跑过。计时走的是插件自己的 `std::chrono::steady_clock`（Linux 上不含
     挂起时间），所以挂起期间不计入静置时长——目前的 systemd-sleep 钩子在挂起前就停了
     服务，这条不构成问题，但钩子一旦去掉，"整晚没碰手柄"就不会触发自动关机。
+16. buttons 插件只有单测级证据，而它是**第一个改写那 63 字节的**用户。`[55..62]` 是手柄
+    自己算的 AES-CMAC，密钥在手柄里、我们算不出，改写 `[0..5]`/`[7..9]` 之后那份报告的
+    签名与内容不再匹配。本项目从不校验它，但"主机与游戏也不校验它"目前**没有证据**——
+    既有链路里输入状态一直原样转发。插件只写它生产的字节（`[6]`、`[9]` bit3、`[10..62]`
+    其余一律不写，`[32..39]` 那两个触摸点字只读）只是把风险面收窄，不构成豁免；这条要
+    实机确认。
+17. buttons 的规则之间**没有仲裁**：每条各自判定、各自松手闸门。于是 `r3` 与
+    `r3+dpad_up` 并存时短的那条先命中、长的跟着也命中；同一个键上 `~` 与 `*2` 各绑一条会
+    出两次动作。需求里的原 K-06（遮蔽检出）被移出本期，症状可见但没被判据化。
+18. buttons 有两处需求写了、语法没做：摇杆方向的触发阈值与迟滞不能逐条覆盖（缺省 48/10
+    冻在 `ids.h`）、宏脉冲时长恒为 80 ms。两条的后果都是"用户写了也不生效"，走的是同一行
+    忽略日志。触摸板那族（I-03/I-04）已经做了，但判据全是 `ids.h` 里的全局经验值（半区那条
+    8% 的带、划动的最小位移 12% 与 16:9 折算），**没在实机上确认过手感**；六轴手势（I-05）
+    仍然不做。

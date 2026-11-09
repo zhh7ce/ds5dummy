@@ -1,0 +1,7 @@
+#!/bin/sh
+# DS5Dummy 用户配置页面，装成 /usr/bin/ds5dummy-config。
+#
+# 页面脚本与静态资源（buttons_web.html、panels/core.js）一起装在
+# /usr/lib/ds5dummy；插件面板随各自的 .so 装在插件目录里，由页面自己扫。
+# 只监听 127.0.0.1，不需要 root；参数原样交给 buttons_web.py。
+exec /usr/bin/python3 /usr/lib/ds5dummy/buttons_web.py "$@"

@@ -7,7 +7,8 @@
  * - 标记识别：没有 `.ds5_plugin` 节的 .so 在 dlopen 之前就被跳过；
  * - dlopen 路径：真加载测试期间构建出来的 .so，并证明它的钩子真的被调用过；
  * - 同名去重与目录优先级、版本号不符的 .so 在装载点被拒；
- * - 随包 idle 的真实产物从目录里被装载；
+ * - 随包 idle 与 buttons 的真实产物从目录里被装载，buttons 那几条一路走到宿主
+ *   最终发出去的那些字节；
  * - Start 交出的输入钩子区间与空槽的跳过。
  *
  * 每个用例自己搭一个临时插件目录，从不扫真实的系统/用户目录，所以不需要 root，
@@ -61,6 +62,14 @@ constexpr const char* kProbeNoMarkerPath =
 constexpr const char* kIdlePath =
 #ifdef DS5DUMMY_TEST_IDLE_SO
     DS5DUMMY_TEST_IDLE_SO;
+#else
+    "";
+#endif
+
+/// 随包 buttons 插件的真实产物。
+constexpr const char* kButtonsPath =
+#ifdef DS5DUMMY_TEST_BUTTONS_SO
+    DS5DUMMY_TEST_BUTTONS_SO;
 #else
     "";
 #endif
@@ -333,5 +342,170 @@ TEST_F(PluginTest, ShippedIdleOptsOutWhenItsConfigDisablesIt) {
 }
 
 #endif  // DS5DUMMY_TEST_IDLE_SO
+
+#ifdef DS5DUMMY_TEST_BUTTONS_SO
+
+TEST_F(PluginTest, ShippedButtonsRemapsThroughTheRealLoadingPath) {
+  const std::string dir = Dir("buttons");
+  Install(dir, kButtonsPath);
+  Settings settings;
+  settings["buttons.remap.circle"] = "cross";
+
+  // 三层键（插件名.组.源）摊平后原样到达 init，钩子交回的是真的改写能力：
+  // ○ 进去、✕ 出来，中间没有任何测试专用的接线。
+  const auto hooks = Start(settings, MakeHost(), dir);
+  ASSERT_EQ(hooks.size(), 1u);
+  std::uint8_t state[kPluginStateSize] = {};
+  state[7] = 0x08 | 0x40;  // 十字键未按 + ○。
+  hooks[0](state);
+  EXPECT_EQ(state[7], 0x08 | 0x20);
+}
+
+TEST_F(PluginTest, ShippedButtonsStaysUnarmedWithoutItsSection) {
+  const std::string dir = Dir("buttons-off");
+  Install(dir, kButtonsPath);
+  // C-04：`buttons` 整节没写 = 整个插件不生效，一个钩子都不交出来。
+  EXPECT_TRUE(Start(Settings{}, MakeHost(), dir).empty());
+}
+
+TEST_F(PluginTest, ShippedButtonsIgnoresKeysItDoesNotRead) {
+  const std::string dir = Dir("buttons-unknown");
+  Install(dir, kButtonsPath);
+  Settings settings;
+  settings["buttons.gesture.swipe_up"] = "circle";
+  settings["buttons.remap.cricle"] = "cross";
+  // 还没实现的功能组与写错的键名都只到"忽略"为止：不武装，也不让服务退出（G-06）。
+  EXPECT_TRUE(Start(settings, MakeHost(), dir).empty());
+}
+
+TEST_F(PluginTest, ShippedButtonsArmsFromAnAxisRewriteAlone) {
+  const std::string dir = Dir("buttons-axis");
+  Install(dir, kButtonsPath);
+  Settings settings;
+  settings["buttons.axis.invert_lstick_x"] = "true";
+
+  // 轴改写不进任何一张 vector：武装与否按内容判，这一句就够交出一个钩子。
+  const auto hooks = Start(settings, MakeHost(), dir);
+  ASSERT_EQ(hooks.size(), 1u);
+  std::uint8_t state[kPluginStateSize] = {};
+  state[0] = 200;
+  state[1] = 128;
+  state[2] = 128;
+  state[3] = 128;
+  hooks[0](state);
+  EXPECT_EQ(state[0], 56);    // 256 - 200：静置点仍是静置点
+  EXPECT_EQ(state[1], 128);   // 没被点名的那根轴一个字都不动
+}
+
+TEST_F(PluginTest, ShippedButtonsPowersOffOnTheHeartbeatNotTheHook) {
+  const std::string dir = Dir("buttons-power-off");
+  Install(dir, kButtonsPath);
+  Settings settings;
+  settings["buttons.shortcut.1"] = "create+options: power_off";
+
+  const auto hooks = Start(settings, MakeHost(), dir);
+  ASSERT_EQ(hooks.size(), 1u);
+
+  std::uint8_t state[kPluginStateSize] = {};
+  state[0] = state[1] = state[2] = state[3] = 128;  // 摇杆静置
+  state[8] = 0x10 | 0x20;                           // Create + Options
+  hooks[0](state);
+  // K-10：命中只在这帧被记下来。钩子跑在 bt 的读线程上，它自己不碰控制通道。
+  EXPECT_EQ(g_power_off_calls, 0);
+
+  plugin::OnTick();
+  EXPECT_EQ(g_power_off_calls, 1);
+  // 取走即清空（K-11）：一次命中只发一份 0x08，发送失败也不会每轮撞一次链路。
+  plugin::OnTick();
+  EXPECT_EQ(g_power_off_calls, 1);
+
+  // 那组键全松开之后再按一次，闸门才重新打开（K-08）。
+  state[8] = 0;
+  hooks[0](state);
+  state[8] = 0x10 | 0x20;
+  hooks[0](state);
+  plugin::OnTick();
+  EXPECT_EQ(g_power_off_calls, 2);
+}
+
+/**
+ * @brief 把一个触摸点摆进状态体：线上那一个 32 位小端打包字。
+ * @param state 状态体。
+ * @param slot 第几个触点，线上就是 [32..35] 与 [36..39]。
+ * @param x 12 位横坐标，0..4095。
+ * @param y 12 位纵坐标，向下增长。
+ * @param touching false 时报"未接触"。
+ * @note 低 7 位是手柄自己的触点序号，bit7 才是接触标志：这里序号报 0，插件判半区
+ *       与划动都不看它。
+ */
+void PutFinger(std::uint8_t* state, int slot, std::uint16_t x, std::uint16_t y,
+               bool touching) {
+  std::uint32_t word = (static_cast<std::uint32_t>(y) << 20) |
+                       (static_cast<std::uint32_t>(x) << 8);
+  if (!touching) word |= 1u << 7;
+  for (int i = 0; i < 4; ++i) {
+    state[32 + slot * 4 + i] = static_cast<std::uint8_t>(word >> (8 * i));
+  }
+}
+
+TEST_F(PluginTest, ShippedButtonsRewritesAHalfClick) {
+  const std::string dir = Dir("buttons-touchpad");
+  Install(dir, kButtonsPath);
+  Settings settings;
+  settings["buttons.remap.pad_left"] = "cross";
+
+  // 判据要从真实字节里读出来：这一条走的是 [32..35] 那两个坐标 → 半区 → 抹掉
+  // [9] 的 pad 位，中间只隔着真实装载的那份 buttons.so。
+  const auto hooks = Start(settings, MakeHost(), dir);
+  ASSERT_EQ(hooks.size(), 1u);
+
+  std::uint8_t state[kPluginStateSize] = {};
+  state[7] = 0x08;   // 十字键未按。
+  state[9] = 0x02;   // 触摸板按下。
+  PutFinger(state, 0, 300, 2000, true);        // 落在左半。
+  PutFinger(state, 1, 0, 0, false);            // 另一根手指不在面板上。
+  hooks[0](state);
+  EXPECT_EQ(state[7], 0x08 | 0x20);            // ✕ 出来了。
+  EXPECT_EQ(state[9] & 0x02, 0u);              // pad 那一位一并抹掉。
+
+  // 抬手：半区是落在那一刻锁存到手指上的，不清这一轮的话下一句手势还跟着上一句
+  // 的起点。
+  state[9] = 0;
+  PutFinger(state, 0, 0, 0, false);
+  hooks[0](state);
+
+  // 同一份线上字节，手指落在右半：那条规则这一帧没被触发，pad 照原样交出去。
+  state[7] = 0x08;
+  state[9] = 0x02;
+  PutFinger(state, 0, 3800, 2000, true);
+  hooks[0](state);
+  EXPECT_EQ(state[9] & 0x02, 0x02);
+  EXPECT_EQ(state[7] & 0x20, 0u);
+}
+
+TEST_F(PluginTest, ShippedButtonsPowersOffOnASwipe) {
+  const std::string dir = Dir("buttons-swipe");
+  Install(dir, kButtonsPath);
+  Settings settings;
+  settings["buttons.shortcut.1"] = "swipe_up+touch_left: power_off";
+
+  const auto hooks = Start(settings, MakeHost(), dir);
+  ASSERT_EQ(hooks.size(), 1u);
+
+  std::uint8_t state[kPluginStateSize] = {};
+  for (int slot = 0; slot < 2; ++slot) PutFinger(state, slot, 0, 0, false);
+  state[7] = 0x08;
+  PutFinger(state, 0, 300, 2000, true);   // 落指在左半：这一帧只记下起点。
+  hooks[0](state);
+  EXPECT_EQ(g_power_off_calls, 0);
+
+  PutFinger(state, 0, 300, 1000, true);   // 向上擦过 1000 个刻度：划动判出来了。
+  hooks[0](state);
+  EXPECT_EQ(g_power_off_calls, 0);        // 与组合键同一条相位：钩子不碰控制通道。
+  plugin::OnTick();
+  EXPECT_EQ(g_power_off_calls, 1);
+}
+
+#endif  // DS5DUMMY_TEST_BUTTONS_SO
 
 }  // namespace

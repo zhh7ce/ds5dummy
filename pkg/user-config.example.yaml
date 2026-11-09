@@ -2,9 +2,15 @@
 # with the same values this template shows uncommented (they are the built-in
 # defaults, and a unit test keeps the two in step). Copy it to
 # ~/.config/ds5dummy/config.yaml to change anything, and keep it owned by the
-# target user (or root) and not writable by group or others.
+# target user (or root) and not writable by group or others. The daemon reads
+# this file once, at startup: apply an edit with
+# `sudo systemctl restart ds5dummy` (every site is torn down and rebuilt, so the
+# virtual controller disappears for a couple of seconds).
 #
 # enabled: false turns the service off for this user without deleting the file.
+#
+# To edit this file without writing YAML, run ds5dummy-config: it serves a
+# local page on 127.0.0.1 for this same file (plugins add their own panels).
 enabled: true
 
 # Which Bluetooth controllers this user serves:
@@ -61,20 +67,88 @@ bt_addr: auto
 # anything else is skipped with a line in the worker log. When both
 # directories hold a plugin with the same name, yours wins.
 #
-# Each plugin sees only its own block — the keys under plugins:<name>: — and
-# nothing else. A key the plugin does not know is ignored and a bad value only
-# affects that plugin (it reports the problem in the worker log and falls back
-# to its own default). Per-controller overrides go under
-# controllers:<MAC>.plugins: and replace only the keys you write there.
+# Each plugin sees only its own block — the keys under global.plugins:<name>: —
+# and nothing else. A key the plugin does not know is ignored and a bad value
+# only affects that plugin (it reports the problem in the worker log and falls
+# back to its own default). Per-controller overrides go under
+# controllers:<MAC>.plugins: and replace only the keys you write there; both
+# layers have the same shape.
 #
-# plugins:
-#   # idle: powers the controller off by sending the 0x08 feature report when
-#   # nobody touches it. A stick outside its centre band, a trigger, the D-pad
-#   # or any button counts as input; touchpad contact and motion do not.
-#   idle:
-#     # Minutes without any user input before the controller is asked to power
-#     # itself off (0 = never power off automatically; range 0..60).
-#     off_after_minutes: 30
+#   plugins:
+#     # idle: powers the controller off by sending the 0x08 feature report when
+#     # nobody touches it. A stick outside its centre band, a trigger, the D-pad
+#     # or any button counts as input; touchpad contact and motion do not.
+#     idle:
+#       # Minutes without any user input before the controller is asked to power
+#       # itself off (0 = never power off automatically; range 0..60).
+#       off_after_minutes: 30
+#
+#     # buttons: rewrites the input state before the host sees it — remapping,
+#     # turbo, chord shortcuts and macros. The plugin is armed only by keys it can
+#     # actually read: with no such key it changes nothing at all. A key that does
+#     # not parse is dropped with one line in the worker log and never affects the
+#     # other rules. Names are snake_case, case-sensitive, no aliases:
+#     #   dpad_up dpad_right dpad_down dpad_left
+#     #   triangle circle cross square l1 r1 l2 r2
+#     #   create options l3 r3 home pad mute lfn rfn lpaddle rpaddle
+#     #   lstick_up lstick_right lstick_down lstick_left   (and rstick_...)
+#     #   touch_left touch_right touch_two pad_left pad_right
+#     #   swipe_up swipe_right swipe_down swipe_left
+#     # The stick directions and the touchpad forms can be a source but never a
+#     # target: they are judged from the axes and from the two contacts, and no wire
+#     # bit encodes them. A swipe is a one-shot gesture, so it cannot be a remap
+#     # source either — press a key for a set of strokes with macro.N instead.
+#     # Everything this section can say, in full and with worked examples, is in
+#     # the guide that ships with the package: /usr/share/doc/ds5dummy/buttons.md
+#     buttons:
+#       # One rule per key: remap.<source>: <targets>. Several targets are joined
+#       # with '+' (they go together), "disable" erases the key, and a trailing
+#       # "+keep" also leaves the source reporting. Triggers carry both halves:
+#       # "l2: r2" moves the analogue travel as well as the pressed bit, while a
+#       # plain button driving a trigger drives it fully. Rules never chain within
+#       # one frame — every target reads the physical press, so two sources on one
+#       # target simply OR together.
+#       remap:
+#         circle: cross
+#         square: triangle+keep
+#         l2: r2
+#         mute: disable
+#         lstick_up: dpad_up         # a stick direction as a source (I-01)
+#         pad_left: cross            # a touchpad half-click (I-03); the other half
+#                                    # still clicks as itself
+#       # Turbo: while the key is held it taps itself this many times per second
+#       # (1..60; the rate actually reached is never above what the frame rate can
+#       # show). Triggers, the touchpad, stick directions and touchpad forms
+#       # cannot turbo.
+#       turbo:
+#         cross: 20
+#       # Axis rewrites: invert_ takes an axis name (lstick_x lstick_y rstick_x
+#       # rstick_y ltrigger rtrigger), center_ takes a whole stick, and false
+#       # means "leave it alone".
+#       axis:
+#         swap_lstick_rstick: both   # both = the whole sticks, or x / y for one
+#         invert_rstick_x: true      # the rest point stays the rest point
+#         center_lstick: always      # always = also when nothing is pressed
+#       # Shortcut: "<trigger>: power_off". The keys left of the ':' are ANDed —
+#       # all of them must be held. A suffix at the end of the trigger sets the
+#       # timing: ~ = tap (fires on a quick release), *2 = double, >ms = long
+#       # press (fires ms after the press, no release needed; 50..10000). The
+#       # action runs on the worker's heartbeat, never on the frame that
+#       # recognised it, and one hit sends one report — press the keys again to
+#       # ask a second time. A touchpad form in the chord reads as "true right now":
+#       # touch_left while a finger sits in that half, swipe_up from the moment the
+#       # stroke is far enough until every finger leaves.
+#       shortcut:
+#         1: "create+options: power_off"
+#         2: "home*2: power_off"
+#         3: "l3>750: power_off"
+#         4: "swipe_up+touch_left: power_off"
+#       # Macro: "<trigger>: <targets>" — those targets go down together for one
+#       # ~80 ms pulse and come back up on their own; holding the trigger for the
+#       # whole pulse still fires only once.
+#       macro:
+#         1: "circle~: l3+dpad_up"
+#         2: "swipe_right: cross"    # one stroke, one pulse
 #
 # Plugins run as arbitrary code inside the worker process: they can rewrite the
 # input state they are given and can start their own threads. The marker and

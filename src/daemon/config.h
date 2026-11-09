@@ -6,10 +6,9 @@
  *          用户配置
  *          （<home>/.config/ds5dummy/config.yaml）属于目标用户，只决定服务哪些
  *          手柄以及每只手柄的等待秒数、音频开关、音频/触觉
- *          增益、USB 轮询上限、虚拟设备的型号、插件配置与个人日志级别。用户级设置按
- *          "内置默认 ← global ←
- *          controllers.<MAC>"
- *          三层叠加，解析完即每只手柄的最终值。这份文件是可选的：家目录里没有
+ *          增益、USB 轮询上限、虚拟设备的型号、插件配置与个人日志级别。用户级设置
+ *          按 "内置默认 ← global ← controllers.<MAC>" 的顺序逐层叠加，解析完即
+ *          每只手柄的最终值。这份文件是可选的：家目录里没有
  *          它，Manager 就按内置默认层启动（取值同发布的
  *          pkg/user-config.example.yaml），只有显式 `enabled: false` 才等于不启用。
  *          本模块做"YAML 文本 → 结构"和
@@ -168,22 +167,20 @@ struct ControllerConfig {
   /// 空 = 没解析出来，worker 不写这个属性。
   std::string host_sysfs_path;
   /// 插件配置：`插件名.点分键路径` → 标量文本（YAML 里的嵌套在读取时摊平）。
-  /// 来源是根级的 `plugins:`、`global: plugins:` 与 `controllers.<MAC>.plugins:`
-  /// 三处，按同一顺序逐层合并，只覆盖写了的那个叶子（见 plugin/plugin.h）。本
-  /// 模块只校验形状，段名含义与取值属于插件。默认层是空的：装载由插件目录决定，
-  /// 没写某个插件的键就等于它用自己的默认值。
+  /// 来源只有两处：`global.plugins:` 与 `controllers.<MAC>.plugins:`，后者在
+  /// 前者之上逐键覆盖，只改写了的那个叶子（见 plugin/plugin.h）。本模块只校验
+  /// 形状，段名含义与取值属于插件。两层都没写某个插件的键就等于它用自己的默认值。
   plugin::Settings plugins;
 };
 
 /**
  * @brief <home>/.config/ds5dummy/config.yaml 的内容。
  * @details 分层是"内置默认 ← global: ← controllers.<MAC>"：global 与每个
- *          controllers 条目都只写想改的键，解析期就把三层叠加成每只手柄的
+ *          controllers 条目都只写想改的键，解析期就把两层叠加成每只手柄的
  *          最终值，Manager 拿到的是可直接使用的快照。enabled 缺省 true，
- *          bt_addr 缺省 auto。插件配置另有一节 `plugins:`，它是插件那一层的
- *          "global"：先于 global.plugins 生效，两者都被 controllers.<MAC>
- *          覆盖；叠加结果落在 ControllerConfig::plugins，因此每只手柄拿到的
- *          都是已合并的完整配置。
+ *          bt_addr 缺省 auto。插件配置与手柄设置走同一对层：`global.plugins`
+ *          是默认，`controllers.<MAC>.plugins` 逐键覆盖；叠加结果落在
+ *          ControllerConfig::plugins，因此每只手柄拿到的都是已合并的完整配置。
  * @note 纯数据，无行为；拷贝即配置快照。
  */
 struct UserConfig {
@@ -283,9 +280,8 @@ bool ParseSystemConfig(const std::string& text, SystemConfig& out,
  * @param out 成功时写入解析结果；失败时不修改。
  * @param why 失败时写入面向用户的单行原因（含出错键名）；成功时清空。
  * @return 成功 true。
- * @details 严格模式：只接受 enabled/bt_addr/log_level/plugins/global/
- *          controllers 六个
- *          根键，ffs_path、uid、gid 等 root 级键在这里一律按未知键拒绝。
+ * @details 严格模式：只接受 enabled/bt_addr/log_level/global/controllers
+ *          五个根键，ffs_path、uid、gid 等 root 级键在这里一律按未知键拒绝。
  *          global 与每个 controllers.<MAC> 条目都只接受 bt_wait_s/audio/
  *          haptics_gain/speaker_gain/usb_report_interval_ms/usb_model/plugins
  *          七个键。
@@ -296,8 +292,8 @@ bool ParseSystemConfig(const std::string& text, SystemConfig& out,
  *          plugins 只校验形状：插件名必须是 plugin::IsToken 认得的形态，它以下是
  *          任意层的嵌套映射（每一段名字都要过 IsToken，层数上限 kMaxPluginDepth），
  *          叶子必须是非空标量；取值对不对由插件自己判，每段名字的含义由收到它的
- *          插件解释。根级 plugins、global.plugins 与 controllers.<MAC>.plugins 按
- *          这个顺序逐层合并，拍平后只覆盖写了的那个叶子。
+ *          插件解释。global.plugins 与 controllers.<MAC>.plugins 按这个顺序逐层
+ *          合并，拍平后只覆盖写了的那个叶子。
  * @note 纯函数：不碰文件系统、不写日志，可在任意线程调用。
  * @see LoadUserConfig —— 加固读取 + 本函数的组合。
  */

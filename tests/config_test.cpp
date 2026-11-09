@@ -532,12 +532,13 @@ TEST(UserConfigParse, AdvancedSettingsRoundTrip) {
 // 自己那里（见 idle 插件），所以这里连"30 该不该是数字"都不判。
 TEST(UserConfigParse, PluginsSectionIsHandedOverVerbatim) {
   const std::string text =
-      "plugins:\n"
-      "  idle:\n"
-      "    off_after_minutes: 45\n"
-      "    mode: keep-alive\n"
-      "  unmapped:\n"
-      "    cross: circle\n";
+      "global:\n"
+      "  plugins:\n"
+      "    idle:\n"
+      "      off_after_minutes: 45\n"
+      "      mode: keep-alive\n"
+      "    unmapped:\n"
+      "      cross: circle\n";
   UserConfig cfg;
   std::string why;
   ASSERT_TRUE(ds5::daemon::ParseUserConfig(text, cfg, why)) << why;
@@ -549,19 +550,16 @@ TEST(UserConfigParse, PluginsSectionIsHandedOverVerbatim) {
   EXPECT_TRUE(cfg.controllers.empty());
 }
 
-// 三个深度逐键合并：根级是插件默认层，global 覆盖写了的键，手柄条目再在其上
-// 覆盖，每层没写的键与没写的插件都原样留下。
-TEST(UserConfigParse, PluginsMergeLeafWiseAcrossTheThreeLayers) {
+// 两层逐键合并：global 是默认，手柄条目只覆盖写了的键，没写的键与没写的
+// 插件都原样留下。
+TEST(UserConfigParse, PluginsMergeLeafWiseAcrossTheTwoLayers) {
   const std::string text =
-      "plugins:\n"
-      "  idle:\n"
-      "    off_after_minutes: 30\n"
-      "  other:\n"
-      "    key: root\n"
       "global:\n"
       "  plugins:\n"
       "    idle:\n"
       "      off_after_minutes: 15\n"
+      "    other:\n"
+      "      key: global\n"
       "controllers:\n"
       "  \"AA:BB:CC:DD:EE:01\":\n"
       "    plugins:\n"
@@ -573,12 +571,12 @@ TEST(UserConfigParse, PluginsMergeLeafWiseAcrossTheThreeLayers) {
   ASSERT_TRUE(ds5::daemon::ParseUserConfig(text, cfg, why)) << why;
 
   EXPECT_EQ(cfg.defaults.plugins.at("idle.off_after_minutes"), "15");
-  // 根级的另一个插件没被 global 写过，整个键保留。
-  EXPECT_EQ(cfg.defaults.plugins.at("other.key"), "root");
+  EXPECT_EQ(cfg.defaults.plugins.at("other.key"), "global");
 
   const ControllerConfig& pad1 = cfg.controllers.at("AA:BB:CC:DD:EE:01");
   EXPECT_EQ(pad1.plugins.at("idle.off_after_minutes"), "0");
-  EXPECT_EQ(pad1.plugins.at("other.key"), "root");
+  // 手柄没写的另一个插件整键保留。
+  EXPECT_EQ(pad1.plugins.at("other.key"), "global");
 
   // 只写 MAC 不写键的条目继承 global 层的全部插件配置。
   const ControllerConfig& pad2 = cfg.controllers.at("AA:BB:CC:DD:EE:02");
@@ -589,16 +587,17 @@ TEST(UserConfigParse, PluginsMergeLeafWiseAcrossTheThreeLayers) {
 // 解释，配置层只把它们拼成点分路径。
 TEST(UserConfigParse, PluginSettingsNestToArbitraryDepth) {
   const std::string text =
-      "plugins:\n"
-      "  buttons:\n"
-      "    remap:\n"
-      "      circle: cross\n"
-      "      dpad:\n"
-      "        up: dpad_up\n"
-      "    shortcut:\n"
-      "      1: create+options\n"
-      "    axis:\n"
-      "      group: {}\n";
+      "global:\n"
+      "  plugins:\n"
+      "    buttons:\n"
+      "      remap:\n"
+      "        circle: cross\n"
+      "        dpad:\n"
+      "          up: dpad_up\n"
+      "      shortcut:\n"
+      "        1: create+options\n"
+      "      axis:\n"
+      "        group: {}\n";
   UserConfig cfg;
   std::string why;
   ASSERT_TRUE(ds5::daemon::ParseUserConfig(text, cfg, why)) << why;
@@ -614,23 +613,27 @@ TEST(UserConfigParse, PluginSettingsNestToArbitraryDepth) {
 // 逐层合并摊平之后进行，所以覆盖的单位是整条点分路径，不是某一层。
 TEST(UserConfigParse, NestedPluginsMergePerFlattenedKey) {
   const std::string text =
-      "plugins:\n"
-      "  buttons:\n"
-      "    remap:\n"
-      "      circle: cross\n"
-      "      dpad:\n"
-      "        up: dpad_up\n"
       "global:\n"
       "  plugins:\n"
       "    buttons:\n"
       "      remap:\n"
-      "        circle: square\n";
+      "        circle: cross\n"
+      "        dpad:\n"
+      "          up: dpad_up\n"
+      "controllers:\n"
+      "  \"AA:BB:CC:DD:EE:01\":\n"
+      "    plugins:\n"
+      "      buttons:\n"
+      "        remap:\n"
+      "          circle: square\n";
   UserConfig cfg;
   std::string why;
   ASSERT_TRUE(ds5::daemon::ParseUserConfig(text, cfg, why)) << why;
-  EXPECT_EQ(cfg.defaults.plugins.at("buttons.remap.circle"), "square");
+  EXPECT_EQ(cfg.defaults.plugins.at("buttons.remap.circle"), "cross");
+  const ControllerConfig& pad = cfg.controllers.at("AA:BB:CC:DD:EE:01");
+  EXPECT_EQ(pad.plugins.at("buttons.remap.circle"), "square");
   // 覆盖 circle 不会带走整个 remap 组：同组没被上层写过的键留着。
-  EXPECT_EQ(cfg.defaults.plugins.at("buttons.remap.dpad.up"), "dpad_up");
+  EXPECT_EQ(pad.plugins.at("buttons.remap.dpad.up"), "dpad_up");
 }
 
 // 深度上限是一条真实约束，不是形状：叶子的键路径最多 kMaxPluginDepth 段，
@@ -638,12 +641,12 @@ TEST(UserConfigParse, NestedPluginsMergePerFlattenedKey) {
 TEST(UserConfigParse, PluginNestingDepthIsBounded) {
   // groups 层组，叶子在最下面：叶子的键路径因此有 groups+1 段。缩进每层多两格。
   const auto yaml_with_groups = [](int groups) {
-    std::string text = "plugins:\n  buttons:\n";
+    std::string text = "global:\n  plugins:\n    buttons:\n";
     for (int i = 0; i < groups; ++i) {
-      text += std::string(static_cast<size_t>(4 + 2 * i), ' ') + "l" +
+      text += std::string(static_cast<size_t>(6 + 2 * i), ' ') + "l" +
               std::to_string(i) + ":\n";
     }
-    text += std::string(static_cast<size_t>(4 + 2 * groups), ' ') + "leaf: v\n";
+    text += std::string(static_cast<size_t>(6 + 2 * groups), ' ') + "leaf: v\n";
     return text;
   };
   const auto path_with_groups = [](int groups) {
@@ -675,10 +678,19 @@ TEST(UserConfigParse, EmptyPluginsSectionIsNoOverride) {
   UserConfig cfg;
   std::string why;
   // `plugins:` 只写键不写值等于本层不覆盖，与 identity:/global: 同一种宽容。
-  ASSERT_TRUE(ds5::daemon::ParseUserConfig("plugins:\nglobal:\n  plugins:\n",
-                                           cfg, why))
-      << why;
+  ASSERT_TRUE(
+      ds5::daemon::ParseUserConfig("global:\n  plugins:\n", cfg, why)) << why;
   EXPECT_TRUE(cfg.defaults.plugins.empty());
+}
+
+// 插件配置只有 global 与控制器两层：根级 `plugins:` 不再是可写的位置，
+// 免得同一份键在文件里有三种放法。
+TEST(UserConfigParse, RootPluginsSectionIsRejected) {
+  UserConfig cfg;
+  std::string why;
+  EXPECT_FALSE(ds5::daemon::ParseUserConfig(
+      "plugins:\n  idle:\n    off_after_minutes: 45\n", cfg, why));
+  EXPECT_NE(why.find("plugins"), std::string::npos) << why;
 }
 
 // 名字必须是 plugin::IsToken 认的 token：argv 用 '.' 分隔插件名与键、用 '='
@@ -686,20 +698,20 @@ TEST(UserConfigParse, EmptyPluginsSectionIsNoOverride) {
 // 配置错误，而取值合不合插件的心意不在这里判。
 TEST(UserConfigParse, RejectsMalformedPluginsSections) {
   for (const char* text :
-       {"plugins: 30\n",
+       {"global:\n  plugins: 30\n",
         // 插件名与键都要过 token：非法字符、空名、带分隔符的名字。
-        "plugins:\n  two words:\n    key: v\n",
-        "plugins:\n  \"\":\n    key: v\n",
-        "plugins:\n  idle:\n    bad.key: v\n",
-        "plugins:\n  idle:\n    \"\": v\n",
+        "global:\n  plugins:\n    two words:\n      key: v\n",
+        "global:\n  plugins:\n    \"\":\n      key: v\n",
+        "global:\n  plugins:\n    idle:\n      bad.key: v\n",
+        "global:\n  plugins:\n    idle:\n      \"\": v\n",
         // 嵌套不改变规则：更深一层的段名同样不能带分隔符，也不能只写键名。
-        "plugins:\n  buttons:\n    remap:\n      bad.key: v\n",
-        "plugins:\n  buttons:\n    remap:\n",
+        "global:\n  plugins:\n    buttons:\n      remap:\n        bad.key: v\n",
+        "global:\n  plugins:\n    buttons:\n      remap:\n",
         // 设置段必须是映射，取值必须是非空标量。
-        "plugins:\n  idle: 30\n",
-        "plugins:\n  idle:\n    off_after_minutes: [30]\n",
-        "plugins:\n  idle:\n    off_after_minutes:\n",
-        // 三个深度走同一套检查：手柄级条目里的错误要报出是哪个 MAC。
+        "global:\n  plugins:\n    idle: 30\n",
+        "global:\n  plugins:\n    idle:\n      off_after_minutes: [30]\n",
+        "global:\n  plugins:\n    idle:\n      off_after_minutes:\n",
+        // 两层走同一套检查：手柄级条目里的错误要报出是哪个 MAC。
         "bt_addr: list\ncontrollers:\n  \"AA:BB:CC:DD:EE:FF\":\n"
         "  plugins:\n    idle:\n      off after minutes: 90\n"}) {
     UserConfig cfg;
