@@ -2,8 +2,9 @@ cmake_minimum_required(VERSION 3.16)
 project(ds5dummy LANGUAGES CXX)
 
 # dist 目标的版本号：与五个 PKGBUILD 的 pkgver() 同一条规则
-# （<tag>.r<距 tag 的提交数>.g<短哈希>，还没打 tag 时 tag 段为 0）。不缓存：
-# 每次 configure 现查，否则同一个构建目录里换了提交还会用旧版本号。
+# （<tag>.r<距 tag 的提交数>.g<短哈希>，还没打 tag 时 tag 段为 0；只认 v* 标签，
+# driver.* 是驱动 release 的指针，不参与版本号）。不缓存：每次 configure 现查，
+# 否则同一个构建目录里换了提交还会用旧版本号。
 # 不是 git 仓库（发行版 tarball、手动拷贝的目录）时留 0。-DDS5DUMMY_VERSION=...
 # 可以显式覆盖。
 if(NOT DEFINED DS5DUMMY_VERSION)
@@ -11,7 +12,7 @@ if(NOT DEFINED DS5DUMMY_VERSION)
     find_package(Git QUIET)
     if(GIT_FOUND)
         execute_process(
-            COMMAND ${GIT_EXECUTABLE} -C ${CMAKE_SOURCE_DIR} describe --tags --long --abbrev=7
+            COMMAND ${GIT_EXECUTABLE} -C ${CMAKE_SOURCE_DIR} describe --tags --long --abbrev=7 --match v*
             OUTPUT_VARIABLE _ds5_describe OUTPUT_STRIP_TRAILING_WHITESPACE
             ERROR_QUIET RESULT_VARIABLE _ds5_git_rc)
         if(_ds5_git_rc EQUAL 0)

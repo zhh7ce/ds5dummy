@@ -74,8 +74,9 @@ makepkg -d
 sudo pacman -U ds5dummy-config-*.pkg.tar.zst
 ```
 
-四个 PKGBUILD 都不手写版本号：`pkgver()` 里用 `git describe` 按当前 checkout 生成
-`<tag>.r<距 tag 的提交数>.g<短哈希>`（没有 tag 时 tag 段为 `0`、提交数取总数）。因此每次
+五个 PKGBUILD 都不手写版本号：`pkgver()` 里用 `git describe --match 'v*'` 按当前
+checkout 生成 `<tag>.r<距 tag 的提交数>.g<短哈希>`（没有 `v*` 标签时 tag 段为 `0`、
+提交数取总数；`driver.*` 标签是驱动 release 的指针，不参与）。因此每次
 提交后重新 `makepkg` 都会得到更大的版本号，直接 `pacman -U` 就是升级。注意 makepkg 会把
 算出的版本写回 PKGBUILD 并把 `pkgrel` 重置为 1，这是 `pkgver()` 本身的行为；想回到占位值
 用 `git checkout -- <PKGBUILD>`。

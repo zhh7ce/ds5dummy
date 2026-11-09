@@ -1,0 +1,214 @@
+# 编译并发布两个包：
+#   v<版本> 标签   → 应用包（bin）发布成该版本的 release，并占据仓库的 Latest；
+#   driver.<n> 标签 → 内核驱动包（DKMS）单独发布，永远不是 Latest。
+# 第一个应用版本会顺带建出 driver.v1（若还不存在），这样 install 说明从第一天
+# 起就是可用的；驱动更新时发 driver.v2，不动应用版本的 release。
+#
+# 应用包必须在容器里编：便携构建的 ABI 下限取决于构建环境。发布前用 readelf
+# 断言它不越过 SteamOS 的 glibc 2.41 / GLIBCXX 3.4.34——在本机 Arch 上编得
+# 再顺，越线的产物在 Deck 上起不来。
+#
+# 标签名里用点不用横线：pkgver 不允许 "-"，pkgver() 直接用标签名当前缀。
+name: release
+
+on:
+  push:
+    tags:
+      - 'v*'
+      - 'driver.*'
+
+permissions:
+  contents: write
+
+env:
+  # 固定资产名：下载 URL 稳定，安装命令里不用出现 pkgver（0.1.0.r0.gabc1234）。
+  BIN_ASSET: ds5dummy_bin.pkg.tar.zst
+  DRIVER_ASSET: hid-playstation-ds5dummy-dkms.pkg.tar.zst
+
+jobs:
+  build-bin:
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    container: archlinux:base-devel
+    steps:
+      # checkout 之前先装 git：Arch 镜像里不带它，而浅克隆拿不到标签，
+      # 版本号会退化成 0.r1.gxxxx。
+      - name: Prepare the container
+        run: |
+          pacman-key --init
+          pacman-key --populate archlinux
+          pacman -Syu --noconfirm --needed git sudo
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Build as an unprivileged user
+        run: |
+          useradd -m builder
+          echo 'builder ALL=(ALL) NOPASSWD: ALL' >/etc/sudoers.d/builder
+          chown -R builder "$GITHUB_WORKSPACE"
+          su -s /bin/bash builder -c "cd '$GITHUB_WORKSPACE/pkg/ds5dummy_bin' && makepkg -s --noconfirm"
+          # 容器里的 makepkg 默认连 -debug 分包一起产出；发布资产只有主包，
+          # 删掉它，后面的通配才只剩一份。
+          rm -f pkg/ds5dummy_bin/*-debug-*.pkg.tar.zst
+      - name: Assert the ABI floor SteamOS can satisfy
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          pkgs=(pkg/ds5dummy_bin/ds5dummy_bin-*.pkg.tar.zst)
+          if [ ${#pkgs[@]} -ne 1 ]; then
+            echo "::error::expected exactly one package, found ${#pkgs[@]}: ${pkgs[*]}"
+            exit 1
+          fi
+          pkg=${pkgs[0]}
+          work=$(mktemp -d)
+          bsdtar -xf "$pkg" -C "$work"
+
+          max_of() {
+            readelf --version-info "$1" | grep -oE "$2_[0-9.]+" |
+              sed "s/$2_//" | sort -Vu | tail -1 || true
+          }
+          # 版本号只比较，不做数值运算：2.9 < 2.41、3.4.9 < 3.4.34 靠 sort -V。
+          check_le() {
+            [ -n "$2" ] || return 0
+            [ "$(printf '%s\n%s\n' "$2" "$3" | sort -V | tail -1)" = "$3" ] || {
+              echo "::error::$1 is $2, above the $3 SteamOS baseline"
+              exit 1
+            }
+            echo "$1: $2 (limit $3)"
+          }
+
+          bin="$work/usr/lib/ds5dummy/bin/ds5dummyd"
+          check_le "ds5dummyd GLIBC" "$(max_of "$bin" GLIBC)" 2.41
+          if readelf --version-info "$bin" | grep -q GLIBCXX; then
+            echo "::error::ds5dummyd still requires GLIBCXX; -static-libstdc++ did not take"
+            exit 1
+          fi
+          if readelf -d "$bin" | grep -q 'NEEDED.*libfmt'; then
+            echo "::error::ds5dummyd links libfmt; SteamOS has no libfmt.so.12"
+            exit 1
+          fi
+          readelf -d "$bin" | grep -q 'RUNPATH.*\$ORIGIN/\.\./lib' || {
+            echo "::error::ds5dummyd has no \$ORIGIN/../lib runpath"
+            exit 1
+          }
+          # 随包的 yaml-cpp 与两个插件同样要能在这台机器上加载。
+          for lib in "$work"/usr/lib/ds5dummy/lib/*.so.* \
+                     "$work"/usr/lib/ds5dummy/plugins/*.so; do
+            check_le "$(basename "$lib") GLIBC" "$(max_of "$lib" GLIBC)" 2.41
+            check_le "$(basename "$lib") GLIBCXX" "$(max_of "$lib" GLIBCXX)" 3.4.34
+          done
+      - uses: actions/upload-artifact@v4
+        with:
+          name: bin-package
+          path: pkg/ds5dummy_bin/ds5dummy_bin-*.pkg.tar.zst
+
+  build-driver:
+    # 两类标签都要驱动包：v* 用它补建 driver.v1，driver.* 用它发新版本。
+    runs-on: ubuntu-latest
+    container: archlinux:base-devel
+    steps:
+      - name: Prepare the container
+        run: |
+          pacman-key --init
+          pacman-key --populate archlinux
+          pacman -Syu --noconfirm --needed git
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Build as an unprivileged user
+        run: |
+          useradd -m builder
+          chown -R builder "$GITHUB_WORKSPACE"
+          # 这个包只是把内核源码与 dkms.conf 铺进 /usr/src，package() 不跑编译，
+          # 所以不需要安装 dkms 与头文件。
+          su -s /bin/bash builder -c "cd '$GITHUB_WORKSPACE/pkg/hid-playstation-ds5dummy' && makepkg --nodeps --noconfirm"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: driver-package
+          path: pkg/hid-playstation-ds5dummy/hid-playstation-ds5dummy-dkms-*.pkg.tar.zst
+
+  release-app:
+    needs: [build-bin, build-driver]
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/download-artifact@v4
+        with:
+          name: bin-package
+          path: assets/app
+      - uses: actions/download-artifact@v4
+        with:
+          name: driver-package
+          path: assets/driver
+      - name: Use stable asset names
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          app=(assets/app/*.pkg.tar.zst)
+          drv=(assets/driver/*.pkg.tar.zst)
+          if [ ${#app[@]} -ne 1 ] || [ ${#drv[@]} -ne 1 ]; then
+            echo "::error::expected exactly one package per artifact"
+            exit 1
+          fi
+          mv "${app[0]}" "assets/app/$BIN_ASSET"
+          mv "${drv[0]}" "assets/driver/$DRIVER_ASSET"
+      - name: Publish the app release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          tag="$GITHUB_REF_NAME"
+          notes="docs/releases/$tag/README.md"
+          if [ -f "$notes" ]; then
+            notes_args=(--notes-file "$notes")
+          else
+            notes_args=(--generate-notes)
+          fi
+          gh release create "$tag" --title "$tag" "${notes_args[@]}" \
+            "assets/app/$BIN_ASSET"
+      - name: Create the driver singleton on the first release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          # 已存在就什么都不做：驱动是长期不变的一份，别让每次应用发版都动它。
+          gh release view driver.v1 >/dev/null 2>&1 && exit 0
+          gh release create driver.v1 --title "Kernel driver (DKMS)" \
+            --latest=false --target "$GITHUB_SHA" \
+            --notes-file docs/releases/driver.v1/README.md \
+            "assets/driver/$DRIVER_ASSET"
+
+  release-driver:
+    needs: build-driver
+    if: startsWith(github.ref, 'refs/tags/driver.')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/download-artifact@v4
+        with:
+          name: driver-package
+          path: assets/driver
+      - name: Use a stable asset name
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          drv=(assets/driver/*.pkg.tar.zst)
+          if [ ${#drv[@]} -ne 1 ]; then
+            echo "::error::expected exactly one driver package"
+            exit 1
+          fi
+          mv "${drv[0]}" "assets/driver/$DRIVER_ASSET"
+      - name: Publish the driver release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          tag="$GITHUB_REF_NAME"
+          gh release create "$tag" --title "Kernel driver (DKMS)" \
+            --latest=false --notes-file "docs/releases/$tag/README.md" \
+            "assets/driver/$DRIVER_ASSET"

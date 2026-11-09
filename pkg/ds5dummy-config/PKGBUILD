@@ -27,6 +27,7 @@ source=('ds5dummy-config')
 b2sums=('SKIP')
 
 # <tag>.r<距 tag 的提交数>.g<短哈希>；还没打 tag 时 tag 段为 0、提交数取总数。
+# 只认 v* 标签：driver.* 是驱动 release 的指针，不参与版本号。
 # pkgver 里不能有 "-"，所以把 git 输出里的分隔符换成点。
 # 不是 git 仓库（发行版 tarball、手动拷贝的目录）时保留文件里的 pkgver。
 pkgver() {
@@ -35,7 +36,7 @@ pkgver() {
     printf '%s\n' "$pkgver"
     return 0
   fi
-  if ver=$(git -C "$_srcdir" describe --tags --long --abbrev=7 2>/dev/null); then
+  if ver=$(git -C "$_srcdir" describe --tags --long --abbrev=7 --match 'v*' 2>/dev/null); then
     printf '%s\n' "$ver" | sed -E 's/^v//; s/-([0-9]+)-(g[0-9a-f]+)/.r\1.\2/'
   else
     printf '0.r%s.g%s\n' \

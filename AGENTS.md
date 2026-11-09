@@ -832,9 +832,12 @@ DESTDIR 暂存、`--prefix /` 再打成 tarball；装到哪个前缀由 `scripts
 缺头文件时由 dkms 在安装时报 `Your kernel headers for kernel ... cannot be found`。
 
 版本号不手写：五个 PKGBUILD 都用 `pkgver()`，在其中用 `git -C "$_srcdir" describe
---tags --long` 现查，生成 `<tag>.r<距 tag 的提交数>.g<短哈希>`（无 tag 时 tag 段为 `0`、
-提交数取 `rev-list --count HEAD`）。makepkg 会把结果写回 PKGBUILD 并把 `pkgrel` 重置
-为 1，所以文件里留 `pkgver=0` 占位；重新 `git checkout -- <PKGBUILD>` 即可恢复。
+--tags --long --match 'v*'` 现查，生成 `<tag>.r<距 tag 的提交数>.g<短哈希>`（无 `v*`
+标签时 tag 段为 `0`、提交数取 `rev-list --count HEAD`）。只认 `v*` 是必需的：`driver.*`
+是驱动 release 的长期指针，它与某个 `v*` 标签落在同一提交时，不加过滤的
+`git describe` 会选中 `driver.*`，版本号从此变成 `driver.v1.rN.g…`。makepkg 会把结果
+写回 PKGBUILD 并把 `pkgrel` 重置为 1，所以文件里留 `pkgver=0` 占位；重新
+`git checkout -- <PKGBUILD>` 即可恢复。
 生成值不带 `.dirty`：`git describe --dirty` 会把 makepkg 自己的写回当成改动，下一次
 构建版本号就会永远多出 `.dirty`。
 DKMS 包的 `package()` 用这个版本号覆写 `dkms.conf` 的 `PACKAGE_VERSION`，

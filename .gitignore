@@ -13,8 +13,9 @@ pkg/pkg/
 .vscode/
 *.swp
 
-# Doxygen 生成的 API 文档
-docs/doxygen/
+# docs/ 下只有发布说明进 git；Doxygen 输出、演示文稿与本地草稿都不进
+/docs/*
+!/docs/releases/
 
 # SDD 执行工作区（ledger/brief/report/review 包）
 .superpowers/
@@ -22,6 +23,5 @@ docs/doxygen/
 /pkg/**/pkg/
 /pkg/**/src/
 
-/docs
 # Python 字节码（tools/ 下的页面服务与单测）
 __pycache__/

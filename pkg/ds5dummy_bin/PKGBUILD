@@ -40,7 +40,7 @@ replaces=('ds5dummy')
 # yaml-cpp 不在这里：随包那份在 /usr/lib/ds5dummy/lib 下，与宿主自己的版本互不干扰。
 # fmt 只在构建期要（FMT_HEADER_ONLY 之后没有动态依赖）。
 depends=('bluez' 'pipewire' 'opus' 'libsamplerate' 'systemd-libs')
-makedepends=('cmake' 'pkgconf' 'boost' 'fmt' 'git')
+makedepends=('cmake' 'pkgconf' 'boost' 'fmt' 'git' 'yaml-cpp')
 optdepends=(
   'dummy_hcd: kernel module (CONFIG_USB_DUMMY_HCD=m)'
   'hid-playstation-ds5dummy-dkms: hidraw-only Bluetooth DualSense support'
@@ -54,6 +54,7 @@ backup=(
 install='ds5dummy.install'
 
 # <tag>.r<距 tag 的提交数>.g<短哈希>；还没打 tag 时 tag 段为 0、提交数取总数。
+# 只认 v* 标签：driver.* 是驱动 release 的指针，不参与版本号。
 # pkgver 里不能有 "-"，所以把 git 输出里的分隔符换成点。
 # 不是 git 仓库（发行版 tarball、手动拷贝的目录）时保留文件里的 pkgver。
 # CMake 的 DS5DUMMY_VERSION 用同一条规则，所以 dist tarball 的名字与 pkgver 一致。
@@ -63,7 +64,7 @@ pkgver() {
     printf '%s\n' "$pkgver"
     return 0
   fi
-  if ver=$(git -C "$_srcdir" describe --tags --long --abbrev=7 2>/dev/null); then
+  if ver=$(git -C "$_srcdir" describe --tags --long --abbrev=7 --match 'v*' 2>/dev/null); then
     printf '%s\n' "$ver" | sed -E 's/^v//; s/-([0-9]+)-(g[0-9a-f]+)/.r\1.\2/'
   else
     printf '0.r%s.g%s\n' \

@@ -1,9 +1,18 @@
 # DS5Dummy hid-playstation DKMS fork — pacman install hooks
 #
 # The package version is derived from git, so it is never hardcoded here:
-# pacman passes it as $1 to every hook ($2 is the replaced version on upgrade).
+# pacman passes the full package version (<pkgver>-<pkgrel>) as $1 to every
+# hook ($2 is the replaced version on upgrade).
 
 DKMS_NAME="hid-playstation-ds5dummy"
+
+# DKMS 认的版本是 dkms.conf 的 PACKAGE_VERSION，也就是 /usr/src 源码目录名里的
+# pkgver；pacman 给的是 <pkgver>-<pkgrel>，这里去掉 epoch 与 pkgrel
+# （本包 pkgver 不含 "-"，pkgrel 是最后一个 "-" 之后的那段）。
+_dkms_version() {
+    local version="${1##*:}"
+    printf '%s\n' "${version%-*}"
+}
 
 _build_dkms() {
     local version="$1"
@@ -36,19 +45,19 @@ _reload_module() {
 }
 
 post_install() {
-    _build_dkms "$1" && _reload_module
+    _build_dkms "$(_dkms_version "$1")" && _reload_module
     echo ":: hid-playstation-ds5dummy installed."
     echo "   In-tree hid_playstation is blacklisted."
     echo "   Bluetooth DualSense is exposed as hidraw-only with synthetic VID/PID 0x1998:0x1221 (Edge: 0x1998:0x1103)."
 }
 
 post_upgrade() {
-    _drop_dkms "$2"
-    _build_dkms "$1" && _reload_module
+    _drop_dkms "$(_dkms_version "$2")"
+    _build_dkms "$(_dkms_version "$1")" && _reload_module
 }
 
 pre_remove() {
-    _drop_dkms "$1"
+    _drop_dkms "$(_dkms_version "$1")"
 }
 
 post_remove() {
