@@ -18,7 +18,7 @@ The MIT-licensed material incorporated into this work is listed in NOTICE.
 
 Files that carry their own SPDX license identifier are governed by that
 identifier. In particular, the kernel driver fork under
-hid-playstation-ds5dummy/ is a separate work licensed GPL-2.0-or-later; see
+pkg/hid-playstation-ds5dummy/ is a separate work licensed GPL-2.0-or-later; see
 README.md.
 
 GNU GENERAL PUBLIC LICENSE

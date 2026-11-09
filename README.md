@@ -42,6 +42,8 @@ Entertainment DualSense Wireless Controller`，`054c:0ce6`），同时把它经�
 |---|---|---|
 | `pkg/ds5dummy_hidraw` | hidraw | 默认后端，借内核的 HID 驱动收发；**要额外装一个内核驱动补丁**（见下） |
 | `pkg/ds5dummy_l2cap` | 原始 L2CAP | 程序自己在用户态走蓝牙 HID 协议，报告的收发不经过内核 HID 驱动；构建时需要 bluez 的开发文件 |
+| `pkg/ds5dummy-config` | 与后端无关 | 可选的本地网页配置工具，页面、入口脚本与保存前的校验器都在这一个包里 |
+| `pkg/hid-playstation-ds5dummy` | — | hidraw 后端用的 DKMS 内核驱动补丁 |
 
 ```bash
 cd pkg/ds5dummy_hidraw
@@ -53,12 +55,26 @@ sudo pacman -U ds5dummy_hidraw-*.pkg.tar.zst
 蓝牙手柄，程序看不到它：
 
 ```bash
-cd hid-playstation-ds5dummy
+cd pkg/hid-playstation-ds5dummy
 makepkg -d
 sudo pacman -U hid-playstation-ds5dummy-dkms-*.pkg.tar.zst
 ```
 
-三个 PKGBUILD 都不手写版本号：`pkgver()` 里用 `git describe` 按当前 checkout 生成
+这个包只依赖 `dkms`，不写任何内核头文件依赖——Arch 的 DKMS 打包指南要求如此：一个
+DKMS 包会为机器上装着的每个内核构建，头文件包随内核而变，硬绑一个既冗余又限制。
+装之前请先装好当前内核对应的头文件（Arch 上是 `linux-headers` 或
+`linux-zen-headers`，Deck 上是 `linux-neptune-*-headers`）；缺了 `dkms` 在安装时会报
+`Your kernel headers for kernel ... cannot be found`。
+
+配置页面是单独的包，装不装都不影响转发程序：
+
+```bash
+cd pkg/ds5dummy-config
+makepkg -d
+sudo pacman -U ds5dummy-config-*.pkg.tar.zst
+```
+
+四个 PKGBUILD 都不手写版本号：`pkgver()` 里用 `git describe` 按当前 checkout 生成
 `<tag>.r<距 tag 的提交数>.g<短哈希>`（没有 tag 时 tag 段为 `0`、提交数取总数）。因此每次
 提交后重新 `makepkg` 都会得到更大的版本号，直接 `pacman -U` 就是升级。注意 makepkg 会把
 算出的版本写回 PKGBUILD 并把 `pkgrel` 重置为 1，这是 `pkgver()` 本身的行为；想回到占位值
@@ -204,8 +220,9 @@ c++ -std=c++20 -fPIC -shared -I src plugin/buttons/*.cpp -o buttons.so
 
 自己写的插件放进 `~/.config/ds5dummy/plugins/` 就会被下一次启动装载。
 
-不想手写 YAML 时，用 `ds5dummy-config` 起一个只监听 `127.0.0.1` 的配置页面：
-页面固定在 `http://127.0.0.1:8777/`（`--port` 可换），不需要令牌。顶部一栏选当前
+不想手写 YAML 时，装 `ds5dummy-config` 包后用 `ds5dummy-config` 起一个只监听
+`127.0.0.1` 的配置页面：页面固定在 `http://127.0.0.1:8777/`（`--port` 可换），
+不需要令牌。顶部一栏选当前
 编辑的是"全局（所有手柄的默认值）"还是某只手柄的覆盖；已连接但文件里还没写的手柄
 也会出现在下拉框里，也可以点「添加手柄」手写一个 MAC 为它建一层，保存时补出
 `controllers.<MAC>:`。基础配置与只读的当前状态始终在（当前状态画在标签页之上），
@@ -417,7 +434,7 @@ DS5Dummy 以 **GPL-3.0-or-later** 发布，完整许可文本见 [LICENSE](LICEN
 （BSL-1.0）、fmt（MIT）；测试另外用 googletest（BSD-3-Clause），配置页面用
 PyYAML（MIT）。
 
-### 内核模块（`hid-playstation-ds5dummy/`）
+### 内核模块（`pkg/hid-playstation-ds5dummy/`）
 
 这个目录是 Linux 内核 `drivers/hid/hid-playstation.c` 的修改副本，并附带同一内核的
 `drivers/hid/hid-ids.h`；改动是让**蓝牙** DualSense / DualSense Edge 留在 hidraw-only

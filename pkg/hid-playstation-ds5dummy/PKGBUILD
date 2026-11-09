@@ -3,12 +3,12 @@
 # Standalone DKMS fork of the in-tree hid-playstation driver.
 # It does not use the ds5dummy CMake build at all.
 #
-# Build: cd hid-playstation-ds5dummy && makepkg -d
+# Build: cd pkg/hid-playstation-ds5dummy && makepkg -d
 # Install: sudo pacman -U hid-playstation-ds5dummy-dkms-*.pkg.tar.zst
 
 pkgname=hid-playstation-ds5dummy-dkms
-# Repo root (this PKGBUILD lives one level down).
-_srcdir="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+# Repo root (this PKGBUILD lives two levels down).
+_srcdir="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 # 版本跟随 checkout，由下面的 pkgver() 现查。makepkg 会把结果写回本文件并把
 # pkgrel 重置为 1，所以这里留占位值；改动提交后重新 makepkg 就是升级。
 pkgver=0
@@ -17,12 +17,12 @@ pkgdesc="DS5Dummy hid-playstation DKMS fork: Bluetooth hidraw-only + synthetic V
 arch=('x86_64')
 url="https://github.com/zhh7ce/ds5dummy"
 license=('GPL-2.0-or-later')
+# 不写头文件依赖：Arch 的 DKMS 打包指南要求只依赖 dkms。一个 DKMS 包会为机器上
+# 装着的每个内核构建，头文件包随内核而变，写死 linux-headers 在 SteamOS 这类内核上
+# 会装错（linux-neptune-*-headers 实测 Provides: None，不提供 LINUX-HEADERS 虚包）。
+# 缺头文件时由 dkms 在安装时报 "Your kernel headers for kernel ... cannot be found"。
 depends=('dkms')
 makedepends=('git')
-optdepends=(
-  'linux-cachyos-deckify-headers: build against the CachyOS Deckify kernel'
-  'linux-headers: build against the stock Arch kernel'
-)
 install='hid-playstation-ds5dummy.install'
 source=(
   'hid-playstation.c'

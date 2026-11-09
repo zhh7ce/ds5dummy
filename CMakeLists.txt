@@ -115,6 +115,33 @@ set(DS5DUMMY_MODULE_INCLUDE_DIRS
     src
 )
 
+# ---------------------------------------------------------------------------
+# 配置校验器（buttons_check）：只读一份用户配置，用 buttons 插件自己的语法层
+# 解析它那一节。不装载 .so、不需要 root/手柄/PipeWire。
+# ---------------------------------------------------------------------------
+function(ds5dummy_add_buttons_check)
+    add_executable(buttons_check tools/buttons_check.cpp
+        tools/buttons_config.cpp
+        plugin/buttons/settings.cpp plugin/buttons/ids.cpp
+        src/daemon/config.cpp src/daemon/options.cpp)
+    target_include_directories(buttons_check PRIVATE
+        ${DS5DUMMY_MODULE_INCLUDE_DIRS} ${CMAKE_SOURCE_DIR})
+    target_link_libraries(buttons_check PRIVATE PkgConfig::YAMLCPP)
+endfunction()
+
+# ---------------------------------------------------------------------------
+# 只编配置校验器（打包用）：ds5dummy-config 是独立于转发程序的包，页面与校验器
+# 不需要 PipeWire/Opus/BlueZ 这些只为数据面存在的依赖。打开后只产出
+# buttons_check，其余目标都不注册。
+# ---------------------------------------------------------------------------
+option(DS5DUMMY_CONFIG_ONLY "Build only buttons_check (for the split config package)" OFF)
+if(DS5DUMMY_CONFIG_ONLY)
+    find_package(PkgConfig REQUIRED)
+    pkg_check_modules(YAMLCPP REQUIRED IMPORTED_TARGET yaml-cpp)
+    ds5dummy_add_buttons_check()
+    return()
+endif()
+
 if(BT_BACKEND STREQUAL "L2CAP")
     message(STATUS "BT backend: raw AF_BLUETOOTH L2CAP (BlueZ pkg required)")
     find_package(PkgConfig REQUIRED)
@@ -238,15 +265,7 @@ if(DS5DUMMY_BUILD_TOOLS)
         PkgConfig::PIPEWIRE PkgConfig::SPA PkgConfig::OPUS PkgConfig::SAMPLERATE)
     target_compile_definitions(audio_dump PRIVATE LOGURU_USE_FMTLIB=1)
 
-    # 配置校验：只读一份用户配置，用 buttons 插件自己的语法层解析它那一节，
-    # 逐条打出三种下场与武装摘要。不装载 .so、不需要 root/手柄/PipeWire。
-    add_executable(buttons_check tools/buttons_check.cpp
-        tools/buttons_config.cpp
-        plugin/buttons/settings.cpp plugin/buttons/ids.cpp
-        src/daemon/config.cpp src/daemon/options.cpp)
-    target_include_directories(buttons_check PRIVATE
-        ${DS5DUMMY_MODULE_INCLUDE_DIRS} ${CMAKE_SOURCE_DIR})
-    target_link_libraries(buttons_check PRIVATE PkgConfig::YAMLCPP)
+    ds5dummy_add_buttons_check()
 
     # 本地配置页面是 tools/buttons_web.py + tools/buttons_web.html：页面不参与编译，
     # 判定仍然由上面的 buttons_check 给出，Python 只负责读取、写回与起服务。

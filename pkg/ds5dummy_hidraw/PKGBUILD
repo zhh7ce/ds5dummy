@@ -18,12 +18,12 @@ license=('GPL-3.0-or-later')
 provides=('ds5dummy')
 conflicts=('ds5dummy' 'ds5dummy_l2cap')
 replaces=('ds5dummy')
-depends=('bluez' 'pipewire' 'fmt' 'opus' 'libsamplerate' 'yaml-cpp' 'systemd-libs'
-         'python' 'python-yaml')
+depends=('bluez' 'pipewire' 'fmt' 'opus' 'libsamplerate' 'yaml-cpp' 'systemd-libs')
 makedepends=('cmake' 'pkgconf' 'boost' 'git')
 optdepends=(
   'dummy_hcd: kernel module (CONFIG_USB_DUMMY_HCD=m)'
   'hid-playstation-ds5dummy-dkms: hidraw-only Bluetooth DualSense support'
+  'ds5dummy-config: local web page for editing the plugin settings'
 )
 backup=(
   'etc/modprobe.d/ds5dummy.conf'
@@ -59,7 +59,7 @@ build() {
     -DDS5DUMMY_STRICT=ON \
     -DDS5DUMMY_DEBUG=OFF \
     -DDS5DUMMY_DEBUG_LOG=OFF \
-    -DDS5DUMMY_BUILD_TOOLS=ON \
+    -DDS5DUMMY_BUILD_TOOLS=OFF \
     -DCMAKE_INSTALL_PREFIX=/usr
   cmake --build "$srcdir/build-hidraw"
 }
@@ -77,19 +77,8 @@ package() {
     "$pkgdir/usr/lib/ds5dummy/plugins/idle.panel.js"
   install -Dm644 "$_srcdir/plugin/buttons/buttons.panel.js" \
     "$pkgdir/usr/lib/ds5dummy/plugins/buttons.panel.js"
-  # 配置页面：/usr/bin 里只放入口脚本，页面壳与 core 面板跟 Python 脚本一起装在
-  # /usr/lib/ds5dummy；插件面板随各自的 .so 走。保存前要 buttons_check 做权威判定，
-  # 所以它也从 tools 里编出来一并装上。
-  install -Dm755 "$_srcdir/pkg/ds5dummy-config" \
-    "$pkgdir/usr/bin/ds5dummy-config"
-  install -Dm755 "$_srcdir/tools/buttons_web.py" \
-    "$pkgdir/usr/lib/ds5dummy/buttons_web.py"
-  install -Dm644 "$_srcdir/tools/buttons_web.html" \
-    "$pkgdir/usr/lib/ds5dummy/buttons_web.html"
-  install -Dm644 "$_srcdir/tools/panels/core.js" \
-    "$pkgdir/usr/lib/ds5dummy/panels/core.js"
-  install -Dm755 "$srcdir/build-hidraw/buttons_check" \
-    "$pkgdir/usr/bin/buttons_check"
+  # 配置页面是单独的 ds5dummy-config 包：页面壳、入口脚本与保存前的 buttons_check
+  # 都不在这里。插件面板仍随 .so 装，页面按插件目录发现它们。
   # buttons 插件自己的用法文档：YAML 怎么写、全部键名与取值语法都在那一份里，
   # 用户模板只给这一条链接，不复制内容。
   install -Dm644 "$_srcdir/plugin/buttons/README.md" \

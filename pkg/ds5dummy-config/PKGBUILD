@@ -1,0 +1,76 @@
+# Maintainer: DS5Dummy Project
+#
+# DS5Dummy 的本地网页配置工具，与转发程序分开发布：后端包装程序与插件，
+# 这个包装页面、入口脚本和保存前的权威校验器。页面只监听 127.0.0.1，不需要 root。
+#
+# Build: cd pkg/ds5dummy-config && makepkg -d
+# Install: sudo pacman -U ds5dummy-config-*.pkg.tar.zst
+
+pkgname=ds5dummy-config
+# Project source lives two directories up from this PKGBUILD.
+_srcdir="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+# 版本跟随 checkout，由下面的 pkgver() 现查。makepkg 会把结果写回本文件并把
+# pkgrel 重置为 1，所以这里留占位值；改动提交后重新 makepkg 就是升级。
+pkgver=0
+pkgrel=1
+pkgdesc="Local web page for editing DS5Dummy plugin settings"
+arch=('x86_64')
+url="https://github.com/zhh7ce/ds5dummy"
+license=('GPL-3.0-or-later')
+# 程序本体在 ds5dummy_hidraw / ds5dummy_l2cap 里。这是两个本地文件包，pacman
+# 解析不了仓库之外的虚包，所以不写死依赖哪个后端，只给出提示。
+depends=('python' 'python-yaml')
+makedepends=('cmake' 'pkgconf' 'yaml-cpp' 'git')
+optdepends=(
+  'ds5dummy_hidraw: the HIDRAW-backend bridge whose plugins this page configures'
+  'ds5dummy_l2cap: the L2CAP-backend bridge whose plugins this page configures'
+)
+source=('ds5dummy-config')
+b2sums=('SKIP')
+
+# <tag>.r<距 tag 的提交数>.g<短哈希>；还没打 tag 时 tag 段为 0、提交数取总数。
+# pkgver 里不能有 "-"，所以把 git 输出里的分隔符换成点。
+pkgver() {
+  local ver
+  if ver=$(git -C "$_srcdir" describe --tags --long --abbrev=7 2>/dev/null); then
+    printf '%s\n' "$ver" | sed -E 's/^v//; s/-([0-9]+)-(g[0-9a-f]+)/.r\1.\2/'
+  else
+    printf '0.r%s.g%s\n' \
+      "$(git -C "$_srcdir" rev-list --count HEAD)" \
+      "$(git -C "$_srcdir" rev-parse --short=7 HEAD)"
+  fi
+}
+
+build() {
+  # CONFIG_ONLY 只注册 buttons_check：页面本身是 Python，不需要数据面的
+  # PipeWire/Opus/BlueZ 依赖。
+  cmake -B "$srcdir/build-config" -S "$_srcdir" \
+    -DCMAKE_BUILD_TYPE=Release \
+    -DDS5DUMMY_STRICT=ON \
+    -DDS5DUMMY_DEBUG=OFF \
+    -DDS5DUMMY_DEBUG_LOG=OFF \
+    -DDS5DUMMY_CONFIG_ONLY=ON \
+    -DCMAKE_INSTALL_PREFIX=/usr
+  cmake --build "$srcdir/build-config" --target buttons_check
+}
+
+package() {
+  # /usr/bin 里只放入口脚本；页面壳与 core 面板跟 Python 脚本一起装在
+  # /usr/lib/ds5dummy。插件面板由页面自己扫插件目录，属于后端包。
+  install -Dm755 "$srcdir/ds5dummy-config" \
+    "$pkgdir/usr/bin/ds5dummy-config"
+  install -Dm755 "$_srcdir/tools/buttons_web.py" \
+    "$pkgdir/usr/lib/ds5dummy/buttons_web.py"
+  install -Dm644 "$_srcdir/tools/buttons_web.html" \
+    "$pkgdir/usr/lib/ds5dummy/buttons_web.html"
+  install -Dm644 "$_srcdir/tools/panels/core.js" \
+    "$pkgdir/usr/lib/ds5dummy/panels/core.js"
+  # 保存前由它做权威判定；没有它页面会拒绝写回。
+  install -Dm755 "$srcdir/build-config/buttons_check" \
+    "$pkgdir/usr/bin/buttons_check"
+
+  install -Dm644 "$_srcdir/LICENSE" \
+    "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
+  install -Dm644 "$_srcdir/NOTICE" \
+    "$pkgdir/usr/share/licenses/$pkgname/NOTICE"
+}

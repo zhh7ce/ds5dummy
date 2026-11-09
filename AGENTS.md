@@ -48,8 +48,9 @@ Entertainment / DualSense Wireless Controller"，DualSense Edge 是 `054c:0df2`
 | `plugin/` | 随包插件源码，与宿主分开编译：`idle/` 只 include `src/plugin/` 的两份插件作者头文件，不链接宿主任何符号，`c++ -std=c++20 -fPIC -shared -I src plugin/idle/idle.cpp` 就能单独编出 `idle.so`；`buttons/` 同一条路（六个 TU 编成一份 `buttons.so`，它自己的程序侧说明在 `plugin/buttons/AGENTS.md`）；两个目录里还各有一份供配置页面使用的 `<插件名>.panel.js` |
 | `tests/` | googletest 单测（`ctest`，无 root、无硬件） |
 | `tools/` | 诊断程序：`spike_l2cap`、`spike_rumble`、`mini_gadget`、`audio_dump`(+`dump_sink.*`)、几个 `spike_*` 特权/交接探针；`buttons_check` 是 buttons 配置的只读校验器（共用 `buttons_config`，不装载 `.so`），`buttons_web.py` + `buttons_web.html` 是本地配置页面（Python 回环服务、固定地址 `127.0.0.1:8777`、无令牌；壳画服务状态、配置层选择与只读的当前状态，并取回每层的插件节推给面板——面板不读文件、不发请求；插件界面由插件目录里的 `<插件名>.panel.js` 提供，没有面板的插件退回通用键值编辑器；判定仍调 `buttons_check`），`panels/core.js` 是随工具的 core 面板；`win_audio_probe.cpp` 是唯一的 Windows 侧探针（mingw 交叉编译，在 Wine/Proton 前缀里读 MMDevice 与 setupapi，不参与 Linux 构建） |
-| `pkg/ds5dummy_hidraw`、`pkg/ds5dummy_l2cap` | 两个互斥的 Arch 包：systemd 单元、`/etc/ds5dummy/config.yaml`、`/usr/share/doc/ds5dummy/user-config.example.yaml`、modprobe/modules-load 配置、install 钩子 |
-| `hid-playstation-ds5dummy/` | 内核 `hid-playstation` 的 DKMS 补丁（hidraw 后端用），只接管蓝牙 DualSense/Edge，合成 VID/PID（`1998:1221`/`1998:1103`）；DualShock 4 与所有 USB 设备走原驱动路径 |
+| `pkg/ds5dummy_hidraw`、`pkg/ds5dummy_l2cap` | 两个互斥的 Arch 包：systemd 单元、`/etc/ds5dummy/config.yaml`、`/usr/share/doc/ds5dummy/user-config.example.yaml`、modprobe/modules-load 配置、install 钩子，以及随包插件与它们的配置面板 |
+| `pkg/ds5dummy-config` | 独立的配置工具包：`ds5dummy-config` 入口、`buttons_web.py` + `buttons_web.html`、core 面板与 `buttons_check`；构建只编校验器，不依赖数据面的库 |
+| `pkg/hid-playstation-ds5dummy/` | 内核 `hid-playstation` 的 DKMS 补丁（hidraw 后端用），只接管蓝牙 DualSense/Edge，合成 VID/PID（`1998:1221`/`1998:1103`）；DualShock 4 与所有 USB 设备走原驱动路径。PKGBUILD 只依赖 `dkms`，头文件由用户按内核自装 |
 | `scripts/` | `setup.sh`/`teardown.sh`（整站准备/清理；teardown 扫 `ds5dummy*` 整族并卸载每个 `ffs-ds5*` 挂载）、`setup-dummy-hcd.sh`/`teardown-dummy-hcd.sh`（只喂 `tools/mini_gadget` 的最小版） |
 | `third_party/` | loguru（vendored，不改注释不格式化） |
 
@@ -757,30 +758,41 @@ MODULE（`ds5dummy_plugin_probe`，不链接测试二进制），测试把它拷
 
 ## 14. 打包与内核侧
 
-两个包都装 `/usr/bin/ds5dummyd`、`/usr/lib/ds5dummy/plugins/idle.so`、
+两个后端包（`pkg/ds5dummy_hidraw`、`pkg/ds5dummy_l2cap`）装
+`/usr/bin/ds5dummyd`、`/usr/lib/ds5dummy/plugins/idle.so`、
 `/usr/lib/ds5dummy/plugins/buttons.so`、`/usr/lib/ds5dummy/plugins/idle.panel.js`、
 `/usr/lib/ds5dummy/plugins/buttons.panel.js`（配置页面的面板，与 `.so` 同目录；
-缺了它页面退回通用键值编辑器，不影响装载）、
-`/usr/bin/ds5dummy-config`（配置页面入口，把参数交给
-`/usr/lib/ds5dummy/buttons_web.py`）、`/usr/lib/ds5dummy/buttons_web.html`、
-`/usr/lib/ds5dummy/panels/core.js`（页面壳与 core 面板）、`/usr/bin/buttons_check`
-（页面保存前的权威判定，也是可单独运行的只读校验器）、
-`/usr/share/doc/ds5dummy/buttons.md`
+缺了它页面退回通用键值编辑器，不影响装载）、`/usr/share/doc/ds5dummy/buttons.md`
 （`buttons` 插件自己的用法文档，装自 `plugin/buttons/README.md`）、
 `/usr/lib/ds5dummy/teardown.sh`、
 `/usr/lib/systemd/system/ds5dummy.service`、`/usr/lib/systemd/system-sleep/ds5dummy`
 （休眠钩子）、`/etc/ds5dummy/config.yaml`（进 `backup=`）、
 `/usr/share/doc/ds5dummy/user-config.example.yaml`、`/etc/modprobe.d/ds5dummy.conf`、
-`/etc/modules-load.d/ds5dummy.conf`，都 `provides=('ds5dummy')`、
+`/etc/modules-load.d/ds5dummy.conf`；都 `provides=('ds5dummy')`、
 `replaces=('ds5dummy')` 且互相 `conflicts`（`pkgrel` 随内容递增；makepkg 的 `pkgver()`
-回写会把它重置为 1），`depends` 含 `yaml-cpp`、`systemd-libs`、`python` 与
-`python-yaml`（配置页面），构建参数固定在
+回写会把它重置为 1），`depends` 只含数据面运行库，构建参数固定在
 `-DCMAKE_BUILD_TYPE=Release -DBT_BACKEND=<对应后端> -DDS5DUMMY_STRICT=ON
--DDS5DUMMY_DEBUG=OFF -DDS5DUMMY_DEBUG_LOG=OFF -DDS5DUMMY_BUILD_TOOLS=ON
--DCMAKE_INSTALL_PREFIX=/usr`：打开 tools 只为编出 `buttons_check`，其余诊断程序
-只留在构建树里、不安装。
+-DDS5DUMMY_DEBUG=OFF -DDS5DUMMY_DEBUG_LOG=OFF -DDS5DUMMY_BUILD_TOOLS=OFF
+-DCMAKE_INSTALL_PREFIX=/usr`：诊断工具只留在构建树里、不安装。配置页面通过
+`optdepends` 指向 `ds5dummy-config`，不并进后端包。
 
-版本号不手写：三个 PKGBUILD 都用 `pkgver()`，在其中用 `git -C "$_srcdir" describe
+`pkg/ds5dummy-config` 是独立的配置工具包：装 `/usr/bin/ds5dummy-config`（入口，把参数
+交给 `/usr/lib/ds5dummy/buttons_web.py`）、`/usr/lib/ds5dummy/buttons_web.html`、
+`/usr/lib/ds5dummy/panels/core.js`（页面壳与 core 面板）、`/usr/bin/buttons_check`
+（页面保存前的权威判定，也是可单独运行的只读校验器）；依赖 `python` 与
+`python-yaml`，`makedepends` 只需要 `cmake pkgconf yaml-cpp git`。构建传
+`-DDS5DUMMY_CONFIG_ONLY=ON`，CMake 只注册 `buttons_check` 后提前返回，不要求
+PipeWire/Opus/BlueZ 这些数据面依赖。它不硬依赖后端：两个后端是仓库外的本地文件包，
+pacman 解析不了 `ds5dummy` 虚包，所以只在 `optdepends` 里列出两个后端。
+
+`pkg/hid-playstation-ds5dummy` 是内核驱动的 DKMS 包（源文件与 PKGBUILD 同目录，所以
+整个目录在 `pkg/` 下）。它只 `depends=('dkms')`、不写头文件依赖，这是 Arch 的 DKMS
+打包指南的要求：一个 DKMS 包会为机器上装着的每个内核构建，头文件包随内核而变，
+写死 `linux-headers` 既冗余又限制，在 SteamOS 这类内核上还会装错
+（`linux-neptune-618-headers` 实测 `Provides: None`，不提供 `LINUX-HEADERS` 虚包）。
+缺头文件时由 dkms 在安装时报 `Your kernel headers for kernel ... cannot be found`。
+
+版本号不手写：四个 PKGBUILD 都用 `pkgver()`，在其中用 `git -C "$_srcdir" describe
 --tags --long` 现查，生成 `<tag>.r<距 tag 的提交数>.g<短哈希>`（无 tag 时 tag 段为 `0`、
 提交数取 `rev-list --count HEAD`）。makepkg 会把结果写回 PKGBUILD 并把 `pkgrel` 重置
 为 1，所以文件里留 `pkgver=0` 占位；重新 `git checkout -- <PKGBUILD>` 即可恢复。
