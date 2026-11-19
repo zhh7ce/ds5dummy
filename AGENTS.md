@@ -52,7 +52,9 @@ Entertainment / DualSense Wireless Controller"，DualSense Edge 是 `054c:0df2`
 | `pkg/ds5dummy_bin` | 预编译包：打包时用便携参数编出 dist 二进制，按 Arch 目录铺开（`/usr/lib/ds5dummy/{bin,lib,plugins}` + `/usr/bin` 符号链接 + 单元/模块配置/`/etc` 配置），供装不了工具链的机器装（SteamOS） |
 | `pkg/ds5dummy-config` | 独立的配置工具包：`ds5dummy-config` 入口、`buttons_web.py` + `buttons_web.html`、core 面板与 `buttons_check`；构建只编校验器，不依赖数据面的库 |
 | `pkg/hid-playstation-ds5dummy/` | 内核 `hid-playstation` 的 DKMS 补丁（hidraw 后端用），只接管蓝牙 DualSense/Edge，合成 VID/PID（`1998:1221`/`1998:1103`）；DualShock 4 与所有 USB 设备走原驱动路径。PKGBUILD 只依赖 `dkms`，头文件由用户按内核自装 |
-| `scripts/` | `setup.sh`/`teardown.sh`（整站准备/清理；teardown 扫 `ds5dummy*` 整族并卸载每个 `ffs-ds5*` 挂载）、`setup-dummy-hcd.sh`/`teardown-dummy-hcd.sh`（只喂 `tools/mini_gadget` 的最小版）、`install.sh`（可重定位分发 `dist` 的安装脚本：整棵树复制到家目录前缀、单元指向该前缀）、`verify.sh`（双后端 + ASan 的发布前验证） |
+| `scripts/` | `setup.sh`/`teardown.sh`（整站准备/清理；teardown 扫 `ds5dummy*` 整族并卸载每个 `ffs-ds5*` 挂载）、`setup-dummy-hcd.sh`/`teardown-dummy-hcd.sh`（只喂 `tools/mini_gadget` 的最小版）、`install.sh`（可重定位分发 `dist` 的安装脚本：整棵树复制到家目录前缀、单元指向该前缀）、`verify.sh`（双后端 + ASan 的发布前验证）；发布侧的 `steamos_repo.py`、`steamos_toolchain.py`、`kernel_source.py`、`kmod_plan.py` 与它们的 `tests/` 见 §17 |
+| `.github/workflows/` | `release.yml`（推 tag 建两个 Arch 包并发布）、`kmod.yml`（按内核编模块，每个频道一个固定 Release，见 §17） |
+| `docs/releases/kmod/` | 频道 Release 的说明模板（§17） |
 | `third_party/` | loguru（vendored，不改注释不格式化） |
 
 ---
@@ -952,3 +954,41 @@ HID 侧：
     忽略日志。触摸板那族（I-03/I-04）已经做了，但判据全是 `ids.h` 里的全局经验值（半区那条
     8% 的带、划动的最小位移 12% 与 16:9 折算），**没在实机上确认过手感**；六轴手势（I-05）
     仍然不做。
+
+---
+
+## 17. 另一条分发路线：按内核现取的云端模块
+
+§14 的两条路线都有前置：Arch 包要一整套工具链，DKMS 包要每个内核的头文件，而 SteamOS
+的 A/B 镜像更新会把 `/usr` 与 `/etc` 里的手装文件整份换掉。这一节是发布侧的备用通道：
+每 6 小时轮询 SteamOS 频道仓库，按每个内核现编一份模块，追加到该频道的固定 Release。
+
+| 路径 | 内容 |
+|---|---|
+| `.github/workflows/kmod.yml` | 轮询 SteamOS 频道仓库 → 按 vermagic 编 `.ko` → 追加到该频道的固定 Release（tag 就是频道名） |
+| `scripts/steamos_repo.py` | 解析 SteamOS 频道仓库的 `.db`，给出内核 release → headers 包名、gcc/pahole 版本 |
+| `scripts/steamos_toolchain.py` | 下载并解出对应版本的工具链包 |
+| `scripts/kernel_source.py` | 按头文件包版本换算出上游稳定标签，取回该版本的 `hid-playstation.c`/`hid-ids.h` 并打上 `kmod/ds5dummy.patch` |
+| `scripts/kmod_plan.py` | 一轮发布的全部判断（发现、矩阵、跳过/重建），离线可测；workflow 只执行它的输出 |
+| `scripts/tests/` | 上面四份的 stdlib `unittest`（`python3 -m unittest discover -s scripts/tests`） |
+| `kmod/` | 补丁 `ds5dummy.patch` 与 kbuild `Makefile`（README 不参与构建）；驱动源码每次构建时按内核版本从上游取回后打补丁 |
+| `docs/releases/kmod/` | 频道 Release 的说明模板 |
+
+**发布侧**：每 6 小时一轮，外加手动全量重建。补丁与 Makefile 在 `kmod/` 里，每轮对这两个
+文件取内容指纹；`seen.json`（actions/cache）的每份产物记着编它用的那个指纹，对不上的只
+重建那一个内核，其余提交不引起重建。只有成功的产物才推进记录，因此某轮失败或没排上的
+内核每轮都会自动重试，直到记上当前指纹。矩阵只收 6.0 及以上的内核
+（`MIN_KERNEL_VERSION`）：5.x 的头文件包带着 Valve 用当年那代 gcc 编的预编译 gcc 插件，
+与频道仓库现在的 gcc 加载不上，重试不会成功。驱动源码不随分支
+发布：`scripts/kernel_source.py` 把头文件包版本换算成上游稳定标签（`7.2.7.valve2-2` →
+`v7.2.7`，`6.5.0.valve23-1` → `v6.5`），从 linux-stable 的 GitHub 镜像取回该版本的
+`hid-playstation.c` 与 `hid-ids.h`，再用 `patch -p1 --fuzz=0` 打上 `ds5dummy.patch`。
+内核内部 API 因此由上游保证匹配，补丁只压在与版本无关的五处；上游一旦改动这些位置，
+该格构建直接失败而不是硬贴偏移。DKMS 包仍携带完整源码（用户机器上没有可打补丁的驱动
+源码），两处不再要求文件逐字节一致。资产名 `<release>.ko`，`release`
+就是模块 vermagic 的第一段，与设备上的 `uname -r` 逐字相等——取用方直接拼 URL，不需要
+索引。**每个频道一个固定 Release，tag 就是频道名**（`jupiter-3.10` 等）：同一个头文件包
+出现在几个频道里就各建一次，每份产物用本频道自己的工具链编出来，同名资产因此不会在
+同一个 Release 里撞车；取用方按频道依次查找，所有频道都 404 才是"这个内核没有产物"。
+这些 tag 永不标 Latest；`driver.v*` 是 DKMS 包的长期指针，两条线在版本号上也分开
+（`pkgver()` 只认 `v*`）。

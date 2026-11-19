@@ -8,6 +8,12 @@ pkg/src/
 pkg/pkg/
 *.pkg.tar.zst
 
+# 构建模块时把上游驱动源码取回 kmod/ 里就地编译；目录里只有这三份进仓库
+/kmod/*
+!/kmod/README.md
+!/kmod/Makefile
+!/kmod/ds5dummy.patch
+
 # IDE
 .idea/
 .vscode/
