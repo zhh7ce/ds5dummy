@@ -1,0 +1,293 @@
+# 为 SteamOS 各频道的每个内核编一份 hid-playstation 驱动模块，按频道追加到各自的固定 Release。
+#
+# 每个频道一个 Release，tag 就是频道名（`jupiter-3.10` 等）：同一个内核会同时出现在
+# 几个频道里，分开放才能让每份产物用本频道的工具链编出来，也避免同名资产在同一个
+# Release 里撞车。资产名 `<release>.ko` 里的 release 是模块 vermagic 的第一段，与设备
+# 上的 `uname -r` 逐字相等，设备端按频道依次拼 URL 查找，不需要索引文件（P-29、P-31）。
+#
+# 触发：每 6 小时一轮，另可手动全量重建（P-06）。补丁与 Makefile 在 main 的
+# `kmod/` 里，普通 push 不会天然区分"改了补丁"与"改了别处"，所以每轮对这两个文件
+# 取内容指纹，与 seen.json 里记的不同就按 P-25 重建全部已发布内核，最坏晚一个
+# 轮询周期。
+#
+# 判断全部在 scripts/kmod_plan.py（可离线测，A-01/A-02），这里只按输出执行：
+#   discover → 矩阵 → build（每包一个 job）→ publish（按频道串行上传 + 说明 + seen.json）。
+name: kmod
+
+on:
+  schedule:
+    - cron: '17 */6 * * *'
+  workflow_dispatch:
+    inputs:
+      rebuild_all:
+        description: 为所有已发布内核重建并覆盖同名资产（源码变更时自动等价触发）
+        type: boolean
+        default: false
+
+permissions:
+  contents: write
+
+# 两轮同时跑会互相覆盖 Release 说明与 seen.json，所以排队而不是并行。
+concurrency:
+  group: kmod-publish
+  cancel-in-progress: false
+
+jobs:
+  discover:
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.plan.outputs.matrix }}
+      has_tasks: ${{ steps.plan.outputs.has_tasks }}
+      patch_fingerprint: ${{ steps.plan.outputs.patch_fingerprint }}
+    steps:
+      # 脚本只认 main 的版本：定时轮次的 ref 本来就是默认分支，手动触发也一律拉到
+      # 默认分支，免得有人在 feature 分支上点一次"运行"就用上未合并的判断逻辑。
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.repository.default_branch }}
+          fetch-depth: 1
+      - uses: actions/cache/restore@v4
+        with:
+          path: cache/seen.json
+          key: kmod-seen-v1-${{ github.run_id }}
+          restore-keys: |
+            kmod-seen-v1-
+      - name: Plan the round
+        id: plan
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REBUILD_ALL: ${{ github.event_name == 'workflow_dispatch' && inputs.rebuild_all || false }}
+        run: |
+          set -euo pipefail
+          mkdir -p cache assets
+          # 每个频道的固定 Release 里现有的资产名（P-05）；404 表示这个频道的 Release
+          # 还没建，按空清单处理。其它错误（鉴权、网络）在这里失败，免得把"查不到"
+          # 当成"全都没发布"。频道清单只从脚本拿，不在 YAML 里再抄一份。
+          mapfile -t channels < <(python3 scripts/kmod_plan.py channels)
+          for channel in "${channels[@]}"; do
+            if ! names=$(gh api "repos/$GITHUB_REPOSITORY/releases/tags/$channel" \
+                --jq '.assets[].name' 2>api.err); then
+              if grep -q 'HTTP 404' api.err; then
+                names=""
+              else
+                cat api.err >&2
+                exit 1
+              fi
+            fi
+            printf '%s\n' "$names" | sed '/^$/d' > "assets/$channel.txt"
+          done
+          # 补丁指纹：对构建真正用到的两个文件取内容哈希（路径名一起进哈希，改名也
+          # 算变化）。README 不进指纹，改说明不会触发整批重建。
+          patch_fingerprint=$(
+            sha256sum kmod/ds5dummy.patch kmod/Makefile | sha256sum | cut -d' ' -f1
+          )
+          args=()
+          if [ "$REBUILD_ALL" = "true" ]; then
+            args+=(--rebuild-all)
+          fi
+          python3 scripts/kmod_plan.py discover \
+            --seen cache/seen.json \
+            --assets-dir assets \
+            --output matrix.json \
+            --patch-fingerprint "$patch_fingerprint" \
+            "${args[@]}"
+          echo "matrix=$(jq -c . matrix.json)" >> "$GITHUB_OUTPUT"
+          echo "has_tasks=$(jq -r '(.include | length) > 0' matrix.json)" >> "$GITHUB_OUTPUT"
+          echo "patch_fingerprint=$patch_fingerprint" >> "$GITHUB_OUTPUT"
+
+  build:
+    needs: discover
+    if: needs.discover.outputs.has_tasks == 'true'
+    runs-on: ubuntu-latest
+    container: archlinux:base-devel
+    strategy:
+      # 一个内核失败不影响其他内核；两个都失败才让这一项本轮放弃（P-15）。
+      fail-fast: false
+      max-parallel: 4
+      matrix: ${{ fromJSON(needs.discover.outputs.matrix) }}
+    env:
+      CHANNEL: ${{ matrix.channel }}
+      CORE_REPO: ${{ matrix.core_repo }}
+      EXTRA_REPO: ${{ matrix.extra_repo }}
+      HEADER_NAME: ${{ matrix.name }}
+      HEADER_VERSION: ${{ matrix.version }}
+      HEADER_FILENAME: ${{ matrix.filename }}
+      EXPECTED_RELEASE: ${{ matrix.release }}
+      REASON: ${{ matrix.reason }}
+      PATCH_FINGERPRINT: ${{ needs.discover.outputs.patch_fingerprint }}
+    steps:
+      # 容器只为拿到 bsdtar（解包）、kmod（modinfo）与 python（本仓库脚本）；
+      # 编译用的 gcc/binutils/make/pahole 一律取自 SteamOS 频道仓库（P-11）。
+      - name: Prepare the container
+        run: |
+          pacman-key --init
+          pacman-key --populate archlinux
+          pacman -Syu --noconfirm --needed git python kmod libarchive zstd xz
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.repository.default_branch }}
+          fetch-depth: 1
+      - name: Build the module
+        run: |
+          set -euo pipefail
+          TC="$RUNNER_TEMP/toolchain"
+          # 脚本输出的是 `export TOOLCHAIN_*=` 行，eval 之后本步骤的 meta.json 直接读得到。
+          eval "$(python3 scripts/steamos_toolchain.py --into "$TC" \
+            --packages gcc,binutils,make,pahole \
+            --repo "$CORE_REPO" --repo "$EXTRA_REPO" \
+            --exclude glibc)"
+
+          # 头文件包按矩阵行取回并解出（fetch-header 会先在 .db 里复核版本）。
+          KROOT="$RUNNER_TEMP/kernel"
+          mkdir -p "$KROOT" "$RUNNER_TEMP/pkgs"
+          python3 scripts/kmod_plan.py fetch-header \
+            --channel "$CHANNEL" --name "$HEADER_NAME" \
+            --version "$HEADER_VERSION" --filename "$HEADER_FILENAME" \
+            --into "$RUNNER_TEMP/pkgs" --extract "$KROOT"
+          krel_file=$(ls "$KROOT"/lib/modules/*/build/include/config/kernel.release)
+          KDIR=$(dirname "$(dirname "$(dirname "$krel_file")")")
+
+          # 头文件树自证（P-14）：树报告的 release 与 discover 记的必须一致。
+          release=$(python3 scripts/kmod_plan.py tree-release \
+            --makefile "$KDIR/Makefile" --kernel-release "$krel_file")
+          if [ -n "$EXPECTED_RELEASE" ] && [ "$EXPECTED_RELEASE" != "$release" ]; then
+            echo "::error::头文件树报告 $release，discover 记录 $EXPECTED_RELEASE"
+            exit 1
+          fi
+          # 写入 $GITHUB_ENV 只对后续步骤生效，而 meta.json 就在本步骤里生成，
+          # 所以这里直接导出给同一步的 python 子进程。
+          export RELEASE="$release"
+
+          # 驱动源码按本行内核的基数版本现取（`<版本>.valve*` → 上游稳定标签），
+          # 再打 kmod/ 里的补丁。取回的文件写进同一个目录，Makefile 也在那里；
+          # 每次 attempt 都重新下载覆盖，重试不会撞上"补丁已应用"。
+          # 同一轮失败重试一次，仍失败则本轮放弃（P-15）。
+          SRC="$GITHUB_WORKSPACE/kmod"
+          MODULE="$SRC/hid_playstation_ds5dummy.ko"
+          attempt() {
+            python3 scripts/kernel_source.py --version "$HEADER_VERSION" \
+              --patch "$SRC/ds5dummy.patch" --into "$SRC"
+            make -C "$KDIR" M="$SRC" modules
+            modinfo "$MODULE" > "$RUNNER_TEMP/modinfo.txt"
+            python3 scripts/kmod_plan.py verify --module "$MODULE" \
+              --release "$release" --modinfo "$RUNNER_TEMP/modinfo.txt"
+          }
+          if ! attempt; then
+            echo "第一次构建失败，清理后重试一次"
+            make -C "$KDIR" M="$SRC" clean || true
+            attempt
+          fi
+
+          # 产物改名成查找键；元数据随产物一起交给 publish（P-16、P-27）。
+          OUT="$RUNNER_TEMP/out"
+          mkdir -p "$OUT"
+          cp "$MODULE" "$OUT/$release.ko"
+          python3 - "$OUT/meta.json" <<'PY'
+          import json, os, sys, time
+
+          meta = {
+              "channel": os.environ["CHANNEL"],
+              "name": os.environ["HEADER_NAME"],
+              "version": os.environ["HEADER_VERSION"],
+              "filename": os.environ["HEADER_FILENAME"],
+              "release": os.environ["RELEASE"],
+              "reason": os.environ["REASON"],
+              "patch_fingerprint": os.environ["PATCH_FINGERPRINT"],
+              "gcc": os.environ.get("TOOLCHAIN_GCC_VERSION", ""),
+              "pahole": os.environ.get("TOOLCHAIN_PAHOLE_VERSION", ""),
+              "built_at": time.strftime("%Y-%m-%dT%H:%MZ", time.gmtime()),
+          }
+          with open(sys.argv[1], "w", encoding="utf-8") as handle:
+              json.dump(meta, handle, ensure_ascii=False, indent=2)
+              handle.write("\n")
+          PY
+      - uses: actions/upload-artifact@v4
+        with:
+          name: kmod-${{ matrix.channel }}-${{ matrix.name }}
+          path: ${{ runner.temp }}/out
+          if-no-files-found: error
+
+  publish:
+    # 有矩阵就要跑：build 部分失败时仍发布成功的那几项（P-15、A-02）。
+    needs: [discover, build]
+    if: always() && needs.discover.outputs.has_tasks == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.repository.default_branch }}
+          fetch-depth: 1
+      - uses: actions/download-artifact@v4
+        # 全部构建都失败时没有产物可下载；这不是 publish 自己的错误。
+        continue-on-error: true
+        with:
+          pattern: kmod-*
+          path: assets
+      - name: Upload the successful modules
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          metas=(assets/*/meta.json)
+          if [ ${#metas[@]} -eq 0 ]; then
+            echo "本轮没有成功产物，跳过发布"
+            exit 0
+          fi
+          tmp="$RUNNER_TEMP/publish"
+          mkdir -p "$tmp"
+          # 按频道分组：每个频道的固定 Release 只建一次，说明的正文是这份文档，
+          # 构建记录追加在末尾。
+          mapfile -t channels < <(
+            for meta in "${metas[@]}"; do jq -r .channel "$meta"; done | sort -u
+          )
+          for channel in "${channels[@]}"; do
+            if ! gh release view "$channel" >/dev/null 2>&1; then
+              gh release create "$channel" \
+                --title "SteamOS kernel modules · $channel" \
+                --latest=false --notes-file docs/releases/kmod/README.md
+            fi
+            declare -A seen=()
+            : > "$tmp/$channel.md"
+            for meta in "${metas[@]}"; do
+              [ "$(jq -r .channel "$meta")" = "$channel" ] || continue
+              ko=$(ls "$(dirname "$meta")"/*.ko)
+              name=$(basename "$ko")
+              # 同一频道里两个头文件包解出同一个内核 release（同一内核的不同变体包）
+              # 时资产名相同，而 Release 拒绝同名上传：只传第一份，两份都照常记录。
+              if [ -n "${seen[$name]:-}" ]; then
+                echo "跳过重复的 $channel/$name"
+                continue
+              fi
+              seen[$name]=1
+              # 定时轮次只追加；同名资产已存在说明矩阵算错了，宁可失败也不覆盖。
+              clobber=()
+              if [ "$(jq -r .reason "$meta")" = "rebuild" ]; then
+                clobber=(--clobber)
+              fi
+              gh release upload "$channel" "$ko" "${clobber[@]}"
+              python3 scripts/kmod_plan.py noteline --meta "$meta" >> "$tmp/$channel.md"
+              echo "已发布 $channel/$name"
+            done
+            body=$(gh release view "$channel" --json body --jq .body)
+            {
+              if [ -n "$body" ]; then printf '%s\n' "$body"; fi
+              cat "$tmp/$channel.md"
+            } > "$tmp/notes-$channel.md"
+            gh release edit "$channel" --notes-file "$tmp/notes-$channel.md"
+          done
+      - name: Record the round
+        env:
+          PATCH_FINGERPRINT: ${{ needs.discover.outputs.patch_fingerprint }}
+        run: |
+          set -euo pipefail
+          mkdir -p cache
+          python3 scripts/kmod_plan.py record \
+            --seen cache/seen.json \
+            --metas assets \
+            --patch-fingerprint "$PATCH_FINGERPRINT" \
+            --output cache/seen.json
+      - uses: actions/cache/save@v4
+        with:
+          path: cache/seen.json
+          key: kmod-seen-v1-${{ github.run_id }}-${{ github.run_attempt }}

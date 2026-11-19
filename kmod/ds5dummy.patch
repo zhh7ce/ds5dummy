@@ -1,0 +1,111 @@
+--- a/hid-playstation.c
++++ b/hid-playstation.c
+@@ -21,6 +21,36 @@
+ 
+ #include "hid-ids.h"
+ 
++/*
++ * DS5Dummy extension: Bluetooth DualSense / DualSense Edge controllers are
++ * exposed as pure hidraw devices with a synthetic vendor/product. DualShock 4
++ * and every USB-attached device keep the stock driver behavior.
++ */
++static bool bt_hidraw_only = true;
++module_param(bt_hidraw_only, bool, 0644);
++MODULE_PARM_DESC(bt_hidraw_only,
++"Expose Bluetooth DualSense controllers as hidraw-only devices");
++
++static unsigned int bt_fake_vendor = 0x1998;
++module_param(bt_fake_vendor, uint, 0644);
++MODULE_PARM_DESC(bt_fake_vendor,
++"Synthetic HID vendor ID for Bluetooth DualSense controllers");
++
++static unsigned int bt_fake_product = 0x1221;
++module_param(bt_fake_product, uint, 0644);
++MODULE_PARM_DESC(bt_fake_product,
++"Synthetic HID product ID for Bluetooth DualSense controllers");
++
++static unsigned int bt_fake_product_edge = 0x1103;
++module_param(bt_fake_product_edge, uint, 0644);
++MODULE_PARM_DESC(bt_fake_product_edge,
++"Synthetic HID product ID for DualSense Edge controllers");
++
++/* Kernels before 6.3 do not know the DualSense Edge product id. */
++#ifndef USB_DEVICE_ID_SONY_PS5_CONTROLLER_2
++#define USB_DEVICE_ID_SONY_PS5_CONTROLLER_2 0x0df2
++#endif
++
+ /* List of connected playstation devices. */
+ static DEFINE_MUTEX(ps_devices_lock);
+ static LIST_HEAD(ps_devices_list);
+@@ -2875,20 +2905,42 @@
+ static int ps_probe(struct hid_device *hdev, const struct hid_device_id *id)
+ {
+ 	struct ps_device *dev;
++	bool hidraw_only;
+ 	int ret;
+ 
++	/*
++	 * DS5Dummy: Bluetooth DualSense / Edge pads stay hidraw-only with a
++	 * synthetic identity so userspace sees a plain HID endpoint; DualShock 4
++	 * and every USB-attached device keep the stock driver behavior.
++	 */
++	hidraw_only = hdev->bus == BUS_BLUETOOTH && bt_hidraw_only &&
++		      (hdev->product == USB_DEVICE_ID_SONY_PS5_CONTROLLER ||
++		       hdev->product == USB_DEVICE_ID_SONY_PS5_CONTROLLER_2);
++
+ 	ret = hid_parse(hdev);
+ 	if (ret) {
+ 		hid_err(hdev, "Parse failed\n");
+ 		return ret;
+ 	}
+ 
++	if (hidraw_only) {
++		hdev->product = hdev->product == USB_DEVICE_ID_SONY_PS5_CONTROLLER_2
++					? bt_fake_product_edge
++					: bt_fake_product;
++		hdev->vendor = bt_fake_vendor;
++		hid_info(hdev, "DS5Dummy: Bluetooth pad exposed as hidraw-only (%04x:%04x)\n",
++			 hdev->vendor, hdev->product);
++	}
++
+ 	ret = hid_hw_start(hdev, HID_CONNECT_HIDRAW);
+ 	if (ret) {
+ 		hid_err(hdev, "Failed to start HID device\n");
+ 		return ret;
+ 	}
+ 
++	if (hidraw_only)
++		return 0;
++
+ 	ret = hid_hw_open(hdev);
+ 	if (ret) {
+ 		hid_err(hdev, "Failed to open HID device\n");
+@@ -2924,6 +2976,12 @@
+ {
+ 	struct ps_device *dev = hid_get_drvdata(hdev);
+ 
++	if (!dev) {
++		/* hidraw-only pads never allocate a ps_device. */
++		hid_hw_stop(hdev);
++		return;
++	}
++
+ 	ps_devices_list_remove(dev);
+ 	ps_device_release_player_id(dev);
+ 
+@@ -2961,7 +3019,7 @@
+ MODULE_DEVICE_TABLE(hid, ps_devices);
+ 
+ static struct hid_driver ps_driver = {
+-	.name		= "playstation",
++	.name		= "playstation-ds5dummy",
+ 	.id_table	= ps_devices,
+ 	.probe		= ps_probe,
+ 	.remove		= ps_remove,
+@@ -2986,5 +3044,5 @@
+ module_exit(ps_exit);
+ 
+ MODULE_AUTHOR("Sony Interactive Entertainment");
+-MODULE_DESCRIPTION("HID Driver for PlayStation peripherals.");
++MODULE_DESCRIPTION("DS5Dummy HID driver for PlayStation peripherals (Bluetooth hidraw-only fork).");
+ MODULE_LICENSE("GPL");
