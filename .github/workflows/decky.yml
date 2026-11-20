@@ -1,0 +1,119 @@
+# 把应用 release 的预编译包打成 Decky 插件 ZIP，附在同一次 release 上（C-03、T-02）。
+#
+# 触发：`release` workflow 成功结束之后（workflow_run），或手动指定一个 `v*` tag。
+# 只处理应用 release：驱动（`driver.*`）与内核模块的频道 Release（`jupiter-*`）不归这里管（G-02）。
+#
+# 现有的 `release.yml` 一行不动（G-01）：它已经把固定名资产
+# `ds5dummy_bin.pkg.tar.zst` 上传到该 release，这里只做"下载 → 打包 → 附上去"。
+# 包的形状由 `decky/pack.py` 决定（解包、铺目录、构建前端、压 ZIP）。
+#
+# 幂等：ZIP 已经挂在 release 上就直接结束。GitHub 的 release 可以是不可变的
+# （发布后资产冻结），重复上传会失败，所以先查再传，不用 --clobber。
+name: decky
+
+on:
+  workflow_run:
+    workflows: ["release"]
+    types: [completed]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 要打包的应用 release tag（v*）
+        required: true
+        type: string
+
+permissions:
+  contents: write
+
+env:
+  BIN_ASSET: ds5dummy_bin.pkg.tar.zst
+  ZIP_ASSET: ds5dummy_decky.zip
+
+# 同一个 tag 只跑一份：两个 workflow_run（例如重跑）同时上传会互相踩。
+concurrency:
+  group: decky-${{ github.event.workflow_run.head_branch || inputs.tag }}
+  cancel-in-progress: false
+
+jobs:
+  package:
+    runs-on: ubuntu-latest
+    if: >
+      github.event_name == 'workflow_dispatch' ||
+      (github.event.workflow_run.conclusion == 'success' &&
+       startsWith(github.event.workflow_run.head_branch, 'v'))
+    steps:
+      - name: Resolve the tag
+        id: tag
+        env:
+          EVENT_TAG: ${{ github.event.workflow_run.head_branch }}
+          INPUT_TAG: ${{ inputs.tag }}
+        run: |
+          set -euo pipefail
+          # workflow_run 的 head_branch 就是触发它的 tag；手动触发则用输入值。
+          # `driver.v*` 以 `driver.` 开头，天然被下面的 `v*` 判定挡掉。
+          tag="${EVENT_TAG:-$INPUT_TAG}"
+          # 只放行 v 加版本号字符：tag 会进 shell 命令与 checkout ref，git 允许 `;`
+          # 这类字符出现在 ref 里，不做白名单就是一条命令注入的路。字符集与
+          # pack.py 的版本校验一致。
+          if [[ ! $tag =~ ^v[0-9A-Za-z][0-9A-Za-z._+-]*$ ]]; then
+            echo "::error::不是应用 release 的 tag：'$tag'"
+            exit 1
+          fi
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+
+      # 取该 tag 的源码：插件源码、`decky/pack.py` 与 `package-lock.json` 必须与
+      # 这次 release 同版（C-03）。
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ steps.tag.outputs.tag }}
+          fetch-depth: 1
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: decky/package-lock.json
+
+      # pack.py 用 bsdtar 读 zstd 压缩的 pacman 包（Python 的 tarfile 在 3.12 上不认）。
+      - name: Install bsdtar
+        run: sudo apt-get update && sudo apt-get install -y libarchive-tools
+
+      - name: Download the prebuilt package
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.tag.outputs.tag }}
+        run: |
+          mkdir -p build/asset
+          gh release download "$TAG" --pattern "$BIN_ASSET" --dir build/asset
+
+      - name: Check whether the ZIP is already attached
+        id: existing
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.tag.outputs.tag }}
+        run: |
+          set -euo pipefail
+          if gh release view "$TAG" --json assets --jq '.assets[].name' \
+             | grep -qx "$ZIP_ASSET"; then
+            echo "already=true" >> "$GITHUB_OUTPUT"
+            echo "release 上已经有 $ZIP_ASSET，跳过打包"
+          else
+            echo "already=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Pack
+        if: steps.existing.outputs.already == 'false'
+        env:
+          TAG: ${{ steps.tag.outputs.tag }}
+        run: |
+          python3 decky/pack.py \
+            --pkg "build/asset/$BIN_ASSET" \
+            --version "$TAG" \
+            --out "build/decky/$ZIP_ASSET"
+
+      - name: Attach the ZIP to the release
+        if: steps.existing.outputs.already == 'false'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.tag.outputs.tag }}
+        run: gh release upload "$TAG" "build/decky/$ZIP_ASSET"
