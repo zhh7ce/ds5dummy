@@ -52,7 +52,7 @@ Entertainment / DualSense Wireless Controller"，DualSense Edge 是 `054c:0df2`
 | `pkg/ds5dummy_bin` | 预编译包：打包时用便携参数编出 dist 二进制，按 Arch 目录铺开（`/usr/lib/ds5dummy/{bin,lib,plugins}` + `/usr/bin` 符号链接 + 单元/模块配置/`/etc` 配置），供装不了工具链的机器装（SteamOS） |
 | `pkg/ds5dummy-config` | 独立的配置工具包：`ds5dummy-config` 入口、`buttons_web.py` + `buttons_web.html`、core 面板与 `buttons_check`；构建只编校验器，不依赖数据面的库 |
 | `pkg/hid-playstation-ds5dummy/` | 内核 `hid-playstation` 的 DKMS 补丁（hidraw 后端用），只接管蓝牙 DualSense/Edge，合成 VID/PID（`1998:1221`/`1998:1103`）；DualShock 4 与所有 USB 设备走原驱动路径。PKGBUILD 只依赖 `dkms`，头文件由用户按内核自装 |
-| `scripts/` | `setup.sh`/`teardown.sh`（整站准备/清理；teardown 扫 `ds5dummy*` 整族并卸载每个 `ffs-ds5*` 挂载）、`setup-dummy-hcd.sh`/`teardown-dummy-hcd.sh`（只喂 `tools/mini_gadget` 的最小版）、`install.sh`（可重定位分发 `dist` 的安装脚本：整棵树复制到家目录前缀、单元指向该前缀）、`verify.sh`（双后端 + ASan 的发布前验证）；发布侧的 `steamos_repo.py`、`steamos_toolchain.py`、`kernel_source.py`、`kmod_plan.py` 与它们的 `tests/` 见 §17 |
+| `scripts/` | `setup.sh`/`teardown.sh`（整站准备/清理；teardown 先停掉并禁用 `ds5dummy.service`，再扫 `ds5dummy*` 整族并卸载每个 `ffs-ds5*` 挂载）、`setup-dummy-hcd.sh`/`teardown-dummy-hcd.sh`（只喂 `tools/mini_gadget` 的最小版）、`install.sh`（可重定位分发 `dist` 的安装脚本：整棵树复制到家目录前缀、单元指向该前缀）、`verify.sh`（双后端 + ASan 的发布前验证）；发布侧的 `steamos_repo.py`、`steamos_toolchain.py`、`kernel_source.py`、`kmod_plan.py` 与它们的 `tests/` 见 §17 |
 | `.github/workflows/` | `release.yml`（推 tag 建两个 Arch 包并发布）、`kmod.yml`（按内核编模块，每个频道一个固定 Release，见 §17） |
 | `docs/releases/kmod/` | 频道 Release 的说明模板（§17） |
 | `third_party/` | loguru（vendored，不改注释不格式化） |
@@ -1069,5 +1069,7 @@ sudo ./build/ds5dummyd             # 或自备等价的 systemd 单元
 
 ### 卸载
 
-`sudo ./scripts/teardown.sh` 拆掉所有 `ds5dummy-*` 虚拟设备、卸掉各自的 FunctionFS 挂载，
-再清掉内核模块；Arch 包用 `pacman -R` 卸载（hidraw 后端连同 DKMS 包一起卸）。
+`sudo ./scripts/teardown.sh` 先停掉并禁用 `ds5dummy.service`，再拆掉所有 `ds5dummy-*`
+虚拟设备、卸掉各自的 FunctionFS 挂载，最后清掉内核模块；Arch 包用 `pacman -R` 卸载
+（hidraw 后端连同 DKMS 包一起卸），安装钩子在 `pre_remove` 里停服务并禁用（`post_remove`
+跑的时候单元文件已经删了）。

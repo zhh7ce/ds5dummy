@@ -60,6 +60,14 @@ post_upgrade() {
     post_install
 }
 
+pre_remove() {
+    # Stop and disable before pacman deletes the unit file: post_remove runs
+    # after it is gone, when disable has no unit to read.
+    if command -v systemctl >/dev/null 2>&1; then
+        systemctl disable --now ds5dummy.service 2>/dev/null || true
+    fi
+}
+
 post_remove() {
     # Do not force-unload shared kernel modules here; other HID/Bluetooth
     # devices may still be using them.

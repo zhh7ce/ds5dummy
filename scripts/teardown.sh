@@ -1,7 +1,7 @@
 #!/bin/bash
 # DS5Dummy — Teardown script
-# Removes every DS5Dummy USB gadget, unmounts each per-controller FunctionFS
-# mount, and unloads dummy_hcd.
+# Stops and disables ds5dummy.service, removes every DS5Dummy USB gadget,
+# unmounts each per-controller FunctionFS mount, and unloads dummy_hcd.
 #
 # Usage: sudo ./teardown.sh
 #
@@ -17,6 +17,13 @@ log() { echo "[teardown] $*"; }
 if [ "$(id -u)" -ne 0 ]; then
     echo "[teardown] ERROR: Must be run as root (sudo)." >&2
     exit 1
+fi
+
+# --- Stop the service first ---
+# A running Manager would rebuild every station we remove below.
+if command -v systemctl >/dev/null 2>&1; then
+    log "Stopping and disabling ds5dummy.service..."
+    systemctl disable --now ds5dummy.service >/dev/null 2>&1 || true
 fi
 
 # --- Remove every gadget (if DS5Dummy didn't clean up) ---

@@ -64,6 +64,14 @@ post_upgrade() {
     post_install
 }
 
+pre_remove() {
+    # 在 pacman 删掉单元文件之前停掉并禁用：post_remove 跑的时候文件已经没了，
+    # disable 找不到单元，还在跑的 Manager 会带着已删除的文件继续待着。
+    if command -v systemctl >/dev/null 2>&1; then
+        systemctl disable --now ds5dummy.service 2>/dev/null || true
+    fi
+}
+
 post_remove() {
     # Do not force-unload shared kernel modules here; other HID/Bluetooth
     # devices may still be using them.
