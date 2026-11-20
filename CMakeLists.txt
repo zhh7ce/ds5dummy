@@ -152,6 +152,54 @@ set(DS5DUMMY_MODULE_INCLUDE_DIRS
 )
 
 # ---------------------------------------------------------------------------
+# 便携构建（DS5DUMMY_PORTABLE）：产物要能在构建机之外的发行版上跑
+#   1. fmt 走头文件模式：唯一的 fmt 符号来自 loguru，动态 libfmt.so.12 在
+#      SteamOS 那类系统上没有。
+#   2. libstdc++ 静态链进二进制：代码里用了 std::format，动态 libstdc++ 会把
+#      GLIBCXX_3.4.35 写进版本需求，而 SteamOS 只有 3.4.34。只静态这一份，
+#      libgcc_s.so.1 仍动态（各发行版都带）。
+#   3. RPATH 用 $ORIGIN/../lib：yaml-cpp 按 SONAME 随包放在前缀的 lib/ 里，
+#      它的版本号各发行版不同（Arch 是 .so.0.9，SteamOS 是 .so.0.8），
+#      DT_RUNPATH 不传给被依赖库，所以只影响我们这一层。
+# glibc、PipeWire、systemd、BlueZ 保持动态：它们要么是系统 ABI，要么背后有
+# SPA 插件/守护进程/logind 这类必须与宿主同一份的状态。
+# 两个可执行目标共用这套开关：ds5dummyd 吃到第 1–3 条，buttons_check 只吃
+# 第 2–3 条（配置工具包里它是唯一编出来的二进制）。
+# ---------------------------------------------------------------------------
+option(DS5DUMMY_PORTABLE "Build a redistributable binary (bundled yaml-cpp, static libstdc++)" OFF)
+
+# 只作用于可执行目标：静态 libstdc++，RPATH 指向前缀的 lib/。
+function(ds5dummy_make_portable target)
+    target_link_options(${target} PRIVATE -static-libstdc++)
+    set_target_properties(${target} PROPERTIES INSTALL_RPATH "$ORIGIN/../lib")
+endfunction()
+
+# 取构建机上那份 yaml-cpp 的真实文件与 SONAME。DT_NEEDED 写的是 SONAME，
+# 随包时存成别的名字加载器找不到，所以两个随包点都拿这一对数。
+function(ds5dummy_resolve_yamlcpp)
+    find_library(YAMLCPP_RUNTIME_LINK NAMES yaml-cpp
+        HINTS ${YAMLCPP_LIBRARY_DIRS} NO_DEFAULT_PATH)
+    if(NOT YAMLCPP_RUNTIME_LINK)
+        message(FATAL_ERROR
+            "DS5DUMMY_PORTABLE: yaml-cpp runtime library not found in ${YAMLCPP_LIBRARY_DIRS}")
+    endif()
+    get_filename_component(_file "${YAMLCPP_RUNTIME_LINK}" REALPATH)
+    find_program(READELF_EXECUTABLE NAMES readelf)
+    if(NOT READELF_EXECUTABLE)
+        message(FATAL_ERROR
+            "DS5DUMMY_PORTABLE: readelf (binutils) is required to read the yaml-cpp SONAME")
+    endif()
+    execute_process(COMMAND ${READELF_EXECUTABLE} -d "${_file}"
+        OUTPUT_VARIABLE _dynamic OUTPUT_STRIP_TRAILING_WHITESPACE)
+    string(REGEX MATCH "SONAME[^[]*\\[([^]]+)\\]" _matched "${_dynamic}")
+    if(NOT CMAKE_MATCH_1)
+        message(FATAL_ERROR "DS5DUMMY_PORTABLE: ${_file} has no SONAME")
+    endif()
+    set(YAMLCPP_RUNTIME_FILE "${_file}" PARENT_SCOPE)
+    set(YAMLCPP_SONAME "${CMAKE_MATCH_1}" PARENT_SCOPE)
+endfunction()
+
+# ---------------------------------------------------------------------------
 # 配置校验器（buttons_check）：只读一份用户配置，用 buttons 插件自己的语法层
 # 解析它那一节。不装载 .so、不需要 root/手柄/PipeWire。
 # ---------------------------------------------------------------------------
@@ -166,7 +214,7 @@ function(ds5dummy_add_buttons_check)
 endfunction()
 
 # ---------------------------------------------------------------------------
-# 只编配置校验器（打包用）：ds5dummy-config 是独立于转发程序的包，页面与校验器
+# 只编配置校验器（打包用）：ds5dummy-config-bin 是独立于转发程序的包，页面与校验器
 # 不需要 PipeWire/Opus/BlueZ 这些只为数据面存在的依赖。打开后只产出
 # buttons_check，其余目标都不注册。
 # ---------------------------------------------------------------------------
@@ -175,6 +223,26 @@ if(DS5DUMMY_CONFIG_ONLY)
     find_package(PkgConfig REQUIRED)
     pkg_check_modules(YAMLCPP REQUIRED IMPORTED_TARGET yaml-cpp)
     ds5dummy_add_buttons_check()
+    if(DS5DUMMY_PORTABLE)
+        # 打包脚本直接从构建树里取这个二进制（不走 cmake --install），RPATH
+        # 只能在链接时就写进去。
+        ds5dummy_make_portable(buttons_check)
+        set_target_properties(buttons_check PROPERTIES BUILD_WITH_INSTALL_RPATH ON)
+        # 随包的 .so 按 SONAME 落在构建树的 config-lib/，由包原样装进前缀的
+        # lib/；许可文本同目录，随包分发 yaml-cpp 时一起带上。
+        ds5dummy_resolve_yamlcpp()
+        file(MAKE_DIRECTORY "${CMAKE_BINARY_DIR}/config-lib")
+        configure_file("${YAMLCPP_RUNTIME_FILE}"
+            "${CMAKE_BINARY_DIR}/config-lib/${YAMLCPP_SONAME}" COPYONLY)
+        find_file(YAMLCPP_LICENSE_FILE NAMES LICENSE COPYING
+            PATHS /usr/share/licenses/yaml-cpp /usr/share/doc/yaml-cpp NO_DEFAULT_PATH)
+        if(YAMLCPP_LICENSE_FILE)
+            configure_file("${YAMLCPP_LICENSE_FILE}"
+                "${CMAKE_BINARY_DIR}/config-lib/yaml-cpp-LICENSE" COPYONLY)
+        else()
+            message(WARNING "yaml-cpp license text not found; ship it alongside the package")
+        endif()
+    endif()
     return()
 endif()
 
@@ -201,24 +269,11 @@ else()
     set(DS5DUMMY_PKG_DIR "${CMAKE_SOURCE_DIR}/pkg/ds5dummy-hidraw")
 endif()
 
-# ---------------------------------------------------------------------------
-# 便携构建（DS5DUMMY_PORTABLE）：产物要能在构建机之外的发行版上跑
-#   1. fmt 走头文件模式：唯一的 fmt 符号来自 loguru，动态 libfmt.so.12 在
-#      SteamOS 那类系统上没有。
-#   2. libstdc++ 静态链进二进制：代码里用了 std::format，动态 libstdc++ 会把
-#      GLIBCXX_3.4.35 写进版本需求，而 SteamOS 只有 3.4.34。只静态这一份，
-#      libgcc_s.so.1 仍动态（各发行版都带）。
-#   3. RPATH 用 $ORIGIN/../lib：yaml-cpp 按 SONAME 随包放在前缀的 lib/ 里，
-#      它的版本号各发行版不同（Arch 是 .so.0.9，SteamOS 是 .so.0.8），
-#      DT_RUNPATH 不传给被依赖库，所以只影响我们这一层。
-# glibc、PipeWire、systemd、BlueZ 保持动态：它们要么是系统 ABI，要么背后有
-# SPA 插件/守护进程/logind 这类必须与宿主同一份的状态。
-# ---------------------------------------------------------------------------
-option(DS5DUMMY_PORTABLE "Build a redistributable binary (bundled yaml-cpp, static libstdc++)" OFF)
+# fmt 只留在非便携构建里：便携构建在目标上打开 FMT_HEADER_ONLY（见文件前部的
+# 便携构建说明）。
 if(DS5DUMMY_PORTABLE)
     target_compile_definitions(ds5dummyd PRIVATE FMT_HEADER_ONLY=1)
-    target_link_options(ds5dummyd PRIVATE -static-libstdc++)
-    set_target_properties(ds5dummyd PROPERTIES INSTALL_RPATH "$ORIGIN/../lib")
+    ds5dummy_make_portable(ds5dummyd)
 else()
     target_link_libraries(ds5dummyd PRIVATE fmt)
 endif()
@@ -368,25 +423,7 @@ install(PROGRAMS scripts/install.sh DESTINATION /)
 if(DS5DUMMY_PORTABLE)
     # yaml-cpp 的 .so 按它自己的 SONAME 命名：DT_NEEDED 用的是 SONAME，
     # 存成 libyaml-cpp.so 或带完整版本的别名，加载器都找不到。
-    find_library(YAMLCPP_RUNTIME_LINK NAMES yaml-cpp
-        HINTS ${YAMLCPP_LIBRARY_DIRS} NO_DEFAULT_PATH)
-    if(NOT YAMLCPP_RUNTIME_LINK)
-        message(FATAL_ERROR
-            "DS5DUMMY_PORTABLE: yaml-cpp runtime library not found in ${YAMLCPP_LIBRARY_DIRS}")
-    endif()
-    get_filename_component(YAMLCPP_RUNTIME_FILE "${YAMLCPP_RUNTIME_LINK}" REALPATH)
-    find_program(READELF_EXECUTABLE NAMES readelf)
-    if(NOT READELF_EXECUTABLE)
-        message(FATAL_ERROR
-            "DS5DUMMY_PORTABLE: readelf (binutils) is required to read the yaml-cpp SONAME")
-    endif()
-    execute_process(COMMAND ${READELF_EXECUTABLE} -d "${YAMLCPP_RUNTIME_FILE}"
-        OUTPUT_VARIABLE _ds5_yaml_dynamic OUTPUT_STRIP_TRAILING_WHITESPACE)
-    string(REGEX MATCH "SONAME[^[]*\\[([^]]+)\\]" _ds5_yaml_soname "${_ds5_yaml_dynamic}")
-    set(YAMLCPP_SONAME "${CMAKE_MATCH_1}")
-    if(NOT YAMLCPP_SONAME)
-        message(FATAL_ERROR "DS5DUMMY_PORTABLE: ${YAMLCPP_RUNTIME_FILE} has no SONAME")
-    endif()
+    ds5dummy_resolve_yamlcpp()
     install(FILES "${YAMLCPP_RUNTIME_FILE}" DESTINATION lib RENAME "${YAMLCPP_SONAME}")
 
     # 分发这份 .so 就得带上它的 MIT 许可证文本。发行版把文本放在 licenses/ 下；

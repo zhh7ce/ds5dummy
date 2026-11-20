@@ -51,9 +51,10 @@ Entertainment / DualSense Wireless Controller"，DualSense Edge 是 `054c:0df2`
 | `pkg/ds5dummy-hidraw`、`pkg/ds5dummy-l2cap` | 两个互斥的 Arch 包：systemd 单元、`/etc/ds5dummy/config.yaml`、`/usr/share/doc/ds5dummy/user-config.example.yaml`、modprobe/modules-load 配置、install 钩子，以及随包插件与它们的配置面板 |
 | `pkg/ds5dummy-bin` | 预编译包：打包时用便携参数编出 dist 二进制，按 Arch 目录铺开（`/usr/lib/ds5dummy/{bin,lib,plugins}` + `/usr/bin` 符号链接 + 单元/模块配置/`/etc` 配置），供装不了工具链的机器装（SteamOS） |
 | `pkg/ds5dummy-config` | 独立的配置工具包：`ds5dummy-config` 入口、`buttons_web.py` + `buttons_web.html`、core 面板与 `buttons_check`；构建只编校验器，不依赖数据面的库 |
+| `pkg/ds5dummy-config-bin` | 同一份页面的预编译包：便携参数编出 `buttons_check`，随包 yaml-cpp，整棵树装进自己的前缀 `/usr/lib/ds5dummy-config`（不与 `/usr/lib/ds5dummy` 交叉）；`provides=('ds5dummy-config')` |
 | `pkg/hid-playstation-ds5dummy/` | 内核 `hid-playstation` 的 DKMS 补丁（hidraw 后端用），只接管蓝牙 DualSense/Edge，合成 VID/PID（`1998:1221`/`1998:1103`）；DualShock 4 与所有 USB 设备走原驱动路径。PKGBUILD 只依赖 `dkms`，头文件由用户按内核自装 |
 | `scripts/` | `setup.sh`/`teardown.sh`（整站准备/清理；teardown 先停掉并禁用 `ds5dummy.service`，再扫 `ds5dummy*` 整族并卸载每个 `ffs-ds5*` 挂载）、`setup-dummy-hcd.sh`/`teardown-dummy-hcd.sh`（只喂 `tools/mini_gadget` 的最小版）、`install.sh`（可重定位分发 `dist` 的安装脚本：整棵树复制到家目录前缀、单元指向该前缀）、`verify.sh`（双后端 + ASan 的发布前验证）；发布侧的 `steamos_repo.py`、`steamos_toolchain.py`、`kernel_source.py`、`kmod_plan.py` 与它们的 `tests/` 见 §17 |
-| `.github/workflows/` | `release.yml`（推 tag 建两个 Arch 包并发布）、`kmod.yml`（按内核编模块，每个频道一个固定 Release，见 §17） |
+| `.github/workflows/` | `release.yml`（推 tag 建 Arch 包并发布：`v*` 发应用包与配置工具包、`driver.*` 发驱动包）、`kmod.yml`（按内核编模块，每个频道一个固定 Release，见 §17） |
 | `docs/releases/kmod/` | 频道 Release 的说明模板（§17） |
 | `third_party/` | loguru（vendored，不改注释不格式化） |
 
@@ -812,6 +813,17 @@ MODULE（`ds5dummy_plugin_probe`，不链接测试二进制），测试把它拷
 `-DDS5DUMMY_CONFIG_ONLY=ON`，CMake 只注册 `buttons_check` 后提前返回，不要求
 PipeWire/Opus/BlueZ 这些数据面依赖。它不硬依赖后端：两个后端是仓库外的本地文件包，
 pacman 解析不了 `ds5dummy` 虚包，所以只在 `optdepends` 里列出两个后端。
+
+`pkg/ds5dummy-config-bin` 是同一份页面的预编译包（与 `ds5dummy-bin` 同一条便携路线），
+整个页面装进它自己的前缀 `/usr/lib/ds5dummy-config`：页面脚本、`buttons_web.html`、
+`panels/core.js` 在根上，便携编出的 `buttons_check` 与随包的 `libyaml-cpp.so.*` 在
+`bin/`、`lib/` 两个兄弟目录，`/usr/bin/buttons_check` 是指向 `bin/` 的符号链接，
+RPATH `$ORIGIN/../lib` 因此仍指向前缀的 `lib/`；`/usr/bin/ds5dummy-config` 是共享入口
+脚本的副本，装包时把 exec 那一行改到本前缀。分开的理由是 pacman 不允许两个包拥有同一
+路径：`ds5dummy-bin` 也随包一份 yaml-cpp（`/usr/lib/ds5dummy/lib/libyaml-cpp.so.0.9`），
+两棵树不交叉才装得在一起。它 `provides=('ds5dummy-config')`（并与源码那份
+`conflicts`），所以后端包的 `optdepends` 只写不带后缀的名字，装哪一份都满足；`v*`
+release 上它以固定名 `ds5dummy-config-bin.pkg.tar.zst` 与应用包一起发布。
 
 **可重定位分发**（`cmake --build build --target dist`，产物
 `build/dist/ds5dummy-<version>-linux-<arch>.tar.gz`）是给"装不进系统目录"的场合用的
