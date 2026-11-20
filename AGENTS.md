@@ -992,3 +992,82 @@ HID 侧：
 同一个 Release 里撞车；取用方按频道依次查找，所有频道都 404 才是"这个内核没有产物"。
 这些 tag 永不标 Latest；`driver.v*` 是 DKMS 包的长期指针，两条线在版本号上也分开
 （`pkgver()` 只认 `v*`）。
+
+---
+
+## 18. 环境要求与安装（用户侧步骤）
+
+这一节把"在一台机器上把程序装起来"的完整步骤放在一处；[README.md](README.md) 只保留
+用户需要做的动作。包内文件清单、PKGBUILD 约定与 `pkgver()` 规则见 §14，构建变量见 §12，
+Deck 插件自己的安装说明在 `decky/README.md`。
+
+### 环境要求
+
+| 项目 | 要求 |
+|---|---|
+| 内核 | `dummy_hcd`（`CONFIG_USB_DUMMY_HCD=m`）、`libcomposite`、`usb_f_fs`、configfs |
+| 发行版 | PKGBUILD 按 Arch Linux x86_64 写；其它发行版需自己准备等价的内核模块与 systemd 单元 |
+| 蓝牙 | BlueZ 已运行，DualSense 已**配对、信任、绑定**，并且当前处于连接状态 |
+| 音频 | PipeWire（不需要额外配置；不用手柄出声可以在用户配置里关掉） |
+| 权限 | 启动需要 root：虚拟 USB 设备的创建是特权操作 |
+| 图形登录 | 必须在某个用户**图形登录之后**运行：降权身份来自 systemd-logind 枚举到的活跃图形会话；未登录时 Manager 以非零码退出并被 systemd 重拉 |
+
+### Arch 包安装
+
+两个后端包互斥，`makepkg -d` 的 `-d` 跳过依赖检查（PKGBUILD 里给的就是这条命令）：
+
+```bash
+cd pkg/ds5dummy_hidraw          # 或 pkg/ds5dummy_l2cap
+makepkg -d
+sudo pacman -U ds5dummy_*.pkg.tar.zst
+```
+
+hidraw 后端另装 DKMS 驱动补丁（不装的话 in-tree `hid-playstation` 会抢走蓝牙手柄）：
+
+```bash
+cd pkg/hid-playstation-ds5dummy
+makepkg -d
+sudo pacman -U hid-playstation-ds5dummy-dkms-*.pkg.tar.zst
+```
+
+DKMS 包只依赖 `dkms`、不写头文件依赖（§14）；装之前须自行装好当前内核对应的头文件
+（Arch 上是 `linux-headers`/`linux-zen-headers`，Deck 上是 `linux-neptune-*-headers`），
+缺了 dkms 会报 `Your kernel headers for kernel ... cannot be found`。
+
+可选的配置工具包不依赖后端，装不装都不影响转发：
+
+```bash
+cd pkg/ds5dummy-config
+makepkg -d
+sudo pacman -U ds5dummy-config-*.pkg.tar.zst
+```
+
+### 装完之后
+
+包里的文件见 §14。模块配置（`dummy_hcd` 的 `num`、hidraw 后端的 DKMS 模块清单）由
+`/etc/modules-load.d/` 与 `/etc/modprobe.d/` 下的配置生效，装完重启一次，或
+`sudo systemctl restart systemd-modules-load bluetooth`。
+
+`num` 默认 3（同时最多桥接 3 只手柄），要改就编辑 `/etc/modprobe.d/ds5dummy.conf` 的
+`num=`，再停服务、重载模块、启动：`sudo systemctl stop ds5dummy`、
+`sudo modprobe -r dummy_hcd && sudo modprobe dummy_hcd`、`sudo systemctl start ds5dummy`，
+或者直接重启。`num` 是加载参数，运行中改不了。
+
+### 源码构建安装
+
+```bash
+cmake -B build -DCMAKE_BUILD_TYPE=Release -DBT_BACKEND=HIDRAW
+cmake --build build
+sudo ./scripts/setup.sh            # 加载内核模块、确保 configfs 可用
+sudo ./build/ds5dummyd             # 或自备等价的 systemd 单元
+```
+
+`scripts/setup.sh` 只准备内核模块与 configfs（每站的 FunctionFS 挂载由程序自己在建站时
+做）；随包插件的构建产物 `build/idle.so`/`build/buttons.so` 要放进
+`/usr/lib/ds5dummy/plugins/` 或登录用户的 `~/.config/ds5dummy/plugins/` 才会被装载（§10）。
+`-DBT_BACKEND=L2CAP` 构建另一个后端，两者不能同时装。
+
+### 卸载
+
+`sudo ./scripts/teardown.sh` 拆掉所有 `ds5dummy-*` 虚拟设备、卸掉各自的 FunctionFS 挂载，
+再清掉内核模块；Arch 包用 `pacman -R` 卸载（hidraw 后端连同 DKMS 包一起卸）。
