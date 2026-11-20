@@ -15,11 +15,14 @@
 一份配置是否有效，最终由 `buttons_check` 调用的 daemon 解析器说了算，服务不
 另写一套取值规则。
 
-安全前提是它只监听 127.0.0.1：地址固定为 `http://127.0.0.1:8777/`，POST 校验
-Host/Origin 与 Content-Type。它不是多用户服务，同一时间只允许一个保存。
+缺省只监听 127.0.0.1（`http://127.0.0.1:8777/`），POST 校验 Host/Origin 与
+Content-Type。`--bind 0.0.0.0` 让局域网里的别的机器也能打开它，此时 Host 检查
+退化成同源判定；页面没有口令，而 `run:` 规则在服务运行的那台机器上就是执行
+shell 命令——暴露给谁就是授权给谁。它不是多用户服务，同一时间只允许一个保存。
 
-用法: python3 tools/buttons_web.py [--config PATH] [--port N] [--no-open]
-                                 [--check PATH] [--plugins-dir DIR]... [--verbose]
+用法: python3 tools/buttons_web.py [--config PATH] [--bind ADDR] [--port N]
+                                 [--no-open] [--check PATH] [--plugins-dir DIR]...
+                                 [--verbose]
 """
 
 from __future__ import annotations
@@ -130,6 +133,10 @@ DEFAULT_TAP_MS = 300
 DEFAULT_DOUBLE_MS = 300
 MACRO_PULSE_MS = 80
 
+#: `run:` 起头的一整段是命令行；上限与宿主的 kPluginCommandSize - 1 同值。
+RUN_PREFIX = "run:"
+MAX_COMMAND_BYTES = 511
+
 GROUP_LABELS = {
     "dpad": "十字键",
     "face": "面板键",
@@ -161,6 +168,8 @@ KEY_RE = re.compile(r"[A-Za-z0-9_.:-]{1,128}\Z")
 MAC_RE = re.compile(r"[0-9A-F]{2}(?::[0-9A-F]{2}){5}\Z")
 #: 页面地址固定在这个端口：页面就是本机的一个固定入口，不是一次性的链接。
 DEFAULT_PORT = 8777
+#: 绑到这些地址时接受任何 Host：主机名取决于访问方用哪个地址连进来，列不出来。
+WILDCARD_BINDS = {"0.0.0.0"}
 
 
 def catalog() -> dict:
@@ -192,6 +201,7 @@ def catalog() -> dict:
             "default_tap_ms": DEFAULT_TAP_MS,
             "default_double_ms": DEFAULT_DOUBLE_MS,
             "macro_pulse_ms": MACRO_PULSE_MS,
+            "command_bytes": MAX_COMMAND_BYTES,
         },
         "restart": "sudo systemctl restart ds5dummy",
     }
@@ -954,7 +964,15 @@ def _classify(path: list[str], value: str) -> dict:
             parsed = _parse_rule(value)
             if parsed is not None:
                 trigger, result = parsed
-                if group == "shortcut" and result == "power_off":
+                if group == "shortcut":
+                    if result == "power_off":
+                        action, command = "power_off", ""
+                    elif result.startswith(RUN_PREFIX):
+                        action, command = "run", result[len(RUN_PREFIX) :].strip()
+                        if len(command.encode("utf-8")) > MAX_COMMAND_BYTES:
+                            return {"kind": "other", "path": path, "value": value}
+                    else:
+                        return {"kind": "other", "path": path, "value": value}
                     return {
                         "kind": "shortcut",
                         "path": path,
@@ -962,6 +980,8 @@ def _classify(path: list[str], value: str) -> dict:
                         "terms": trigger["terms"],
                         "timing": trigger["timing"],
                         "ms": trigger["ms"],
+                        "action": action,
+                        "command": command,
                     }
                 if group == "macro":
                     targets = [piece.strip() for piece in result.split("+")]
@@ -1081,6 +1101,18 @@ def _need_terms(value, name: str, allowed: list[str]) -> list[str]:
     return terms
 
 
+def _need_command(value) -> str:
+    """取一条 `run:` 的命令行：可以是空串、无换行与 NUL、按 UTF-8 字节受限。"""
+    if not isinstance(value, str):
+        raise ModelError("命令不是文本")
+    command = value.strip()
+    if any(char in command for char in "\r\n\x00"):
+        raise ModelError("命令不能包含换行或 NUL")
+    if len(command.encode("utf-8")) > MAX_COMMAND_BYTES:
+        raise ModelError(f"命令超过 {MAX_COMMAND_BYTES} 字节")
+    return command
+
+
 def _need_timing(item: dict) -> tuple[str, int | None]:
     """取时序与阈值。"""
     timing = item.get("timing")
@@ -1136,6 +1168,12 @@ def _normalize_items(items) -> list[dict]:
             terms = _need_terms(item.get("terms"), "触发键", SOURCE_TOKENS)
             timing, ms = _need_timing(item)
             if kind == "shortcut":
+                action = item.get("action", "power_off")
+                if action not in ("power_off", "run"):
+                    raise ModelError("动作不是 power_off/run")
+                command = ""
+                if action == "run":
+                    command = _need_command(item.get("command"))
                 normalized.append(
                     {
                         "kind": "shortcut",
@@ -1144,6 +1182,8 @@ def _normalize_items(items) -> list[dict]:
                         "terms": terms,
                         "timing": timing,
                         "ms": ms,
+                        "action": action,
+                        "command": command,
                     }
                 )
             else:
@@ -1214,9 +1254,16 @@ def _item_leaf(item: dict) -> tuple[list[str], object]:
     if kind == "turbo":
         return ["turbo", item["src"]], item["hz"]
     if kind == "shortcut":
+        if item["action"] == "power_off":
+            result = "power_off"
+        elif item["command"]:
+            result = RUN_PREFIX + " " + item["command"]
+        else:
+            # 空命令写成裸 `run:`：别在文件里留一个会被 YAML 引号包住的尾随空格。
+            result = RUN_PREFIX
         return (
             ["shortcut", item["id"]],
-            _trigger_text(item["terms"], item["timing"], item["ms"]) + ": power_off",
+            _trigger_text(item["terms"], item["timing"], item["ms"]) + ": " + result,
         )
     if kind == "macro":
         return (
@@ -1963,10 +2010,17 @@ class Handler(BaseHTTPRequestHandler):
         return self.server.app
 
     def _allowed_hosts(self) -> set[str]:
+        """回环名 + 显式绑定的那个地址（只绑一个 IP 时它才是能到达的名字）。"""
         port = self.server.server_address[1]
-        return {f"127.0.0.1:{port}", f"localhost:{port}"}
+        hosts = {f"127.0.0.1:{port}", f"localhost:{port}"}
+        if self.server.bind_host not in WILDCARD_BINDS:
+            hosts.add(f"{self.server.bind_host}:{port}")
+        return hosts
 
     def _host_ok(self) -> bool:
+        """Host 缺省（非浏览器客户端）或落在白名单里；通配绑定接受任何 Host。"""
+        if self.server.bind_host in WILDCARD_BINDS:
+            return True
         host = self.headers.get("Host")
         return not host or host in self._allowed_hosts()
 
@@ -2074,9 +2128,7 @@ class Handler(BaseHTTPRequestHandler):
             self._error(403, "Host 不对")
             return
         origin = self.headers.get("Origin")
-        if origin and origin not in {
-            "http://" + host for host in self._allowed_hosts()
-        }:
+        if origin and origin != "http://" + (self.headers.get("Host") or ""):
             self._error(403, "Origin 不对")
             return
         content_type = self.headers.get("Content-Type", "")
@@ -2122,7 +2174,7 @@ class Handler(BaseHTTPRequestHandler):
 
 
 class Server(ThreadingHTTPServer):
-    """回环地址上的多线程服务；保存由 App.lock 串行化。"""
+    """指定地址上的多线程服务；保存由 App.lock 串行化。"""
 
     daemon_threads = True
     allow_reuse_address = True
@@ -2131,17 +2183,24 @@ class Server(ThreadingHTTPServer):
         super().__init__(address, handler)
         self.app = app
         self.verbose = verbose
+        self.bind_host = str(address[0])
 
 
 def main(argv: list[str] | None = None) -> int:
     """命令行入口：解析参数、开监听、打印地址、打开浏览器。"""
     parser = argparse.ArgumentParser(
-        description="DS5Dummy 用户配置的本地页面（只监听 127.0.0.1）"
+        description="DS5Dummy 用户配置的本地页面（缺省只监听 127.0.0.1）"
     )
     parser.add_argument(
         "--config",
         default=None,
         help="要编辑的用户配置（缺省 $XDG_CONFIG_HOME/ds5dummy/config.yaml）",
+    )
+    parser.add_argument(
+        "--bind",
+        default="127.0.0.1",
+        help="监听地址（缺省 127.0.0.1；传 0.0.0.0 局域网里的别的机器也能打开，"
+        "页面没有口令）",
     )
     parser.add_argument(
         "--port",
@@ -2186,18 +2245,24 @@ def main(argv: list[str] | None = None) -> int:
 
     app = App(config, checker, html, script_dir, plugin_dirs, args.verbose)
     try:
-        server = Server(("127.0.0.1", args.port), Handler, app, args.verbose)
+        server = Server((args.bind, args.port), Handler, app, args.verbose)
     except OSError as error:
-        print(f"buttons_web: 监听 127.0.0.1:{args.port} 失败：{error}", file=sys.stderr)
+        print(f"buttons_web: 监听 {args.bind}:{args.port} 失败：{error}", file=sys.stderr)
         return 1
 
     port = server.server_address[1]
-    url = f"http://127.0.0.1:{port}/"
+    host = "127.0.0.1" if args.bind in WILDCARD_BINDS else args.bind
+    url = f"http://{host}:{port}/"
     print(f"配置: {config}")
     if checker:
         print(f"校验器: {checker}")
     print("插件目录: " + " · ".join(str(item) for item in plugin_dirs))
     print(f"页面: {url}")
+    if args.bind in WILDCARD_BINDS:
+        print(
+            "注意: 监听所有地址，局域网里能连到这台机器的人都能改配置，"
+            "而 run: 规则就是执行命令——页面没有口令。"
+        )
     print("按 Ctrl-C 结束。", flush=True)
     if not args.no_open:
         threading.Thread(target=webbrowser.open, args=(url,), daemon=True).start()

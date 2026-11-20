@@ -129,20 +129,29 @@ bt_addr: auto
 #         swap_lstick_rstick: both   # both = the whole sticks, or x / y for one
 #         invert_rstick_x: true      # the rest point stays the rest point
 #         center_lstick: always      # always = also when nothing is pressed
-#       # Shortcut: "<trigger>: power_off". The keys left of the ':' are ANDed —
-#       # all of them must be held. A suffix at the end of the trigger sets the
-#       # timing: ~ = tap (fires on a quick release), *2 = double, >ms = long
-#       # press (fires ms after the press, no release needed; 50..10000). The
-#       # action runs on the worker's heartbeat, never on the frame that
-#       # recognised it, and one hit sends one report — press the keys again to
-#       # ask a second time. A touchpad form in the chord reads as "true right now":
-#       # touch_left while a finger sits in that half, swipe_up from the moment the
-#       # stroke is far enough until every finger leaves.
+#       # Shortcut: "<trigger>: power_off" or "<trigger>: run: <command>". The
+#       # keys left of the first ':' are ANDed — all of them must be held. A
+#       # suffix at the end of the trigger sets the timing: ~ = tap (fires on a
+#       # quick release), *2 = double, >ms = long press (fires ms after the
+#       # press, no release needed; 50..10000). The action runs on the worker's
+#       # heartbeat, never on the frame that recognised it, and one hit sends one
+#       # report — press the keys again to ask a second time. A touchpad form in
+#       # the chord reads as "true right now": touch_left while a finger sits in
+#       # that half, swipe_up from the moment the stroke is far enough until
+#       # every finger leaves.
+#       # "run:" hands everything after it to /bin/sh -c (one process: new
+#       # session, cwd = the user's home, stdin from /dev/null, stdout/stderr to
+#       # the journal). Its exit code is never read and the worker never waits;
+#       # several commands can run at once (at most 64). The command stays in the
+#       # service cgroup, so `systemctl stop ds5dummy` kills it too. There is no
+#       # display or session bus, and the identity is the desktop user, not root:
+#       # anything that needs polkit fails non-interactively.
 #       shortcut:
 #         1: "create+options: power_off"
 #         2: "home*2: power_off"
 #         3: "l3>750: power_off"
 #         4: "swipe_up+touch_left: power_off"
+#         # 5: "l1+r1: run: ~/bin/tv-replug.sh"
 #       # Macro: "<trigger>: <targets>" — those targets go down together for one
 #       # ~80 ms pulse and come back up on their own; holding the trigger for the
 #       # whole pulse still fires only once.

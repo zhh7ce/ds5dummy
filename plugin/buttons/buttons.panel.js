@@ -31,7 +31,7 @@ const KINDS = [
 const TIPS = {
   remap: '一个源一条映射；“抹掉”等于 disable，“保留源键”两边都上报。同一帧内规则不串联。',
   turbo: '按住时按固定频率连点；实际频率不高于手柄上报率。',
-  shortcut: '同时按住才算命中；单击/双击在松开时判定，长按到期触发。动作只有关机。',
+  shortcut: '同时按住才算命中；单击/双击在松开时判定，长按到期触发。动作是关机或运行一条命令。',
   macro: '触发时同时按下目标键，约 80 毫秒后松开；按住更久也只发一次。',
   axis: '先反向，再定中心，写回同一帧。扳机反向后松开仍是 0。',
   other: '页面没识别的写法，原样写回；点表示嵌套。',
@@ -100,7 +100,8 @@ const PAD_SHELL = [
 ];
 
 /// 手柄图上每个线上位的形状。顺序就是绘制顺序；`icons` 是不接收指针的图形
-/// （按钮上的符号），`fill:true` 表示该符号是实心的。座标全部来自同一份上游线稿。
+/// （按钮上的符号），`fill:true` 表示该符号是实心的；`hit` 是没有本体可点的图形
+/// （PS）的透明接点矩形。座标全部来自同一份上游线稿。
 const PAD_SHAPES = [
   {token:'l2', tag:'path', d:'M252.212,116.785l-114.214,0c-12.312,0 1.248,-110.916 78.919,-110.916c37.32,-0 51.81,110.916 35.295,110.916Z'},
   {token:'r2', tag:'path', d:'M866.471,116.785l114.214,0c12.312,0 -1.248,-110.916 -78.919,-110.916c-37.32,-0 -51.81,110.916 -35.295,110.916Z'},
@@ -122,7 +123,9 @@ const PAD_SHAPES = [
   {token:'square', tag:'circle', cx:864.079, cy:358.08, r:34.957, icons:[{tag:'rect', x:847.313, y:341.648, w:32.865, h:32.865}]},
   {token:'l3', tag:'circle', cx:351.764, cy:528.548, r:57.193},
   {token:'r3', tag:'circle', cx:763.456, cy:528.548, r:57.193},
-  {token:'home', tag:'bare', icons:[{d:'M525.1,538.049c-6.333,-1.817 -7.382,-5.56 -4.509,-7.734c2.071,-1.361 4.45,-2.545 6.969,-3.436l0.232,-0.072l18.72,-6.713l-0,7.71l-13.419,4.906c-2.351,0.905 -2.751,2.108 -0.798,2.754c0.974,0.248 2.089,0.392 3.239,0.392c1.641,-0 3.212,-0.291 4.666,-0.822l-0.094,0.029l6.462,-2.353l-0,6.915c-0.4,0.099 -0.854,0.147 -1.299,0.243c-2.068,0.363 -4.448,0.571 -6.875,0.571c-4.744,0 -9.3,-0.795 -13.547,-2.257l0.293,0.088l-0.04,-0.221Zm39.449,0.789l20.99,-7.584c2.383,-0.859 2.753,-2.084 0.819,-2.727c-0.968,-0.237 -2.078,-0.373 -3.222,-0.373c-1.66,-0 -3.255,0.288 -4.733,0.813l0.099,-0.029l-14.02,5l0,-7.958l0.801,-0.283c2.801,-0.931 6.093,-1.654 9.489,-2.03l0.221,-0.022c1.249,-0.133 2.695,-0.208 4.16,-0.208c5.007,0 9.809,0.883 14.254,2.505l-0.288,-0.093c6.16,2.003 6.8,4.906 5.252,6.907c-1.491,1.486 -3.294,2.662 -5.303,3.42l-0.104,0.035l-28.484,10.359l-0,-7.654l0.069,-0.078Zm-15.521,-54.146l-0,58.498l13.051,4.204l-0,-49.061c-0,-2.3 1.013,-3.836 2.646,-3.303c2.121,0.601 2.534,2.713 2.534,5.018l0,19.587c8.137,3.978 14.543,-0.008 14.543,-10.508c-0,-10.791 -3.754,-15.585 -14.796,-19.427c-4.762,-1.729 -10.778,-3.452 -16.933,-4.815l-1.037,-0.193l-0.008,0Z', fill:true}]},
+  // PS 只有一枚实心图标、没有按钮本体；图标自己 pointer-events:none，所以补一块
+  // 盖住它的透明矩形来接点击（坐标是图标路径的包围盒留了点余量）。
+  {token:'home', tag:'bare', hit:[510,476,98,80], icons:[{d:'M525.1,538.049c-6.333,-1.817 -7.382,-5.56 -4.509,-7.734c2.071,-1.361 4.45,-2.545 6.969,-3.436l0.232,-0.072l18.72,-6.713l-0,7.71l-13.419,4.906c-2.351,0.905 -2.751,2.108 -0.798,2.754c0.974,0.248 2.089,0.392 3.239,0.392c1.641,-0 3.212,-0.291 4.666,-0.822l-0.094,0.029l6.462,-2.353l-0,6.915c-0.4,0.099 -0.854,0.147 -1.299,0.243c-2.068,0.363 -4.448,0.571 -6.875,0.571c-4.744,0 -9.3,-0.795 -13.547,-2.257l0.293,0.088l-0.04,-0.221Zm39.449,0.789l20.99,-7.584c2.383,-0.859 2.753,-2.084 0.819,-2.727c-0.968,-0.237 -2.078,-0.373 -3.222,-0.373c-1.66,-0 -3.255,0.288 -4.733,0.813l0.099,-0.029l-14.02,5l0,-7.958l0.801,-0.283c2.801,-0.931 6.093,-1.654 9.489,-2.03l0.221,-0.022c1.249,-0.133 2.695,-0.208 4.16,-0.208c5.007,0 9.809,0.883 14.254,2.505l-0.288,-0.093c6.16,2.003 6.8,4.906 5.252,6.907c-1.491,1.486 -3.294,2.662 -5.303,3.42l-0.104,0.035l-28.484,10.359l-0,-7.654l0.069,-0.078Zm-15.521,-54.146l-0,58.498l13.051,4.204l-0,-49.061c-0,-2.3 1.013,-3.836 2.646,-3.303c2.121,0.601 2.534,2.713 2.534,5.018l0,19.587c8.137,3.978 14.543,-0.008 14.543,-10.508c-0,-10.791 -3.754,-15.585 -14.796,-19.427c-4.762,-1.729 -10.778,-3.452 -16.933,-4.815l-1.037,-0.193l-0.008,0Z', fill:true}]},
   {token:'mute', tag:'path', d:'M590.061,591.266c-0,-3.699 -2.999,-6.698 -6.698,-6.698c-11.914,0 -36.653,0 -48.567,0c-3.7,0 -6.698,2.999 -6.698,6.698c-0,0.001 -0,0.001 -0,0.002c-0,3.699 2.998,6.698 6.698,6.698c11.914,-0 36.653,-0 48.567,-0c3.699,-0 6.698,-2.999 6.698,-6.698c-0,-0.001 -0,-0.001 -0,-0.002Z'},
   // Edge 只在背面多两组键；画在两只握把之间的空处，标出「背面」。
   {token:'lfn', tag:'rect', x:288, y:700, w:128, h:44, rx:22, label:'左 Fn', lx:352, ly:723},
@@ -255,12 +258,34 @@ function stickSelectHTML(value, handler, placeholder){
 
 function itemKey(item){ return item.path.join('.'); }
 
+/// 组合键/宏还没选完触发键（宏还要求至少一个目标）时只是一行草稿。
+function ruleDraft(item){
+  if (item.kind === 'shortcut') return item.terms.length === 0;
+  if (item.kind === 'macro') return item.terms.length === 0 || item.targets.length === 0;
+  return false;
+}
+
+/// 还没动过任何键的空行；确认时直接丢掉，不留在页面上。
+function ruleEmpty(item){
+  if (item.terms.length) return false;
+  return item.kind !== 'macro' || item.targets.length === 0;
+}
+
+/// 交给校验器与保存的行：空草稿留在页面上等用户补键，不参与序列化。
+function sendableItems(){
+  return state.items.filter(item => !ruleDraft(item));
+}
+
 function entryFor(item){
   if (!state.validation || !state.validation.available) return null;
   return (state.validation.entries || []).find(entry => entry.key === itemKey(item)) || null;
 }
 
 function outcomeHTML(item){
+  if (ruleDraft(item)){
+    const missing = item.terms.length ? '宏目标' : '触发键';
+    return `<span class="outcome" style="color:var(--sub)">还没有选${missing}</span>`;
+  }
   if (!state.validation || !state.validation.available) return '';
   const entry = entryFor(item);
   if (!entry) return `<span class="outcome" style="color:var(--sub)">不产生规则</span>`;
@@ -336,7 +361,7 @@ async function runValidate(){
   if (!state.data || !state.validate) return;
   const seq = ++state.seq;
   try {
-    const result = await state.validate(state.items);
+    const result = await state.validate(sendableItems());
     if (seq !== state.seq) return;
     state.validation = result.validation;
     state.preview = result.block || '';
@@ -547,7 +572,8 @@ function setChordTerms(terms){
   if (!item){
     const id = nextRuleId(kind);
     item = {kind, path:[kind, id], id, terms: [], timing:'chord', ms: null};
-    if (kind === 'macro') item.targets = ['cross'];
+    if (kind === 'macro') item.targets = [];
+    else { item.action = 'power_off'; item.command = ''; }
     state.items.push(item);
     ui.sel = item;
   }
@@ -673,6 +699,11 @@ function shapeSVG(shape, offClass){
   const attrs = `class="hit${bare}${offClass}" data-token="${shape.token}" onclick="__ds5Buttons.padClick(event)"`;
   const title = `<title>${esc(labelOf(shape.token))}</title>`;
   let inner = bare ? '' : artSVG(shape, 'shape');
+  // 没有本体的键（PS）靠这块透明矩形接点击，与摇杆方向箭头的 hit 同一套样式。
+  if (shape.hit){
+    const [x, y, w, h] = shape.hit;
+    inner += `<rect class="grab" x="${x}" y="${y}" width="${w}" height="${h}"/>`;
+  }
   for (const icon of shape.icons || []) inner += artSVG(icon, icon.fill ? 'icon-fill' : 'icon');
   if (shape.label){
     inner += `<text class="edge-label" x="${shape.lx}" y="${shape.ly}">${esc(shape.label)}</text>`;
@@ -789,7 +820,8 @@ function captureSource(token){
   if (!item){
     const id = nextRuleId(kind);
     item = {kind, path:[kind, id], id, terms: [], timing:'chord', ms: null};
-    if (kind === 'macro') item.targets = ['cross'];
+    if (kind === 'macro') item.targets = [];
+    else { item.action = 'power_off'; item.command = ''; }
     state.items.push(item);
     ui.sel = item;
   }
@@ -1033,6 +1065,9 @@ function contextLine(){
   if (kind === 'macro'){
     return `触发 <b>${esc(terms)}</b> → 同按 <b>${esc(item.targets.map(labelOf).join(' + '))}</b>`;
   }
+  if (item.action === 'run'){
+    return `触发 <b>${esc(terms)}</b> → 运行 <b>${esc(commandPreview(item.command))}</b>`;
+  }
   return `触发 <b>${esc(terms)}</b> → <b>让手柄关机</b>`;
 }
 
@@ -1096,6 +1131,11 @@ function rowWrap(leftHTML, rightHTML, item){
 
 function deleteButton(i){
   return `<button class="btn btn-outline" style="padding:6px 12px" onclick="__ds5Buttons.removeItem(${i})">删除</button>`;
+}
+
+/// 结束这一行的编辑；组合键与宏选完触发键后靠它让下一次点图从头开始。
+function confirmButton(i){
+  return `<button class="btn btn-outline" style="padding:6px 12px" onclick="__ds5Buttons.confirmRow(${i})">确定</button>`;
 }
 
 // ---------------------------------------------------------------------------
@@ -1205,8 +1245,25 @@ function ruleRowHTML(item, i){
     ${termsHTML(item, i)}
     ${timingHTML(item, i)}
     ${isMacro ? `<span class="mini">同按</span>${targetsHTML(item, i)}`
-              : `<span class="chip">让手柄关机 · power_off</span>`}`;
-  return rowWrap(left, outcomeHTML(item) + deleteButton(i), item);
+              : shortcutActionHTML(item, i)}`;
+  return rowWrap(left, outcomeHTML(item) + deleteButton(i) + confirmButton(i), item);
+}
+
+/// 组合键的动作：关机，或运行一条按 `/bin/sh -c` 解释的命令。
+function shortcutActionHTML(item, i){
+  const action = item.action === 'run' ? 'run' : 'power_off';
+  let html = `<select onchange="__ds5Buttons.setShortcutAction(${i},this.value)">
+    <option value="power_off"${action === 'power_off' ? ' selected' : ''}>让手柄关机</option>
+    <option value="run"${action === 'run' ? ' selected' : ''}>运行命令</option>
+  </select>`;
+  if (action === 'run'){
+    const limit = CATALOG.ranges.command_bytes;
+    html += `<input type="text" value="${escAttr(item.command || '')}" maxlength="${limit}"
+              style="min-width:220px" placeholder="/path/to/command --flag"
+              title="按 /bin/sh -c 执行；上限 ${limit} 字节"
+              onchange="__ds5Buttons.setShortcutCommand(${i},this.value)">`;
+  }
+  return html;
 }
 
 function panelRuleHTML(group){
@@ -1295,10 +1352,18 @@ function haystack(item){
   if (item.axis) parts.push(item.axis, labelOf(item.axis));
   if (item.stick) parts.push(item.stick, labelOf(item.stick));
   if (item.value) parts.push(item.value);
+  if (item.command) parts.push(item.command);
   if (item.terms) parts.push(...item.terms, ...item.terms.map(labelOf));
   if (item.targets) parts.push(...item.targets, ...item.targets.map(labelOf));
   if (item.timing) parts.push(item.timing);
   return parts.join(' ').toLowerCase();
+}
+
+/// 汇总行里的命令只截一段；模型里保留原文。
+function commandPreview(command){
+  const text = command || '';
+  if (!text) return '（空命令）';
+  return text.length > 40 ? text.slice(0, 40) + '…' : text;
 }
 
 function summarizeItem(item){
@@ -1312,7 +1377,9 @@ function summarizeItem(item){
     case 'shortcut':
     case 'macro': {
       const timing = item.timing === 'chord' ? '' : ' [' + item.timing + (item.ms ? ' ' + item.ms + 'ms' : '') + ']';
-      const target = item.kind === 'macro' ? ' → ' + item.targets.map(labelOf).join('+') : ' → 关机';
+      const target = item.kind === 'macro'
+        ? ' → ' + item.targets.map(labelOf).join('+')
+        : item.action === 'run' ? ' → 运行 ' + commandPreview(item.command) : ' → 关机';
       return item.terms.map(labelOf).join(' + ') + timing + target;
     }
     case 'axis_invert':
@@ -1385,6 +1452,17 @@ function removeItem(i){
   const removed = state.items.splice(i, 1)[0];
   if (ui.sel === removed) ui.sel = null;
   commit();
+}
+
+/// 结束这一行的编辑：没动过的空行直接丢掉，其余只取消选中，下一次点图就是新规则。
+function confirmRow(i){
+  const item = state.items[i];
+  if (!item) return;
+  if (ruleEmpty(item)){ removeItem(i); return; }
+  if (ui.sel !== item) return;
+  ui.sel = null;
+  ui.pending = null;
+  render();
 }
 
 function setRemapSrc(i, token){
@@ -1505,6 +1583,21 @@ function setLongMs(i, raw){
   commit();
 }
 
+function setShortcutAction(i, value){
+  const item = state.items[i];
+  if (!item || item.kind !== 'shortcut') return;
+  item.action = value === 'run' ? 'run' : 'power_off';
+  commit();
+}
+
+/// 命令先原样收下：空命令也是合法的（跑一个什么都不做的 shell），不拦。
+function setShortcutCommand(i, raw){
+  const item = state.items[i];
+  if (!item || item.kind !== 'shortcut') return;
+  item.command = String(raw || '');
+  commit();
+}
+
 function addTerm(i, token){
   const item = state.items[i];
   if (!item || !token) return;
@@ -1545,8 +1638,10 @@ function nextRuleId(group){
 
 function addRule(group){
   const id = nextRuleId(group);
-  const item = {kind: group, path: [group, id], id, terms: ['l3'], timing: 'chord', ms: null};
-  if (group === 'macro') item.targets = ['cross'];
+  // 从空触发开始：用户自己在图上点键，别先塞一个占位的 l3 / □。
+  const item = {kind: group, path: [group, id], id, terms: [], timing: 'chord', ms: null};
+  if (group === 'macro') item.targets = [];
+  else { item.action = 'power_off'; item.command = ''; }
   state.items.push(item);
   ui.sel = item;
   ui.pending = null;
@@ -1623,10 +1718,11 @@ function setOtherValue(i, raw){
 /// 所以把模板用到的入口集中挂在一个前缀下。
 window.__ds5Buttons = {
   setKind, setSearch, setArm,
-  padClick, chipClick, hidConnect, hidDisconnect, selectRow, removeItem,
+  padClick, chipClick, hidConnect, hidDisconnect, selectRow, removeItem, confirmRow,
   setRemapSrc, setRemapTarget, addRemap, setRemapKeep, setRemapDisable,
   setTurboSrc, addTurbo, setTurboHz,
   addTerm, removeTerm, setTiming, setLongMs, setRuleId,
+  setShortcutAction, setShortcutCommand,
   addTarget, removeTarget, addRule,
   setAxisSwap, toggleAxisInvert, toggleAxisCenter,
   addOther, setOtherPath, setOtherValue, openItem,
@@ -1653,8 +1749,8 @@ DS5.define({
   collect(){
     if (!state.dirty || !state.data) return [];
     if (!state.data.editable || !state.data.model || !state.data.model.structured) return [];
-    // 插件名与层由壳补齐；面板只交这一节的草稿。
-    return [{kind: 'plugin', items: state.items}];
+    // 插件名与层由壳补齐；面板只交这一节的草稿，没选完的行不进文件。
+    return [{kind: 'plugin', items: sendableItems()}];
   },
 });
 })();

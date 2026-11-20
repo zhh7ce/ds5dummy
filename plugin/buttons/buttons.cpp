@@ -8,12 +8,14 @@
  *
  * 线程相位决定了这里不需要任何锁：g_rules 与 g_state 只在 init 里写（worker 主
  * 线程、两条传输线程起来之前），之后只在 bt 的读线程上被读写，主循环一个字节都
- * 不碰。唯一的跨线程量是 g_power_off_pending：识别在输入钩子上（K-07 要求读帧），
- * 执行必须在心跳上（K-10 不许在读线程上同步碰控制通道），于是一个布尔位就是这两
- * 条线程之间全部的信息。
+ * 不碰。两条跨线程量的去向不同：g_power_off_pending 是一个布尔位，识别在输入钩子
+ * 上（K-07 要求读帧）、执行必须在心跳上（K-10 不许在读线程上同步碰控制通道）；
+ * `run` 的命令在钩子里就交给宿主的队列，宿主拷走文本、在主循环里 fork，插件手里
+ * 不保留任何指向它的东西。
  */
 
 #include <atomic>
+#include <cstddef>
 #include <cstdint>
 #include <string>
 
@@ -73,8 +75,11 @@ void Stop() {
 }
 
 /**
- * @brief 每帧的入口：解码成快照、判定、把结果作用回那份缓冲。
+ * @brief 每帧的入口：解码成快照、判定、把结果作用回那份缓冲，再分发动作。
  * @param state 手柄这一帧报的 63 字节状态体，可写。
+ * @details 动作分两路：`run` 在这里调 host->command 入队（只拷字节，不 fork、
+ *          不等待），关机仍记进 g_power_off_pending 等心跳执行。命中的是哪几条
+ *          规则只在插件内部流转，宿主不知道。
  */
 void OnStateIn(uint8_t* state) {
   if (!g_armed) return;
@@ -82,6 +87,13 @@ void OnStateIn(uint8_t* state) {
   const sense::FrameDecision decision =
       sense::Evaluate(g_rules, frame, plugin::NowMs(), g_state);
   pipeline::Apply(g_rules, decision, frame, state);
+  for (const std::size_t index : g_state.fired_shortcuts) {
+    const rules::Shortcut& rule = g_rules.shortcuts[index];
+    if (rule.action == rules::Action::kRun) {
+      // 被拒（返回 0）不补救：宿主已经记了 ERROR，这一条等用户松手再按（K-08）。
+      g_host.command(rule.command.c_str());
+    }
+  }
   if (decision.power_off) {
     g_power_off_pending.store(true, std::memory_order_relaxed);
   }

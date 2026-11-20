@@ -85,8 +85,11 @@ constexpr char kLongSuffix = '>';
 /// 触发串与结果之间的分隔符。
 constexpr char kRuleSeparator = ':';
 
-/// 本期唯一的动作（K-09）。
+/// 关机动作的拼写；另一个动作是 `run:` 起头的一整段（见 LoadShortcut）。
 constexpr std::string_view kPowerOffAction = "power_off";
+
+/// 命令动作的引导段：其后到行尾（去掉两端空白）全部是命令行，内部冒号不再有意义。
+constexpr std::string_view kRunPrefix = "run:";
 
 /**
  * @brief 键路径是不是以某一段开头。
@@ -492,12 +495,16 @@ void LoadAxis(rules::Set& out, const ds5Host& host, std::string_view key,
 }
 
 /**
- * @brief `shortcut.<编号>: "<触发串>: power_off"` 一行。
+ * @brief `shortcut.<编号>: "<触发串>: power_off"` 或 `…: run: <命令行>` 一行。
  * @param out 规则表。
  * @param host 只用来记日志。
  * @param key 键路径原文。
  * @param leaf 编号那一段（只是标签，本身不参与判定）。
  * @param value 取值原文。
+ * @details 命令按"第一个冒号切开之后整段原样"处理：`run:` 之后的内容解析层不再
+ *          拆，内部冒号、引号、空格都归用户；两端空白由 ParseRule 的 Trim 去掉。
+ * @note 空命令合法：`/bin/sh -c ""` 什么也不做，但这条规则照常参与判定。只有超过
+ *       kPluginCommandSize - 1 字节的命令让这一条不生效，不截断、不改写。
  */
 void LoadShortcut(rules::Set& out, const ds5Host& host, std::string_view key,
                   std::string_view leaf, std::string_view value) {
@@ -516,14 +523,34 @@ void LoadShortcut(rules::Set& out, const ds5Host& host, std::string_view key,
     host.log(DS5_LOG_WARNING, Rejected(key, value, why).c_str());
     return;
   }
-  if (action != kPowerOffAction) {
-    host.log(DS5_LOG_WARNING,
-             Rejected(key, value,
-                      "is not an action this plugin performs (only 'power_off')")
-                 .c_str());
+
+  if (action == kPowerOffAction) {
+    out.shortcuts.push_back(rule);
     return;
   }
-  out.shortcuts.push_back(rule);
+
+  if (StartsWith(action, kRunPrefix)) {
+    const std::string_view command = Trim(action.substr(kRunPrefix.size()));
+    if (command.size() > kPluginCommandSize - 1) {
+      host.log(DS5_LOG_WARNING,
+               Rejected(key, value,
+                        "has a command of " + std::to_string(command.size()) +
+                            " bytes; the limit is " +
+                            std::to_string(kPluginCommandSize - 1))
+                   .c_str());
+      return;
+    }
+    rule.action = rules::Action::kRun;
+    rule.command = std::string(command);
+    out.shortcuts.push_back(rule);
+    return;
+  }
+
+  host.log(DS5_LOG_WARNING,
+           Rejected(key, value,
+                    "is not an action this plugin performs (only 'power_off' "
+                    "or 'run: <command>')")
+               .c_str());
 }
 
 /**

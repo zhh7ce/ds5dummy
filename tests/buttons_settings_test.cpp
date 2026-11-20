@@ -42,6 +42,11 @@ int PowerOff() {
   return 0;
 }
 
+int Command(const char* /*text*/) {
+  ADD_FAILURE() << "settings must never start a command";
+  return 0;
+}
+
 /**
  * @brief 一份只用来收日志的宿主表。
  * @return 版本号与函数指针都填好的 ds5Host。
@@ -51,6 +56,7 @@ ds5Host MakeHost() {
   host.abi_version = kPluginAbiVersion;
   host.log = &Log;
   host.power_off = &PowerOff;
+  host.command = &Command;
   return host;
 }
 
@@ -579,9 +585,59 @@ TEST_F(ButtonsSettings, ShortcutNeedsBothHalves) {
   EXPECT_NE(g_lines[DS5_LOG_WARNING][0].find("has no ':' between the trigger"),
             std::string::npos)
       << g_lines[DS5_LOG_WARNING][0];
+  // R-05：不认识的写法要把两种动作都列出来，用户照抄示例时不会以为只有关机。
   EXPECT_NE(g_lines[DS5_LOG_WARNING][2].find("only 'power_off'"),
             std::string::npos)
       << g_lines[DS5_LOG_WARNING][2];
+  EXPECT_NE(g_lines[DS5_LOG_WARNING][2].find("run:"), std::string::npos)
+      << g_lines[DS5_LOG_WARNING][2];
+}
+
+TEST_F(ButtonsSettings, ShortcutAcceptsRunCommands) {
+  // `run:` 之后整段归用户：切开第一个冒号之后解析层不再拆，内部冒号、引号与 `$`
+  // 都原样保留，只去掉两端空白（R-01）。
+  const FakeSettings settings{
+      {"shortcut.1", "l3+r3: run: /home/deck/bin/tv-replug.sh"},
+      {"shortcut.2", R"(l1+r1>750: run: sh -c "a:b; echo '$HOME'")"},
+      {"shortcut.3", "touch_left+options: power_off"},
+  };
+  Set set;
+  ASSERT_TRUE(Parse(settings, set));
+  ASSERT_EQ(set.shortcuts.size(), 3u);
+  EXPECT_EQ(Lines(DS5_LOG_WARNING), 0u);
+  ASSERT_EQ(set.shortcuts[0].action, buttons::rules::Action::kRun);
+  EXPECT_EQ(set.shortcuts[0].command, "/home/deck/bin/tv-replug.sh");
+  ASSERT_EQ(set.shortcuts[1].action, buttons::rules::Action::kRun);
+  EXPECT_EQ(set.shortcuts[1].command, R"(sh -c "a:b; echo '$HOME'")");
+  // 关机那条不带命令：装配层按 action 分派，两条动作共用同一个结构体。
+  EXPECT_EQ(set.shortcuts[2].action, buttons::rules::Action::kPowerOff);
+  EXPECT_TRUE(set.shortcuts[2].command.empty());
+}
+
+TEST_F(ButtonsSettings, ShortcutAcceptsAnEmptyCommand) {
+  // 空命令合法：`/bin/sh -c ""` 什么也不做，规则照常参与判定。只有超过 511 字节
+  // 才让这一条缺席，不截断——上限含结尾 NUL，所以可装下的是 511 个字符。
+  const std::string longest(kPluginCommandSize - 1, 'x');
+  const FakeSettings settings{
+      {"shortcut.1", "l3+r3: run:"},
+      {"shortcut.2", "l3+r3: run:   "},
+      {"shortcut.3", "l3+r3: run: " + longest},
+      {"shortcut.4", "l3+r3: run: " + longest + "x"},
+  };
+  Set set;
+  ASSERT_TRUE(Parse(settings, set));
+  ASSERT_EQ(set.shortcuts.size(), 3u);
+  ASSERT_EQ(set.shortcuts[0].action, buttons::rules::Action::kRun);
+  EXPECT_TRUE(set.shortcuts[0].command.empty());
+  ASSERT_EQ(set.shortcuts[1].action, buttons::rules::Action::kRun);
+  EXPECT_TRUE(set.shortcuts[1].command.empty());
+  EXPECT_EQ(set.shortcuts[2].command, longest);
+  ASSERT_EQ(Lines(DS5_LOG_WARNING), 1u);
+  EXPECT_NE(g_lines[DS5_LOG_WARNING][0].find("512 bytes"), std::string::npos)
+      << g_lines[DS5_LOG_WARNING][0];
+  EXPECT_NE(g_lines[DS5_LOG_WARNING][0].find("the limit is 511"),
+            std::string::npos)
+      << g_lines[DS5_LOG_WARNING][0];
 }
 
 TEST_F(ButtonsSettings, LongThresholdRangeIsChecked) {

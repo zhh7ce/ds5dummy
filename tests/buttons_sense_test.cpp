@@ -142,6 +142,9 @@ class Driver {
     return Evaluate(rules_, frame, now_ms, state_);
   }
 
+  /// 最近一帧的跨帧状态：命中下标不在 FrameDecision 里，用例从这里读。
+  const buttons::sense::State& state() const { return state_; }
+
  private:
   Set rules_;
   buttons::sense::State state_;
@@ -269,6 +272,32 @@ TEST(ButtonsSense, ChordNeedsEveryTerm) {
   EXPECT_TRUE(driver.At(8, Pressed(BitOf(Source::kL1) | BitOf(Source::kR1) |
                                    BitOf(Source::kL2)))
                   .power_off);
+}
+
+TEST(ButtonsSense, EachHitNamesTheShortcutThatFired) {
+  // 装配层靠下标回查动作：同一组键上的几条规则各得一次机会，顺序与规则表一致；
+  // 没命中的帧要清空，不能把上一帧的命中留到下一帧。
+  Shortcut first;
+  first.trigger = Trig(Timing::kChord, Both(Source::kCreate, Source::kOptions), 0);
+  first.action = Action::kRun;
+  first.command = "first";
+  Shortcut middle = first;
+  middle.action = Action::kPowerOff;
+  middle.command.clear();
+  Shortcut last = first;
+  last.command = "second";
+
+  Set rules;
+  rules.shortcuts = {first, middle, last};
+  Driver driver(std::move(rules));
+
+  const Mask terms = Both(Source::kCreate, Source::kOptions);
+  EXPECT_TRUE(driver.At(0, Pressed(terms)).power_off);
+  EXPECT_EQ(driver.state().fired_shortcuts, (std::vector<std::size_t>{0, 1, 2}));
+
+  // 还按着：闸门关着，三条都不再命中。
+  EXPECT_FALSE(driver.At(8, Pressed(terms)).power_off);
+  EXPECT_TRUE(driver.state().fired_shortcuts.empty());
 }
 
 // ---------------------------------------------------------------------------

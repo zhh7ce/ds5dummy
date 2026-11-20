@@ -66,12 +66,22 @@ int PowerOff() {
   return 0;
 }
 
+/**
+ * @brief 假宿主的命令通道。
+ * @return 恒 1（"已入队"）。
+ * @details 与 PowerOff 同理：校验只跑 settings::Load，这个槽不会被调到。
+ */
+int Command(const char* /*text*/) {
+  return 1;
+}
+
 /// 一份填好的假宿主表。
 ds5Host Host() {
   ds5Host host{};
   host.abi_version = kPluginAbiVersion;
   host.log = &Log;
   host.power_off = &PowerOff;
+  host.command = &Command;
   return host;
 }
 

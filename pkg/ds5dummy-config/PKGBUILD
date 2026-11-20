@@ -1,7 +1,8 @@
 # Maintainer: DS5Dummy Project
 #
 # DS5Dummy 的本地网页配置工具，与转发程序分开发布：后端包装程序与插件，
-# 这个包装页面、入口脚本和保存前的权威校验器。页面只监听 127.0.0.1，不需要 root。
+# 这个包装页面、入口脚本和保存前的权威校验器。页面缺省只监听 127.0.0.1（--bind
+# 可换），不需要 root。
 #
 # Build: cd pkg/ds5dummy-config && makepkg -d
 # Install: sudo pacman -U ds5dummy-config-*.pkg.tar.zst

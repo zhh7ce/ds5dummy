@@ -10,6 +10,7 @@
 
 #include <algorithm>
 #include <cstdint>
+#include <string>
 #include <vector>
 
 #include "ids.h"
@@ -107,19 +108,25 @@ struct Trigger {
   uint32_t threshold_ms = 0;        ///< 阈值或窗口，按 timing 解释；组合不看这个值。
 };
 
-/// 命中之后做什么。本期只有让手柄自己关机（K-09）。
+/// 命中之后做什么：让手柄自己关机，或执行一条用户写的命令行（K-09）。
 enum class Action : uint8_t {
-  kPowerOff,
+  kPowerOff,  ///< 发 0x08 feature，让手柄断电。
+  kRun,       ///< 把 command 交给宿主，由它在主循环里 fork 一条 shell。
 };
 
 /**
  * @brief 一条组合键：命中之后请宿主做一件事。
  * @details 动作不在这里执行——识别在输入钩子里，执行在心跳里（K-10），所以这条
  *          记录只放"做哪件事"，不放怎么调用。
+ * @note `command` 只在 kRun 上有内容；kPowerOff 的记录留空。解析层已经拒掉空命令
+ *       与超过宿主上限（kPluginCommandSize - 1）的命令，运行期拿到的总是一条原样
+ *       可交给 shell 的文本。
  */
 struct Shortcut {
   Trigger trigger;
   Action action = Action::kPowerOff;
+  /// 命令行原文（仅 kRun）：内部冒号、引号、变量都原样保留，由 shell 解释。
+  std::string command;
 };
 
 /**

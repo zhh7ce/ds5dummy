@@ -39,6 +39,8 @@ add_executable(ds5dummy_tests
     buttons_settings_test.cpp
     buttons_sense_test.cpp
     buttons_pipeline_test.cpp
+    command_queue_test.cpp
+    ../src/daemon/command_queue.cpp
     ../src/daemon/options.cpp
     ../src/daemon/config.cpp
     ../src/daemon/discovery.cpp

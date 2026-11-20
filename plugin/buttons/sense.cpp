@@ -170,6 +170,9 @@ void Reset(State& io, const rules::Set& rules) {
   io.touch = {};   // 半区与划动起点都留着的话，一次新的接触会被算进上一轮的手势。
   io.slots.assign(rules.shortcuts.size() + rules.macros.size(), Slot{});
   io.turbos.assign(rules.turbos.size(), TurboSlot{});
+  // 容量在这里定死：Evaluate 每帧只 clear + push_back，读线程上不分配。
+  io.fired_shortcuts.clear();
+  io.fired_shortcuts.reserve(rules.shortcuts.size());
 }
 
 FrameDecision Evaluate(const rules::Set& rules, const ids::Frame& frame,
@@ -186,9 +189,12 @@ FrameDecision Evaluate(const rules::Set& rules, const ids::Frame& frame,
   decision.digits = physical;
 
   // 2. 触发判定：读的是塑形之前的 physical，映射与连点的结果不会回头影响它（K-07）。
+  io.fired_shortcuts.clear();
   std::size_t slot_index = 0;
   for (const rules::Shortcut& shortcut : rules.shortcuts) {
     if (Advance(shortcut.trigger, physical, now_ms, io.slots[slot_index])) {
+      // 下标与规则表同序：装配层靠它回查动作，这里不解释动作是什么。
+      io.fired_shortcuts.push_back(slot_index);
       if (shortcut.action == rules::Action::kPowerOff) decision.power_off = true;
     }
     ++slot_index;

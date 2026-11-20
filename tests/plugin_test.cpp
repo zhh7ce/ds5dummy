@@ -77,6 +77,9 @@ constexpr const char* kButtonsPath =
 
 int g_power_off_calls = 0;
 
+/// 插件排进来的命令行，按入队顺序：真 fork 在 worker 主循环，这里只记下来。
+std::vector<std::string> g_commands;
+
 void Log(int /*level*/, const char* /*message*/) {}
 
 int PowerOff() {
@@ -84,12 +87,18 @@ int PowerOff() {
   return 1;
 }
 
-/// 一份宿主表：装载与分派只需要版本号、日志与关机通道。
+int Command(const char* text) {
+  g_commands.emplace_back(text);
+  return 1;
+}
+
+/// 一份宿主表：装载与分派只需要版本号、日志、关机与命令通道。
 ds5Host MakeHost() {
   ds5Host host{};
   host.abi_version = kPluginAbiVersion;
   host.log = &Log;
   host.power_off = &PowerOff;
+  host.command = &Command;
   return host;
 }
 
@@ -97,6 +106,7 @@ class PluginTest : public ::testing::Test {
  protected:
   void SetUp() override {
     g_power_off_calls = 0;
+    g_commands.clear();
     plugin::Stop();  // 上一条用例可能留了实例：每轮从空表开始
 
     std::string pattern =
@@ -465,6 +475,36 @@ TEST_F(PluginTest, ShippedButtonsPowersOffOnTheHeartbeatNotTheHook) {
   hooks[0](state);
   plugin::OnTick();
   EXPECT_EQ(g_power_off_calls, 2);
+}
+
+TEST_F(PluginTest, ShippedButtonsQueuesRunCommandsFromTheHook) {
+  const std::string dir = Dir("buttons-run");
+  Install(dir, kButtonsPath);
+  Settings settings;
+  settings["buttons.shortcut.1"] = "create+options: run: /bin/true --first";
+  settings["buttons.shortcut.2"] = "create+options: run: /bin/true --second";
+
+  const auto hooks = Start(settings, MakeHost(), dir);
+  ASSERT_EQ(hooks.size(), 1u);
+
+  std::uint8_t state[kPluginStateSize] = {};
+  state[0] = state[1] = state[2] = state[3] = 128;  // 摇杆静置
+  hooks[0](state);
+  EXPECT_TRUE(g_commands.empty());
+
+  state[8] = 0x10 | 0x20;  // Create + Options
+  hooks[0](state);
+  // 入队发生在钩子这一趟里（fork 才等主循环）：同一组键上的两条规则各排一条，
+  // 命令原样交给宿主，插件不改写。
+  ASSERT_EQ(g_commands.size(), 2u);
+  EXPECT_EQ(g_commands[0], "/bin/true --first");
+  EXPECT_EQ(g_commands[1], "/bin/true --second");
+
+  // 还按着不出第二次；主循环也不该把 run 当成关机（K-08）。
+  hooks[0](state);
+  EXPECT_EQ(g_commands.size(), 2u);
+  plugin::OnTick();
+  EXPECT_EQ(g_power_off_calls, 0);
 }
 
 /**

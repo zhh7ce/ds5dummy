@@ -39,7 +39,7 @@ Entertainment / DualSense Wireless Controller"，DualSense Edge 是 `054c:0df2`
 |---|---|
 | `src/main.cpp` | 唯一入口：解析 argv（只剩 `--worker`/`--help`）、worker 侧读并解码配置快照、装信号 handler、分派两个角色 |
 | `src/core/` | 协议与设备静态模型：报告 ID/线尺寸、输入/输出状态编解码、CRC32、USB 描述符、设备身份 |
-| `src/daemon/` | 进程形态：`config`（YAML 解析 + 加固读取）、`discovery`（hidraw sysfs → 手柄 MAC）、`identity`（sd-login 会话 → worker 身份）、`options`（CLI 解析 + worker 配置快照的编解码）、`shutdown`（信号）、`manager`（root 多槽监督循环）、`worker`（数据面宿主）、`handoff`（fd 交接）、`privdrop`（降权执行） |
+| `src/daemon/` | 进程形态：`config`（YAML 解析 + 加固读取）、`discovery`（hidraw sysfs → 手柄 MAC）、`identity`（sd-login 会话 → worker 身份）、`options`（CLI 解析 + worker 配置快照的编解码）、`shutdown`（信号）、`manager`（root 多槽监督循环）、`worker`（数据面宿主）、`command_queue`（插件 `run` 命令的定长环、主循环排空与 pid 回收）、`handoff`（fd 交接）、`privdrop`（降权执行） |
 | `src/usb/` | `gadget_setup`（configfs 装配 + mount）、`ffs_device`（端点 fd 机制）、`usb`（门面 + 线程起停）、`usb_plane`（共享运行状态）、`usb_inout`（IN/OUT 两条循环）、`usb_ep0`（ep0 循环 + Ep0Responder 实现） |
 | `src/bt/` | `bt`（门面）、`bt_link`（生命周期/缓存策略/线程起停）、`bt_plane`（共享运行状态）、`bt_rx`/`bt_tx`（两条传输线程）、`bt_detail`（后端接缝）、`bt_l2cap`/`bt_hidraw`（二选一的后端 TU） |
 | `src/bridge/` | `bridge`（转发策略）、`state_report`（63 字节输出状态影子）、`fake_mac`（0x09 合成）、`usb_report`/`audio_report`/`mic_report`/`power_report`（四种报告的字节布局） |
@@ -47,7 +47,7 @@ Entertainment / DualSense Wireless Controller"，DualSense Edge 是 `054c:0df2`
 | `src/plugin/` | 进程内插件的宿主侧：`plugin_api`（插件作者 include 的那份 C ABI 契约，含标记节的宏）、`plugin_util`（插件作者的可选小工具，纯头文件）、`plugin`（门面：实例表 + 输入钩子表 + 目录扫描 + `OnTick` 分派）、`plugin_loader`（目录列举、ELF 标记检查、`dlopen` 机制） |
 | `plugin/` | 随包插件源码，与宿主分开编译：`idle/` 只 include `src/plugin/` 的两份插件作者头文件，不链接宿主任何符号，`c++ -std=c++20 -fPIC -shared -I src plugin/idle/idle.cpp` 就能单独编出 `idle.so`；`buttons/` 同一条路（六个 TU 编成一份 `buttons.so`，它自己的程序侧说明在 `plugin/buttons/AGENTS.md`）；两个目录里还各有一份供配置页面使用的 `<插件名>.panel.js` |
 | `tests/` | googletest 单测（`ctest`，无 root、无硬件） |
-| `tools/` | 诊断程序：`spike_l2cap`、`spike_rumble`、`mini_gadget`、`audio_dump`(+`dump_sink.*`)、几个 `spike_*` 特权/交接探针；`buttons_check` 是 buttons 配置的只读校验器（共用 `buttons_config`，不装载 `.so`），`buttons_web.py` + `buttons_web.html` 是本地配置页面（Python 回环服务、固定地址 `127.0.0.1:8777`、无令牌；壳画服务状态、配置层选择与只读的当前状态，并取回每层的插件节推给面板——面板不读文件、不发请求；插件界面由插件目录里的 `<插件名>.panel.js` 提供，没有面板的插件退回通用键值编辑器；判定仍调 `buttons_check`），`panels/core.js` 是随工具的 core 面板；`win_audio_probe.cpp` 是唯一的 Windows 侧探针（mingw 交叉编译，在 Wine/Proton 前缀里读 MMDevice 与 setupapi，不参与 Linux 构建） |
+| `tools/` | 诊断程序：`spike_l2cap`、`spike_rumble`、`mini_gadget`、`audio_dump`(+`dump_sink.*`)、几个 `spike_*` 特权/交接探针；`buttons_check` 是 buttons 配置的只读校验器（共用 `buttons_config`，不装载 `.so`），`buttons_web.py` + `buttons_web.html` 是本地配置页面（Python 回环服务、缺省地址 `127.0.0.1:8777`、`--bind 0.0.0.0` 可放到局域网、无令牌；壳画服务状态、配置层选择与只读的当前状态，并取回每层的插件节推给面板——面板不读文件、不发请求；插件界面由插件目录里的 `<插件名>.panel.js` 提供，没有面板的插件退回通用键值编辑器；判定仍调 `buttons_check`），`panels/core.js` 是随工具的 core 面板；`win_audio_probe.cpp` 是唯一的 Windows 侧探针（mingw 交叉编译，在 Wine/Proton 前缀里读 MMDevice 与 setupapi，不参与 Linux 构建） |
 | `pkg/ds5dummy_hidraw`、`pkg/ds5dummy_l2cap` | 两个互斥的 Arch 包：systemd 单元、`/etc/ds5dummy/config.yaml`、`/usr/share/doc/ds5dummy/user-config.example.yaml`、modprobe/modules-load 配置、install 钩子，以及随包插件与它们的配置面板 |
 | `pkg/ds5dummy_bin` | 预编译包：打包时用便携参数编出 dist 二进制，按 Arch 目录铺开（`/usr/lib/ds5dummy/{bin,lib,plugins}` + `/usr/bin` 符号链接 + 单元/模块配置/`/etc` 配置），供装不了工具链的机器装（SteamOS） |
 | `pkg/ds5dummy-config` | 独立的配置工具包：`ds5dummy-config` 入口、`buttons_web.py` + `buttons_web.html`、core 面板与 `buttons_check`；构建只编校验器，不依赖数据面的库 |
@@ -198,7 +198,7 @@ data-loop 线程一共 14 条（loguru 的日志线程不计）。插件不额�
 
 | 线程 | 归属 | 干什么 | 阻塞性约束 |
 |---|---|---|---|
-| 主线程 | `daemon/worker` | 100 ms 一轮：睡、收音频失效通知、把 `plugin::OnTick()` 递给每个插件，诊断构建下每 5 s 打一行窗口统计；建链阶段在 `OpenBtWithWait()` 里 500 ms 重试 | 唯一调用 `bt::Open/Close/StartThreads/StopThreads` 的线程 |
+| 主线程 | `daemon/worker` | 100 ms 一轮：睡、收音频失效通知、把 `plugin::OnTick()` 递给每个插件，再 `command_queue::Drain()` 排空插件排进来的命令，诊断构建下每 5 s 打一行窗口统计；建链阶段在 `OpenBtWithWait()` 里 500 ms 重试 | 唯一调用 `bt::Open/Close/StartThreads/StopThreads` 的线程 |
 | bt 读线程 | `bt/bt_rx.cpp` | poll 链路 fd + `stop_fd`，100 ms tick；把裸输入报告交给 `on_input` | 静默 1 s 打 WARNING，5 s 判死；回调里不许阻塞 |
 | bt 写线程 | `bt/bt_tx.cpp` | 队列空时 poll `wake_fd`/`stop_fd` 睡等；有活时 poll `stop_fd` + 链路 POLLOUT（无超时），排空 ≤8 份的发送队列 | 手上一份没发出去就原地重试同一份字节，不退回队列 |
 | ep0 线程 | `src/usb/usb_ep0.cpp` | 阻塞读 ep0 setup 包，标准请求自己答，class 请求交给 `on_class_request` | `GET_REPORT(FEATURE)` 缓存未命中时会在**这条线程上**同步等手柄回复（L2CAP 预算 2 s） |
@@ -512,12 +512,12 @@ dummy_hcd 不按它轮询（见上面那段），所以它既不限制也不产�
 
 | 文件 | 角色 |
 |---|---|
-| `plugin_api.h` | C ABI 边界：`ds5PluginDesc`（版本号、名字、版本 + `init`/`stop`/`on_tick`/`on_state_in` 四个槽）与 `ds5Host`（`abi_version` + `log` + `power_off`）。插件作者只 include 这一份，两侧之间不跨 C++ 类型 |
+| `plugin_api.h` | C ABI 边界：`ds5PluginDesc`（版本号、名字、版本 + `init`/`stop`/`on_tick`/`on_state_in` 四个槽）与 `ds5Host`（`abi_version` + `log` + `power_off` + `command`；命令行宽度由 `kPluginCommandSize` 定，插件侧的上限是它减一）。插件作者只 include 这一份，两侧之间不跨 C++ 类型 |
 | `plugin_util.h` | 插件作者的可选工具，纯头文件 inline、不进 ABI：`FindSetting`（在 `ds5Setting` 数组里按键取值）、`ParseInt`（严格非负十进制 + 上下界）、`NowMs`（`steady_clock` 毫秒）。随包与第三方插件共用 |
 | `plugin_loader.{h,cpp}` | 纯机制：`ListPlugins` 列目录里的 `.so`、`HasMarker` 只读 ELF 节表验标记、`dlopen(RTLD_NOW\|RTLD_LOCAL)` + `dlsym(kPluginEntryName)`、`ds5Setting`（键、值）数组的拼装。不持状态 |
 | `plugin.cpp` | 门面：实例表、输入钩子表、目录扫描顺序、同名去重、`OnTick` 分派 |
 | `plugin/idle/`（仓库根） | 随包插件：单独编译成 `idle.so`，静止一段时间后请手柄自己关机；与第三方插件走同一条目录扫描路径 |
-| `plugin/buttons/`（仓库根） | 随包插件：六个 TU 编成一份 `buttons.so`，改写主机看到的按键形态（映射、扳机行程、轴互换/反向/居中、连点、组合键、宏，以及触摸板的半区点击与划动）。它用 `on_state_in` **改的就是交出去的那 63 字节**，用 `on_tick` 执行关机动作；程序侧说明在 `plugin/buttons/AGENTS.md`，用法在 `plugin/buttons/README.md` |
+| `plugin/buttons/`（仓库根） | 随包插件：六个 TU 编成一份 `buttons.so`，改写主机看到的按键形态（映射、扳机行程、轴互换/反向/居中、连点、组合键、宏，以及触摸板的半区点击与划动）。它用 `on_state_in` **改的就是交出去的那 63 字节**、并把 `run` 的命中交给 `host->command()` 排队，用 `on_tick` 执行关机动作；程序侧说明在 `plugin/buttons/AGENTS.md`，用法在 `plugin/buttons/README.md` |
 
 **配置页面的面板是插件的旁挂文件**：`<插件名>.panel.js` 与 `<插件名>.so` 同目录、同名，
 `tools/buttons_web.py` 启动时按插件清单把它们发给页面；识别口径与宿主 `ListPlugins`
@@ -543,16 +543,22 @@ UDC、插件目录、系统里的手柄、系统配置 YAML 与重启提示）�
 手写任意 MAC，页面临时记在 `extraLayers` 里，保存时先为它写一条 `controllers.<MAC>:`。
 用户配置文件不存在也一样打开页面：`read_document()` 读成空串、`state.exists` 为 false，
 页面照常列出 `global` 与已连接的手柄，首次保存时由服务端建出父目录（`0o700`）与文件
-（`0o600`）。页面固定在 `http://127.0.0.1:8777/`（`--port` 可换），不发放令牌；请求仍
-要过 `Host`/`Origin` 检查与整份文档的 `buttons_check` 判定。
+（`0o600`）。页面缺省开在 `http://127.0.0.1:8777/`（`--port` 换端口，`--bind 0.0.0.0`
+放到局域网），不发放令牌；请求仍要过 `Host`/`Origin` 检查与整份文档的 `buttons_check`
+判定。通配绑定时主机名取决于访问方用哪个地址连进来，`Host` 检查因此只剩"浏览器总会带
+`Host`"，`Origin` 仍是同源判定。
 
 **三关识别**：文件里有 `.ds5_plugin` 标记节、内容逐字节是字符串 `"DS5 Plugin"`
 （`kPluginMarkerMagic`，含结尾 NUL；装载前只读 ELF 节表，不执行任何代码）→ 导出名
 `ds5_plugin_desc`（dlsym）→ `abi_version == kPluginAbiVersion`（当前为 1）。标记是给
 "目录里混进了别的 `.so`"用的，不是信任
 边界：它能被伪造。没有 struct size、没有布局指纹：函数签名不匹配
-是**静默**的（ELF `.dynsym` 不带参数类型），所以任何签名/布局改动都必须改版本号并从新
-导出名开始；旧 `.so` 的版本号对不上，装载点当场拒掉。
+是**静默**的（ELF `.dynsym` 不带参数类型），所以签名、字段类型或结构顺序的任何改动
+都必须改版本号并从新导出名开始；旧 `.so` 的版本号对不上，装载点当场拒掉。版本 1 期间
+唯一的例外是 `ds5Host` 的**尾部追加**（`command` 是第四个槽）：前缀布局没动，按旧头
+编的 `.so` 只读它认识的那三个槽，按新头编的 `.so` 只跟同一棵树的新宿主一起用（本仓库
+的插件、测试探针与宿主总是一起重编），所以这次追加不升版本号。这条不是"版本 1 可以
+无限追加"：`command` 之后的新槽只能以同样方式追加，其余任何改动仍然要换版本号。
 
 **装载由目录决定，不由配置决定**：`plugin::Directories()` 给出系统目录
 `/usr/lib/ds5dummy/plugins`、可执行文件所在前缀的 `plugins/`（按 `/proc/self/exe` 现推，
@@ -589,10 +595,21 @@ INFO 而不是 ERROR。配置是 `plugin::Settings`（`map<string,string>`，键
 `plugin::Start()` 早于 `bt::StartThreads()`，`plugin::Stop()` 晚于两条传输线程 join；
 运行期 `on_state_in` 在 bt 读线程（~100–120 Hz）、`on_tick` 在 worker 主循环（10 Hz）。
 `ds5Host::power_off` 只允许从 `on_tick` 调用：它同步碰控制通道，搬到传输线程上就是把锁
-搬过去。`plugin::Start()` 自己不再收上一批，除首次外调用方必须先 `Stop()`。
+搬过去。`ds5Host::command` 相反，可以从 `on_state_in` 调：宿主只把文本拷进一条定长环
+（短锁、不 fork、不做 I/O），执行在 worker 主循环的下一轮。`plugin::Start()` 自己不再收
+上一批，除首次外调用方必须先 `Stop()`。
 
-宿主能力表由 worker 填好（两个 C 壳子落在 `DS5DUMMY_LOG` 与 `bridge::PowerOff()`），
-`plugin::Start()` 把整表拷一份递给每个 `init`——插件跨不过去的是符号，不是拷贝。
+worker 主循环在 `plugin::OnTick()` 之后调 `command_queue::Drain()`：先回收已退出的命令
+进程（只 `waitpid(pid, WNOHANG)` 自己记下的那几个 pid，**绝不** `waitpid(-1)`——L2CAP
+后端的 `RunGdbus` 在别的线程上等它自己的 `gdbus` 子进程），再把环排空，每条 fork 一次
+`/bin/sh -c`（子进程 `setsid`、`chdir(HOME)`、stdin 接 `/dev/null`，stdout/stderr 进
+journal），父进程不等结束、不查退出码。环 8 条、同时在跑的上限 64 条，超了丢最新一条
+并记 ERROR；队列与 pid 表只在 worker 进程里，进程退出即丢。命令留在服务的 cgroup 里，
+`systemctl stop ds5dummy` 会连它一起杀。
+
+宿主能力表由 worker 填好（三个 C 壳子落在 `DS5DUMMY_LOG`、`bridge::PowerOff()` 与
+`command_queue::Post()`），`plugin::Start()` 把整表拷一份递给每个 `init`——插件跨不过去
+的是符号，不是拷贝。
 
 随包的 `idle` 插件是这份契约的第一个用户：`off_after_minutes`（缺省 30，`0` = 不自动
 关机，范围 0..60）。它自己取 `std::chrono::steady_clock`（`on_tick` 没有时间参数，精度
@@ -608,7 +625,8 @@ INFO 而不是 ERROR。配置是 `plugin::Settings`（`map<string,string>`，键
 `remap.circle`、`axis.swap_lstick_rstick`、`shortcut.1`。六个 TU 一份 `.so`，按职责分：布局
 （`ids`）、规则形状（`rules`）、语法（`settings`）、跨帧判定（`sense`）、单帧执行（`pipeline`）、
 装配与线程相位（`buttons.cpp`）；判据读的是**手柄这一帧报进钩子的那份状态体**，插件不拿自己的
-改写结果喂自己。`on_state_in` 每帧一次解码、一趟写回，`on_tick` 只把识别出的关机动作搬给
+改写结果喂自己。`on_state_in` 每帧一次解码、一趟写回，`run` 的命中在钩子里就交给
+`host->command()` 入队（宿主只拷字节），`on_tick` 只把识别出的关机动作搬给
 `host->power_off()`（同一个原因：那条调用同步碰控制通道，最长 2 s，不能落在读线程上）。
 因为装载顺序按插件名字典序，`buttons` 排在 `idle` 之前，**`idle` 读到的是 `buttons` 改写之后的
 字节**：按住一个被映射抹掉的键，`idle` 会认为静置。单缓冲契约的这条后果是已知的，写在

@@ -144,13 +144,20 @@ global:
     buttons:
       shortcut:
         1: "create+options: power_off"
-        2: "home*2: power_off"
+        2: "home*2: run: ~/bin/tv-replug.sh"
         3: "l3>750: power_off"
-        4: "swipe_up+touch_left: power_off"
+        4: "swipe_up+touch_left: run: echo 'a: b' >> ~/pad.log"
 ```
 
-冒号左边是一组源（全部按下才算），右边是动作。本期动作只有 `power_off`：
-让手柄自己关机。关机之后蓝牙随之断开，下次按 PS 键重新连上会被当作新的一站拉起。
+冒号左边是一组源（全部按下才算），右边是动作，两种：
+
+- `power_off`：让手柄自己关机。关机之后蓝牙随之断开，下次按 PS 键重新连上会被
+  当作新的一站拉起。
+- `run: <命令行>`：把这条命令交给宿主执行。`run:` 之后到行尾（去掉两端空白）整个
+  是命令，命令内部的冒号不参与解析；按 `/bin/sh -c` 解释，可以带参数、引号、管道、
+  重定向与 `$变量`，命令里有双引号时外层用单引号。命令最多 511 字节；留空也合法
+  （shell 收到一个空串，什么都不做），超长这一条不生效，日志里留一行。动作位置只认
+  这两种写法，别的（比如只写 `reboot`）也拒绝。
 
 时序写在左边的**末尾**，只描述整组键：
 
@@ -172,6 +179,23 @@ global:
 - 触摸板那族出现在组合里时，"按下"就是"这件事现在成立"：`touch_left` 是手指正落在
   左半，`swipe_up` 是这一轮手势里向上划出去了、手指还没全离开。上面那条"全部松开"
   的闸门因此对手势同样生效——一次上划只出一个动作，要第二个得先把手指全抬起来。
+- 同一帧命中多条 `run` 时每条各跑一次；多条 `power_off` 仍然只发一次关机报告。
+  被丢弃的命令（队列满、在跑到上限）不会自动补发，要再来得把那组键重新按一遍。
+
+`run:` 的命令是这样跑起来的：一条命令一个进程（`/bin/sh -c`），新会话，工作目录是
+桌面用户的家目录，stdin 接 `/dev/null`；stdout 与 stderr 进 journal。宿主不等它结束、
+不查退出码、失败不重试——一条长命令不挡后面排队的命令，多条命令可以同时活着。宿主
+那条队列固定 8 条，同时在跑的最多 64 条，超了的那条丢掉并在日志里记 ERROR。
+
+命令留在本服务的 cgroup 里，`sudo systemctl stop ds5dummy` 会连它一起杀掉，没有残留。
+所以"起一个后台常驻服务"不是这条功能的用法，常驻进程会在下一次停服务时消失。直接跑
+二进制（没有 systemd 包着）时没有这层兜底，停掉 worker 不会带走已经起来的命令进程。
+
+命令的环境就是 worker 那一份：没有 `DISPLAY` / `WAYLAND_DISPLAY` / `XAUTHORITY` /
+`DBUS_SESSION_BUS_ADDRESS`，也没有用户总线，要图形会话或用户总线的命令得自己带地址。
+身份是降权后的桌面用户，不是 root：`systemctl reboot` 这类经 logind/polkit 的命令在
+这个上下文里非交互地失败（worker 不属于任何 logind 会话）；要特权的动作只能由用户在
+命令里自己解决，这条功能不提供也不绕过认证。
 
 ---
 
@@ -268,6 +292,7 @@ ds5dummy-config                                    # 装包之后；默认编辑
 python3 tools/buttons_web.py                       # 源码树里运行同一个脚本
 ds5dummy-config --config /path/to/config.yaml --port 18777 --no-open
 ds5dummy-config --plugins-dir /path/to/plugins --no-open
+ds5dummy-config --bind 0.0.0.0                     # 局域网里的别的机器也能打开
 ```
 
 两个包都装 `/usr/bin/ds5dummy-config`（入口）、`/usr/lib/ds5dummy/buttons_web.py`、
@@ -281,8 +306,10 @@ ds5dummy-config --plugins-dir /path/to/plugins --no-open
 不需要手写 YAML。键表、区间与时序档位随这一节一起由服务端下发（`catalog`），与
 `plugin/buttons/ids.cpp` 的 token 表同源。
 
-页面固定在一个地址（缺省 `http://127.0.0.1:8777/`，`--port` 可换），没有令牌，
-`--no-open` 之外的场合会直接调 `xdg-open` 打开它。按键映射只改插件的那一节，缩进相对
+页面缺省只开在本机（`http://127.0.0.1:8777/`，`--port` 换端口）；要让另一台电脑
+打开它，加 `--bind 0.0.0.0`，用那台机器连到本机的地址访问。页面没有令牌：能连到它
+的人就能改配置，而 `run:` 规则在服务运行的那台机器上就是执行命令。`--no-open` 之外的
+场合会直接调 `xdg-open` 打开它。按键映射只改插件的那一节，缩进相对
 `buttons`。顶部第二栏是配置层：下拉框列 `global` 与每只手柄——包括连着但文件里还没写
 的手柄；「添加手柄」里可以选一只连着的，也可以手写任意 MAC。两层之下都是
 `plugins.buttons`，"所有手柄一套"写进 `global`，"这只手柄单独一套"写进对应的
@@ -304,8 +331,9 @@ ds5dummy-config --plugins-dir /path/to/plugins --no-open
 
 几条边界：
 
-- 只监听 `127.0.0.1`，地址固定，不发放令牌；每个请求仍要过 `Host` 与 `Origin`
-  检查，别的网页发起的跨站请求会被拒。
+- 缺省只监听 `127.0.0.1`；`--bind 0.0.0.0` 把它放到局域网上，不发放令牌。每个请求
+  仍要过 `Host` 与同源 `Origin` 检查，别的网页发起的跨站请求会被拒——但能直接连到
+  它的人不必绕过这些检查，所以只在信得过的网络里用这个参数。
 - 只能编辑块状映射。写成行内形态（`buttons: {…}`）的那一节页面会标成不可编辑，
   请先在文件里展开成缩进的键值行。
 - 层下拉框列出 `global`、文件 `controllers:` 下已有的每只手柄，以及已连接但还没写进

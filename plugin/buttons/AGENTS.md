@@ -16,8 +16,8 @@
 |---|---|---|
 | `init` | worker 主线程，`bt::StartThreads()` 之前 | 验 `host->abi_version`；`settings::Load` 填 `g_rules`；`sense::Reset` 按规则条数定容；打一行武装摘要；返回 0 表示这一轮不生效 |
 | `stop` | worker 主线程，两条传输线程 join 之后 | 只清武装标志，并把攒着的关机请求丢掉 |
-| `on_state_in` | bt 读线程，100–120 Hz | 解码快照 → 判定 → 执行 → 必要时置 `g_power_off_pending` |
-| `on_tick` | worker 主循环，100 ms | 把 pending 搬给 `host->power_off()` |
+| `on_state_in` | bt 读线程，100–120 Hz | 解码快照 → 判定 → 执行 → `kRun` 的命中交 `host->command()`、关机置 `g_power_off_pending` |
+| `on_tick` | worker 主循环，100 ms | 把 pending 搬给 `host->power_off()`；`run` 的命令由宿主自己的排空步骤 fork（不在这个槽里） |
 
 三条纪律是从线程相位推出来的，不是风格：
 
@@ -25,13 +25,18 @@
   会出现在输入链上。全部日志在 `init`（语法回落、武装摘要）与 `on_tick`（动作失败）。
 - **`host->power_off()` 只在 `on_tick` 调**。它同步走 `bt::SetFeature`，预算最长 2 s；搬到
   读线程上就是把整条输入链停住（需求 K-10）。
+- **`host->command()` 可以在 `on_state_in` 里调**。宿主那一侧只做一次定长 memcpy 入队
+  （短锁、不 fork、不做 I/O、不分配），命令文本当场被拷走，插件不必保证那块内存在返回
+  之后还活着；真正 fork 在 worker 主循环的排空那一步（宿主在自己的 `plugin::OnTick()`
+  之后做，见 §5 末尾）。
 - **pending 取走即清，失败不放回去**。想再要一次动作得重新按那组键（K-11），否则控制通道
   每 100 ms 被撞一次。
 
 不加锁的依据是这张表：`g_rules` 只在 `init` 里写、之后每帧只读；`g_state` 只在 bt 读线程上
 读写；`g_host`/`g_armed` 由 `init`/`stop` 写、两个钩子读；主循环一个字节都不碰前三者。
 唯一的跨线程量是 `std::atomic<bool> g_power_off_pending`，它就是把识别（读线程）和执行
-（主循环）隔开的那一次交接。
+（主循环）隔开的那一次交接。`run` 的命令不经过插件里的任何变量跨线程：钩子里交给宿主，
+之后归宿主那条队列自己的锁管。
 
 插件不链宿主、不引用宿主符号：编译命令里只有 `-I src`，能看到的两份头是
 `plugin/plugin_api.h` 与 `plugin/plugin_util.h`。`nm -D --undefined-only buttons.so` 只应
@@ -144,6 +149,8 @@ OnStateIn(state):
   frame    = ids::DecodeFrame(state)        // 快照，栈上，POD
   decision = sense::Evaluate(g_rules, frame, plugin::NowMs(), g_state)
   pipeline::Apply(g_rules, decision, frame, state)   // 只读快照，末尾一次 EncodeFrame
+  for i in g_state.fired_shortcuts:                  // 按规则表序，同一帧多条各一次
+    if g_rules.shortcuts[i].action == kRun: g_host.command(g_rules.shortcuts[i].command…)
   if decision.power_off: g_power_off_pending.store(true)
 ```
 
@@ -159,6 +166,16 @@ OnStateIn(state):
 
 时刻由调用方注入（`NowMs()` 在 `OnStateIn` 里取一次），所以 `sense` 可以在单测里被一帧一帧
 地喂虚拟时钟。**这里没有 `idle` 那种 `PretendIdleFor()`**：不需要只在测试构建里存在的拨表入口。
+
+`run` 的另一半在宿主：`host->command()` 落到 `src/daemon/command_queue.*` 的一张定长环
+（8 条 × `kPluginCommandSize` 字节，满了丢最新一条并记 ERROR），worker 主循环在
+`plugin::OnTick()` 之后调一次 `Drain()`——先 `Reap()`，把环排空：每条一次 fork，
+子进程 `setsid`、`chdir(HOME)`、stdin 接 `/dev/null`，再 `execl("/bin/sh", "sh", "-c", 文本)`，
+父进程只记 pid、不等、不查退出码。在跑的命令有固定上限（`kLiveMax = 64`），排空时已达
+上限的那条丢弃。回收只用 `waitpid(pid, WNOHANG)` 看自己记下的那几个 pid，**不能**
+`waitpid(-1)`：L2CAP 后端的 `RunGdbus` 自己 fork `gdbus` 并在 `waitpid` 里等它，抢着
+回收会让它拿到 `ECHILD`。队列与 pid 表都在 worker 进程里，停服务即丢；命令留在服务的
+cgroup 里，所以 `systemctl stop` 会连它一起杀。层次与线程的那一侧见 `AGENTS.md` §10。
 
 ---
 
@@ -241,6 +258,14 @@ out.digits = (decision.digits & ~gate) | inject | decision.inject
 - `physical` 取的是塑形之前的那份位集合（`frame.digits | direction_latch | TouchpadStates()`），
   所以映射与连点的结果不会喂给触发判定（K-07）。
 
+`State::fired_shortcuts` 是判定层交给装配层的唯一出口：`Reset` 时按规则条数预留，
+`Evaluate` 每帧开头清空，命中一条就把它的**规则表下标**按表序压进去（同一帧多条各
+一个下标）；`decision.power_off` 仍是合并布尔，`kPowerOff` 的命中只置它。装配层据此
+逐条取动作——`kRun` 调 `host->command()`、`kPowerOff` 只让那个布尔为真，所以同一帧
+两条 `run` 各跑一次，多条 `power_off` 仍只发一次关机报告（X-10）。下标只在插件内部
+交给装配层，宿主不知道是哪条规则命中的；关机那一路对 `power_off` 布尔的使用与以前
+完全一样，没有任何"哪一条"的信息离开这个插件。
+
 **宏脉冲**是一次性的（A-05）：命中时 `pulsing = true`、`pulse_until_ms = now + 80`，之后每帧
 把 `macro.digits` 并进 `inject`，到点自己收，**不看那组键还按不按着**。目标位里含扳机时
 `PressTriggers()` 把那一根轴强制成全按（A-03）。
@@ -318,6 +343,11 @@ WARNING 就是把后者也说成前者的错。取值读不通才是用户真的
   与随包 `idle` 的文案同形。
 - **`>毫秒` 必须显式写**：长按没有缺省值。宏脉冲时长也不可配，恒为 `kDefaultPulseMs = 80`，
   所以 `rules::Macro` 里没有 `pulse_ms` 字段——留一个没人能拧的旋钮等于留一处误导。
+- `shortcut` 的动作位置只认 `power_off` 与 `run: <命令>` 两种：`run:` 之后到行尾是命令，
+  内部冒号原样保留；空命令合法（`/bin/sh -c ""` 什么也不做，规则照常参与判定），只有超过
+  `kPluginCommandSize - 1`（511）字节这一条不生效。别的写法（如只写 `reboot`）连动作都认
+  不出：这一处留一行 WARNING 并**同时列出两种写法**——用户要改的是这一行的动作，不是去
+  猜另一种拼法叫什么。
 
 ---
 
@@ -331,8 +361,8 @@ WARNING 就是把后者也说成前者的错。取值读不通才是用户真的
 | 文件 | 覆盖 | 承重断言 |
 |---|---|---|
 | `tests/buttons_ids_test.cpp` | token ↔ 位一一对应；hat 0..7 ↔ 四方向无损、9..15 归一成未按；`Invert` 的不动点；触摸点解码与半区/触点数/划动的判据 | **与 `core::protocol::DecodeInputState` 逐字段相等**（防"按 ○ 出 ✕"）；`DecodeFrame` → `EncodeFrame` 往返后整份 63 字节逐字节相同（这一条正好盖住 `[6]`、`[9]` bit3、`[10..62]`，触摸板那两字因此确实只是读）；`TouchContactsDecodeLikeTheCoreDecoder` 把那两个打包字也对到 core；`TheHalfIsSetWhenTheContactAppearsAndHeldUntilItLeaves`（半区锁存）、`SwipeDirectionWeighsActualDistanceNotRawTicks`（16:9 折算）、`OnlyTheHalfClicksExpandToAWireBitTheyDoNotOwn`（`GateBitsOf` 的那个例外） |
-| `tests/buttons_settings_test.cpp` | 五组语法的正反例逐条；区间；未知组名/token 被忽略；空节；触摸板那族的三种角色（能做源、不能做目标、划动不能做 remap 的源） | 每条反例只让那一条缺席 + **恰好一条** WARNING；`Set::Empty()` |
-| `tests/buttons_sense_test.cpp` | K-01..K-05、K-07/K-08、T-01..T-05、A-01/A-02/A-05、I-01/I-02、I-03/I-04 | 时钟逐帧注入。命名即判据的那几条：`PartialReleaseDoesNotReArmTheGate`（K-08 复位点）、`FirstFrameOfAPressIsStillPressed`（重武装从"开着"起）、`ALateFrameDoesNotCauseAFlickerBurst`（不追欠）、`FourQuickTapsAreTwoDoubles`（一次双击消耗两下）、`InjectedBitsNeverFeedTheTrigger` / `TurboFramesDoNotFeedTheTrigger`（K-07）、`DirectionsAreJudgedFromTheRawAxes`（M-17）、`ASwipeFiresOncePerGestureAndReArmsOnLift`（划动作为事件位喂给既有时序机）、`ATouchpadBindingCentersNoAxis`（I-02 那个遍历边界不越过八个方向） |
+| `tests/buttons_settings_test.cpp` | 五组语法的正反例逐条；区间；未知组名/token 被忽略；空节；触摸板那族的三种角色（能做源、不能做目标、划动不能做 remap 的源）；`shortcut` 的两种动作与 0..511 字节命令 | 每条反例只让那一条缺席 + **恰好一条** WARNING；`Set::Empty()` |
+| `tests/buttons_sense_test.cpp` | K-01..K-05、K-07/K-08、T-01..T-05、A-01/A-02/A-05、I-01/I-02、I-03/I-04 | 时钟逐帧注入。命名即判据的那几条：`PartialReleaseDoesNotReArmTheGate`（K-08 复位点）、`FirstFrameOfAPressIsStillPressed`（重武装从"开着"起）、`ALateFrameDoesNotCauseAFlickerBurst`（不追欠）、`FourQuickTapsAreTwoDoubles`（一次双击消耗两下）、`InjectedBitsNeverFeedTheTrigger` / `TurboFramesDoNotFeedTheTrigger`（K-07）、`DirectionsAreJudgedFromTheRawAxes`（M-17）、`ASwipeFiresOncePerGestureAndReArmsOnLift`（划动作为事件位喂给既有时序机）、`ATouchpadBindingCentersNoAxis`（I-02 那个遍历边界不越过八个方向）、`EachHitNamesTheShortcutThatFired`（`fired_shortcuts` 按表序、每帧开头清空） |
 | `tests/buttons_pipeline_test.cpp` | M-01..M-17 + 半区点击的 gate | 逐位断言；M-06 两跳不出现；M-05 三路 OR；M-08/M-16 行程搬运；M-09/M-10/M-11 按轴；M-14 静置点仍是 128；M-15 对调不重复取值；`EverythingThePluginDoesNotProduceIsLeftAlone`；`AClickOnTheOtherHalfIsNotTheBoundOne`（绑左半的规则抹不掉右半那一次按下，因为 pad 那一位是两条半区共用的） |
 
 装配层（描述符形态、`init` 的两条不返回路径、动作落在心跳而不是钩子、随包 `.so` 真的被扫出）
@@ -341,7 +371,10 @@ WARNING 就是把后者也说成前者的错。取值读不通才是用户真的
 `kDesc` 断言更接近交付物。触摸板那族在这里也各有一条：`ShippedButtonsRewritesAHalfClick`
 从裸字节摆出左半那一次按下，断言主机读到的是 ✕ 而触摸板位被抹掉，再摆右半那一次断言它
 不受这条规则影响；`ShippedButtonsPowersOffOnASwipe` 摆一次上划，断言关机动作仍然落在
-心跳而不是钩子上。
+心跳而不是钩子上。`run` 的那一条是 `ShippedButtonsQueuesRunCommandsFromTheHook`：同一帧
+命中两条 `run`，断言 `host->command()` 在**钩子里**就被调了两次、按表序各一次，第二帧
+不重复入队，`on_tick` 不碰命令路径。宿主那一侧（环满丢最新、超长被拒、`kLiveMax`、
+`Reap` 只等自己的 pid、ECHILD 视为已回收）在 `tests/command_queue_test.cpp`。
 
 测试二进制在严格开关下构建（`-Wsign-conversion -Wold-style-cast -Wmissing-field-initializers`），
 所以**构造 `rules::Set` 一律走测试里的 builder 函数，不用聚合初始化**：`AxisRewrite` 那一格

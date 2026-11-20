@@ -14,8 +14,10 @@
  *
  * 一份描述符是不是宿主认得的形态，只由两样东西决定：**导出名**（.so 里必须是
  * kPluginEntryName）与**版本号**（abi_version 必须等于 kPluginAbiVersion）。
- * 版本号是任何布局改动的唯一开关：删字段、改顺序、改函数签名、在尾部追加字段，
- * 都得递增它——结构体里没有 size，宿主分不出一个较短的旧结构，只能整份拒绝。
+ * 版本号是破坏性布局改动（删字段、改顺序、改函数签名）的唯一开关：结构体里没有
+ * size，宿主分不出一个较短的旧结构，只能整份拒绝。尾部追加字段在开发期不动版本号：
+ * 前缀布局不变，旧 .so 只是读不到新槽；代价是追加之后插件必须与宿主同一棵树一起
+ * 重编，随包插件与第三方插件都不例外。
  *
  * @note 函数签名不匹配是**静默**的：ELF 的 .dynsym 只带名字、地址、代码字节数与
  *       类型，不带参数类型。x86-64 SysV 下多出来的实参被丢弃、缺的实参读到寄存器
@@ -43,6 +45,9 @@ inline constexpr uint32_t kPluginAbiVersion = 1;
 /// 一次输入状态体的字节数；与 core::protocol::kUsbInputStateSize 同值，
 /// 那条同值关系由宿主侧（plugin/plugin.cpp）的 static_assert 钉住。
 inline constexpr std::size_t kPluginStateSize = 63;
+
+/// 一条插件命令的最大字节数，含结尾 NUL：宿主按这个长度拷贝，插件按它减一拒收。
+inline constexpr std::size_t kPluginCommandSize = 512;
 
 /// 承载识别标记的 ELF 节名；装载器不 dlopen 任何没有这个节的 .so。
 /// @note `section` 属性只接受字符串字面量，插件里定义标记时要照抄这个字符串，
@@ -75,7 +80,7 @@ enum ds5LogLevel {
 };
 
 /**
- * @brief 宿主交给插件的能力：一行日志，和一条让手柄关机的通道。
+ * @brief 宿主交给插件的能力：一行日志、让手柄关机的通道，和一条执行命令行的通道。
  *
  * 插件能做的一切都在这个结构体里，没有第二条路：它不 include bridge/bt，也不
  * 靠符号引用去够宿主的东西（主程序不导出符号，真去引用会在 dlopen 时当场失败）。
@@ -100,6 +105,17 @@ struct ds5Host {
    *          （预算 2 s）。在 on_state_in 那类高频钩子上调它就是把输入链停住。
    */
   int (*power_off)(void);
+
+  /**
+   * @brief 排队一条要执行的命令行。
+   * @param text 完整的命令行，按 `/bin/sh -c` 解释；宿主在返回前就拷走，不保留
+   *             指针，插件不必保证这块内存在返回之后还活着。
+   * @return 已入队 1；被拒 0（队列满，或超过 kPluginCommandSize - 1 字节）。
+   * @note 只排队不执行：真正的 fork 在 worker 主循环里，所以任何线程可调，不会
+   *       阻塞输入路径。被拒的原因宿主自己记 ERROR，插件不需要转述。
+   * @note 动作没有回执：命令何时结束、退出码是多少，插件都拿不到。
+   */
+  int (*command)(const char* text);
 };
 
 /**

@@ -29,6 +29,7 @@
 #include "bt/bt.h"
 #include "core/debug.h"
 #include "core/device/descriptors.h"
+#include "daemon/command_queue.h"
 #include "daemon/config.h"
 #include "daemon/handoff.h"
 #include "daemon/identity.h"
@@ -166,6 +167,15 @@ void LogForPlugin(int level, const char* message) {
 int PowerOffForPlugin() { return bridge::PowerOff() ? 1 : 0; }
 
 /**
+ * @brief 插件的命令执行器：只入队，fork 在主循环的 command_queue::Drain 里。
+ * @return 已入队 1；被拒 0（环满或超长），原因由队列自己记 ERROR。
+ * @note 可以从 on_state_in 调用：Post 只做一次 memcpy 与一把短锁，不碰链路。
+ */
+int CommandForPlugin(const char* text) {
+  return command_queue::Post(text) ? 1 : 0;
+}
+
+/**
  * @brief 一个 worker 进程的生命周期持有者。
  * @details 角色：把 bt / bridge / audio / usb 四个模块按依赖顺序接起来，并在
  *          退出信号或链路断开时反向拆掉。协作者：Options（配置）、四个模块的
@@ -265,6 +275,9 @@ class WorkerSession {
       // plugin/plugin_api.h 里 power_off 的线程约束），所以把它排在主循环里，
       // 而不是任何一条传输线程上。
       plugin::OnTick();
+      // 插件命令：钩子只入队，fork 留在主循环这一轮里——与 power_off 同一条纪律，
+      // 输入链路上不出现进程与等待。
+      command_queue::Drain();
 #if DS5DUMMY_DEBUG
       LogStatsWindow();
 #endif
@@ -532,9 +545,10 @@ class WorkerSession {
 
   const Options& options_;
   usb::Endpoints endpoints_;
-  /// 交给插件的宿主能力表；两个执行器都同步碰链路，只能从 OnTick 调用。
+  /// 交给插件的宿主能力表；power_off 同步碰链路、只能从 OnTick 调用，
+  /// command 只入队、任何线程可调。
   const ds5Host plugin_host_{kPluginAbiVersion, &LogForPlugin,
-                             &PowerOffForPlugin};
+                             &PowerOffForPlugin, &CommandForPlugin};
   std::atomic<bool> stop_all_{false};       ///< 链路断/ep0 关：主循环退出请求。
   std::atomic<bool> audio_failed_{false};   ///< 音频线程的一次性失效通知。
 #if DS5DUMMY_DEBUG
@@ -565,6 +579,10 @@ int RunWorker(const Options& options) {
   // 按 HOME 派生，连桌面服务也直接用现成的环境。
   RestoreHome();
   RestoreXdgRuntimeDir();
+  // 命令的工作目录跟着身份走：与 RestoreHome 同一步、同一个 HOME。查不到时退到
+  // 根目录——命令仍然能跑，只是相对路径失去意义。
+  const char* home = ::getenv("HOME");
+  command_queue::Start(home != nullptr ? home : "/");
 
   // 端点号是交接协议的一部分，不跟着配置走：handoff 保证它们就在这三个号上。
   usb::Endpoints endpoints{kEp0Target, kEpInTarget, kEpOutTarget};

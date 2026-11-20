@@ -109,6 +109,7 @@ set(DS5DUMMY_CORE_SRC
     src/core/protocol/output_state.cpp
     src/daemon/options.cpp
     src/daemon/config.cpp
+    src/daemon/command_queue.cpp
     src/daemon/identity.cpp
     src/daemon/shutdown.cpp
     src/daemon/worker.cpp

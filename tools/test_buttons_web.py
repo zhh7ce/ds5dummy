@@ -565,6 +565,76 @@ typo:
             with self.assertRaises(web.ModelError):
                 web.serialize_model([item])
 
+    def test_run_shortcuts_round_trip(self):
+        items = [
+            {"kind": "shortcut", "id": "1", "terms": ["l3", "r3"],
+             "timing": "chord", "ms": None, "action": "run",
+             "command": "/home/deck/bin/tv-replug.sh --quiet"},
+            {"kind": "shortcut", "id": "2", "terms": ["create"],
+             "timing": "tap", "ms": web.DEFAULT_TAP_MS, "action": "run",
+             "command": "sh -c \"a:b; echo '$HOME'\""},
+        ]
+        text = web.serialize_model(items)
+        # `run:` 之后整段原样写回：内部冒号与引号只经 YAML 的引号转义，不被拆开。
+        self.assertIn("run: /home/deck/bin/tv-replug.sh --quiet", text)
+        self.assertEqual(text.count("run:"), 2)
+        again = web.parse_model(text)["items"]
+        self.assertEqual(
+            [(item["action"], item["command"]) for item in again],
+            [
+                ("run", "/home/deck/bin/tv-replug.sh --quiet"),
+                ("run", "sh -c \"a:b; echo '$HOME'\""),
+            ],
+        )
+        self.assertEqual(web.serialize_model(again), text)
+
+    def test_power_off_drops_a_stale_command(self):
+        text = web.serialize_model(
+            [
+                {"kind": "shortcut", "id": "1", "terms": ["l3"],
+                 "timing": "chord", "ms": None, "action": "power_off",
+                 "command": "left over"},
+            ]
+        )
+        self.assertIn("l3: power_off", text)
+        self.assertNotIn("left over", text)
+
+    def test_empty_run_command_round_trips(self):
+        # 空命令也是合法规则：写成裸 `run:`（不留尾随空格），读回来仍是 run + 空命令，
+        # 再写一次逐字节相同。只输空白的命令按空命令收。
+        for command in ("", "   "):
+            items = [{"kind": "shortcut", "id": "1", "terms": ["l3"],
+                      "timing": "chord", "ms": None, "action": "run",
+                      "command": command}]
+            text = web.serialize_model(items)
+            self.assertIn("l3: run:", text)
+            self.assertNotIn("run: ", text)
+            again = web.parse_model(text)["items"]
+            self.assertEqual(
+                [(item["action"], item["command"]) for item in again],
+                [("run", "")],
+            )
+            self.assertEqual(web.serialize_model(again), text)
+
+    def test_unusable_run_forms_stay_other(self):
+        # 不认识的动作与超长命令留在 `other` 里原样显示，由校验器报错。
+        block = "shortcut:\n  '1': 'l3: reboot'\n"
+        self.assertEqual(web.parse_model(block)["items"][0]["kind"], "other")
+        oversize = "x" * (web.MAX_COMMAND_BYTES + 1)
+        block = "shortcut:\n  '1': 'l3: run: " + oversize + "'\n"
+        self.assertEqual(web.parse_model(block)["items"][0]["kind"], "other")
+
+    def test_normalize_rejects_bad_actions(self):
+        base = {"kind": "shortcut", "id": "1", "terms": ["l3"],
+                "timing": "chord", "ms": None}
+        bad = [
+            {"action": "reboot"},
+            {"action": "run", "command": "x" * (web.MAX_COMMAND_BYTES + 1)},
+        ]
+        for extra in bad:
+            with self.assertRaises(web.ModelError):
+                web.serialize_model([{**base, **extra}])
+
 
 def cxx_tokens(source: str, name: str) -> list[str]:
     """从一个 `constexpr std::string_view <name>[] = {...};` 表里取字符串。"""
@@ -632,6 +702,17 @@ class CatalogTest(unittest.TestCase):
         self.assertEqual([timing["id"] for timing in data["timings"]],
                          ["chord", "tap", "double", "long"])
 
+    def test_command_limit_matches_the_host_header(self):
+        # 上限是宿主那一侧的常量：页面按 kPluginCommandSize - 1 字节收口。
+        source = (REPO / "src" / "plugin" / "plugin_api.h").read_text(
+            encoding="utf-8"
+        )
+        match = re.search(r"kPluginCommandSize\s*=\s*(\d+)", source)
+        self.assertIsNotNone(match)
+        self.assertEqual(web.MAX_COMMAND_BYTES, int(match.group(1)) - 1)
+        self.assertEqual(web.catalog()["ranges"]["command_bytes"],
+                         web.MAX_COMMAND_BYTES)
+
 
 #: 插件目录里的按键映射面板；它带着 63 字节解码表的第二处写法。
 PANEL_JS = REPO / "plugin" / "buttons" / "buttons.panel.js"
@@ -688,6 +769,23 @@ def js_shape_tokens(script: str, name: str) -> list[str]:
 def js_string_list(script: str, name: str) -> list[str]:
     """`TOUCH_TOKENS` 那种纯字符串表。"""
     return re.findall(r"'([^']+)'", js_block(script, name))
+
+
+def js_function_body(script: str, name: str) -> str:
+    """一个顶层 `function <name>(...) { ... }` 的函数体，按花括号配对取。"""
+    start = re.search(
+        r"function\s+" + re.escape(name) + r"\s*\([^)]*\)\s*\{", script
+    )
+    if start is None:
+        raise AssertionError(f"buttons.panel.js 里找不到函数 {name}")
+    depth, pos = 1, start.end()
+    while pos < len(script) and depth:
+        if script[pos] == "{":
+            depth += 1
+        elif script[pos] == "}":
+            depth -= 1
+        pos += 1
+    return script[start.end() : pos - 1]
 
 
 def js_stick_axes(script: str) -> list[tuple[str, int, int]]:
@@ -854,6 +952,14 @@ class PageTablesTest(unittest.TestCase):
         self.assertEqual(len(shapes), len(set(shapes)))
         self.assertEqual(sorted(shapes), sorted(web.WIRE_TOKENS))
 
+    def test_icon_only_shapes_carry_a_hit_area(self):
+        """`bare` 的图形只有图标，而图标是 pointer-events:none，必须补一块 hit 才点得动。"""
+        block = js_block(self.script, "PAD_SHAPES")
+        bare = [line for line in block.splitlines() if "tag:'bare'" in line]
+        self.assertTrue(bare)
+        for line in bare:
+            self.assertIn("hit:[", line)
+
     def test_arrows_and_chips_cover_the_judged_forms(self):
         self.assertEqual(js_shape_tokens(self.script, "STICK_ARROWS"),
                          web.SOURCE_TOKENS[23:31])
@@ -874,6 +980,31 @@ class PageTablesTest(unittest.TestCase):
         self.assertIn("for (const offset of [32, 36])", self.script)
         self.assertIn("word & 0x80", self.script)
         self.assertIn("(word >>> 8) & 0xfff", self.script)
+
+
+class PanelFlowTest(unittest.TestCase):
+    """建行流程：新增组合键/宏从空触发开始，没选完的草稿不进校验与保存。"""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.script = page_script()
+
+    def test_new_rules_start_with_an_empty_trigger(self):
+        body = js_function_body(self.script, "addRule")
+        self.assertIn("terms: []", body)
+        self.assertIn("item.targets = []", body)
+        self.assertNotIn("'l3'", body)
+        for name in ("captureSource", "setChordTerms"):
+            self.assertNotIn("['cross']", js_function_body(self.script, name))
+
+    def test_confirm_button_ends_the_row_edit(self):
+        self.assertIn("confirmButton(i)", self.script)
+        self.assertIn(">确定</button>", self.script)
+        self.assertIn("confirmRow,", self.script)
+
+    def test_drafts_stay_out_of_validation_and_save(self):
+        self.assertIn("state.validate(sendableItems())", self.script)
+        self.assertIn("items: sendableItems()", self.script)
 
 
 class BasicConfigTest(unittest.TestCase):
@@ -1067,9 +1198,9 @@ class HttpTest(unittest.TestCase):
         self.server.server_close()
         self.thread.join(5)
 
-    def request(self, method, path, payload=None, headers=None):
+    def request(self, method, path, payload=None, headers=None, port=None):
         connection = http.client.HTTPConnection(
-            "127.0.0.1", self.port, timeout=15
+            "127.0.0.1", port or self.port, timeout=15
         )
         try:
             body = None
@@ -1289,6 +1420,32 @@ class HttpTest(unittest.TestCase):
         self.assertIn("square: circle", data["block"])
         self.assertIn("validation", data)
 
+    @unittest.skipUnless(
+        web.find_checker(None, TOOLS) is not None,
+        "需要 buttons_check：cmake --build build --target buttons_check",
+    )
+    def test_validate_accepts_a_run_shortcut(self):
+        payload = {
+            "name": "buttons",
+            "layer": "global",
+            "items": [
+                {"kind": "shortcut", "id": "1", "terms": ["l3", "r3"],
+                 "timing": "chord", "ms": None, "action": "run",
+                 "command": "echo 'a: b'"},
+            ],
+        }
+        status, data = self.json_of(
+            self.request("POST", self.prefix + "api/validate", payload)
+        )
+        self.assertEqual(status, 200, data)
+        self.assertIn("run: echo", data["block"])
+        parsed = web.parse_model(data["block"])["items"]
+        self.assertEqual(parsed[0]["command"], "echo 'a: b'")
+        validation = data["validation"]
+        self.assertTrue(validation["yaml_ok"], validation)
+        self.assertTrue(validation["armed"], validation)
+        self.assertEqual(validation["rejected"], 0)
+
     def test_validate_rejects_a_bad_model_and_unknown_plugins(self):
         payload = {
             "name": "buttons",
@@ -1333,6 +1490,56 @@ class HttpTest(unittest.TestCase):
             self.prefix + "api/validate",
             payload,
             headers={"Host": "evil.example"},
+        )
+        self.assertEqual(status, 403)
+
+    def test_wildcard_bind_accepts_a_lan_host_but_keeps_same_origin(self):
+        server = web.Server(("0.0.0.0", 0), web.Handler, self.app, False)
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+
+        def stop():
+            server.shutdown()
+            server.server_close()
+            thread.join(5)
+
+        self.addCleanup(stop)
+        port = server.server_address[1]
+        host = f"192.168.1.5:{port}"
+        payload = {
+            "name": "buttons",
+            "layer": "global",
+            "items": [{"kind": "remap", "src": "square", "target": "circle"}],
+        }
+
+        status, _ = self.request(
+            "GET", "/api/state", headers={"Host": host}, port=port
+        )
+        self.assertEqual(status, 200)
+
+        status, data = self.json_of(
+            self.request(
+                "POST",
+                "/api/validate",
+                payload,
+                headers={"Host": host, "Origin": "http://" + host},
+                port=port,
+            )
+        )
+        self.assertEqual(status, 200, data)
+
+        status, _ = self.request(
+            "POST",
+            "/api/validate",
+            payload,
+            headers={"Host": host, "Origin": "http://evil.example"},
+            port=port,
+        )
+        self.assertEqual(status, 403)
+
+        # 绑定是 127.0.0.1 时（本测试的缺省服务），局域网地址不在白名单里。
+        status, _ = self.request(
+            "GET", "/api/state", headers={"Host": host}, port=self.port
         )
         self.assertEqual(status, 403)
 

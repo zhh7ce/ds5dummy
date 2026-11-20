@@ -84,6 +84,13 @@ struct State {
   ids::TouchState touch;           ///< 触摸板那一族：半区锁存、划动起点与事件位。
   std::vector<Slot> slots;         ///< 前段是 shortcuts，后段是 macros。
   std::vector<TurboSlot> turbos;
+  /**
+   * @brief 这一帧命中的 shortcut 下标，按规则表顺序。
+   * @details 装配层靠它逐条取动作：关机仍是合并布尔（多条关机命中只发一次），
+   *          `run` 则需要知道"是哪几条"。容量在 Reset 里按规则条数定死，Evaluate
+   *          每帧只 clear + push_back，不分配。
+   */
+  std::vector<std::size_t> fired_shortcuts;
 };
 
 /**
