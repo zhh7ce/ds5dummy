@@ -4,7 +4,7 @@
 # 只处理应用 release：驱动（`driver.*`）与内核模块的频道 Release（`jupiter-*`）不归这里管（G-02）。
 #
 # 现有的 `release.yml` 一行不动（G-01）：它已经把固定名资产
-# `ds5dummy_bin.pkg.tar.zst` 上传到该 release，这里只做"下载 → 打包 → 附上去"。
+# `ds5dummy-bin.pkg.tar.zst` 上传到该 release，这里只做"下载 → 打包 → 附上去"。
 # 包的形状由 `decky/pack.py` 决定（解包、铺目录、构建前端、压 ZIP）。
 #
 # 幂等：ZIP 已经挂在 release 上就直接结束。GitHub 的 release 可以是不可变的
@@ -26,8 +26,8 @@ permissions:
   contents: write
 
 env:
-  BIN_ASSET: ds5dummy_bin.pkg.tar.zst
-  ZIP_ASSET: ds5dummy_decky.zip
+  BIN_ASSET: ds5dummy-bin.pkg.tar.zst
+  ZIP_ASSET: ds5dummy-decky.zip
 
 # 同一个 tag 只跑一份：两个 workflow_run（例如重跑）同时上传会互相踩。
 concurrency:

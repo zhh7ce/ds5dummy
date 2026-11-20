@@ -22,7 +22,7 @@ permissions:
 
 env:
   # 固定资产名：下载 URL 稳定，安装命令里不用出现 pkgver（0.1.0.r0.gabc1234）。
-  BIN_ASSET: ds5dummy_bin.pkg.tar.zst
+  BIN_ASSET: ds5dummy-bin.pkg.tar.zst
   DRIVER_ASSET: hid-playstation-ds5dummy-dkms.pkg.tar.zst
 
 jobs:
@@ -46,15 +46,15 @@ jobs:
           useradd -m builder
           echo 'builder ALL=(ALL) NOPASSWD: ALL' >/etc/sudoers.d/builder
           chown -R builder "$GITHUB_WORKSPACE"
-          su -s /bin/bash builder -c "cd '$GITHUB_WORKSPACE/pkg/ds5dummy_bin' && makepkg -s --noconfirm"
+          su -s /bin/bash builder -c "cd '$GITHUB_WORKSPACE/pkg/ds5dummy-bin' && makepkg -s --noconfirm"
           # 容器里的 makepkg 默认连 -debug 分包一起产出；发布资产只有主包，
           # 删掉它，后面的通配才只剩一份。
-          rm -f pkg/ds5dummy_bin/*-debug-*.pkg.tar.zst
+          rm -f pkg/ds5dummy-bin/*-debug-*.pkg.tar.zst
       - name: Assert the ABI floor SteamOS can satisfy
         run: |
           set -euo pipefail
           shopt -s nullglob
-          pkgs=(pkg/ds5dummy_bin/ds5dummy_bin-*.pkg.tar.zst)
+          pkgs=(pkg/ds5dummy-bin/ds5dummy-bin-*.pkg.tar.zst)
           if [ ${#pkgs[@]} -ne 1 ]; then
             echo "::error::expected exactly one package, found ${#pkgs[@]}: ${pkgs[*]}"
             exit 1
@@ -100,7 +100,7 @@ jobs:
       - uses: actions/upload-artifact@v4
         with:
           name: bin-package
-          path: pkg/ds5dummy_bin/ds5dummy_bin-*.pkg.tar.zst
+          path: pkg/ds5dummy-bin/ds5dummy-bin-*.pkg.tar.zst
 
   build-driver:
     # 两类标签都要驱动包：v* 用它补建 driver.v1，driver.* 用它发新版本。

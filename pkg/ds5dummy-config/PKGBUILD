@@ -16,13 +16,13 @@ pkgdesc="Local web page for editing DS5Dummy plugin settings"
 arch=('x86_64')
 url="https://github.com/zhh7ce/ds5dummy"
 license=('GPL-3.0-or-later')
-# 程序本体在 ds5dummy_hidraw / ds5dummy_l2cap 里。这是两个本地文件包，pacman
+# 程序本体在 ds5dummy-hidraw / ds5dummy-l2cap 里。这是两个本地文件包，pacman
 # 解析不了仓库之外的虚包，所以不写死依赖哪个后端，只给出提示。
 depends=('python' 'python-yaml')
 makedepends=('cmake' 'pkgconf' 'yaml-cpp' 'git')
 optdepends=(
-  'ds5dummy_hidraw: the HIDRAW-backend bridge whose plugins this page configures'
-  'ds5dummy_l2cap: the L2CAP-backend bridge whose plugins this page configures'
+  'ds5dummy-hidraw: the HIDRAW-backend bridge whose plugins this page configures'
+  'ds5dummy-l2cap: the L2CAP-backend bridge whose plugins this page configures'
 )
 source=('ds5dummy-config')
 b2sums=('SKIP')

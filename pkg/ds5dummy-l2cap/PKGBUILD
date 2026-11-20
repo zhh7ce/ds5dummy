@@ -1,10 +1,10 @@
 # Maintainer: DS5Dummy Project
 #
 # DS5Dummy with the raw L2CAP backend.
-# Build: cd pkg/ds5dummy_l2cap && makepkg -d
-# Install: sudo pacman -U ds5dummy_l2cap-*.pkg.tar.zst
+# Build: cd pkg/ds5dummy-l2cap && makepkg -d
+# Install: sudo pacman -U ds5dummy-l2cap-*.pkg.tar.zst
 
-pkgname=ds5dummy_l2cap
+pkgname=ds5dummy-l2cap
 # Project source lives two directories up from this PKGBUILD.
 _srcdir="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 pkgver=0
@@ -14,7 +14,7 @@ arch=('x86_64')
 url="https://github.com/zhh7ce/ds5dummy"
 license=('GPL-3.0-or-later')
 provides=('ds5dummy')
-conflicts=('ds5dummy' 'ds5dummy_hidraw')
+conflicts=('ds5dummy' 'ds5dummy-hidraw')
 replaces=('ds5dummy')
 depends=('bluez' 'pipewire' 'fmt' 'opus' 'libsamplerate' 'yaml-cpp' 'systemd-libs')
 makedepends=('cmake' 'pkgconf' 'boost' 'git')

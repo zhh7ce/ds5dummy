@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """把应用 release 的预编译包打成 Decky 插件 ZIP（C-02、C-03、T-02）。
 
-输入是 `pkg/ds5dummy_bin` 打出来的 pacman 包（`ds5dummy_bin.pkg.tar.zst`），输出是可
-直接装进 Decky 的 `ds5dummy_decky.zip`。两者是同一份产物的两种形状：ZIP 里的
+输入是 `pkg/ds5dummy-bin` 打出来的 pacman 包（`ds5dummy-bin.pkg.tar.zst`），输出是可
+直接装进 Decky 的 `ds5dummy-decky.zip`。两者是同一份产物的两种形状：ZIP 里的
 `bin/`、`lib/`、`plugins/` 就是那个包 `/usr/lib/ds5dummy/` 下的文件，逐字节相同，
 不重新编译数据面（G-02、C-03）。
 
@@ -49,7 +49,7 @@ DECKY_DIR = REPO_ROOT / "decky"
 # 目录约定一致，否则 Decky 里会出现两个同名插件或找不到它。
 PLUGIN_DIR_NAME = "ds5dummy"
 
-# pacman 包里便携分发的落点（`pkg/ds5dummy_bin` 的 package() 铺出来的位置）。
+# pacman 包里便携分发的落点（`pkg/ds5dummy-bin` 的 package() 铺出来的位置）。
 PAYLOAD_PREFIX = Path("usr/lib/ds5dummy")
 
 # 设备侧真正会用到的子目录：数据面二进制、它随包的共享库、随包插件。
@@ -278,15 +278,15 @@ def main(argv: list[str]) -> int:
         进程退出码：0 成功，1 失败（错误信息已打到 stderr）。
     """
     parser = argparse.ArgumentParser(
-        description="把 ds5dummy_bin 的 pacman 包打成 Decky 插件 ZIP"
+        description="把 ds5dummy-bin 的 pacman 包打成 Decky 插件 ZIP"
     )
-    parser.add_argument("--pkg", required=True, type=Path, help="ds5dummy_bin.pkg.tar.zst")
+    parser.add_argument("--pkg", required=True, type=Path, help="ds5dummy-bin.pkg.tar.zst")
     parser.add_argument("--version", required=True, help="release tag（v 前缀可有可无）")
     parser.add_argument(
         "--out",
         type=Path,
-        default=REPO_ROOT / "build" / "decky" / "ds5dummy_decky.zip",
-        help="输出 ZIP 路径（缺省 build/decky/ds5dummy_decky.zip）",
+        default=REPO_ROOT / "build" / "decky" / "ds5dummy-decky.zip",
+        help="输出 ZIP 路径（缺省 build/decky/ds5dummy-decky.zip）",
     )
     parser.add_argument(
         "--skip-build",

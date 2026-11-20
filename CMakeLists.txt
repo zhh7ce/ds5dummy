@@ -188,7 +188,7 @@ if(BT_BACKEND STREQUAL "L2CAP")
     target_link_libraries(ds5dummyd PRIVATE Threads::Threads ${BLUEZ_LIBRARIES})
     target_compile_definitions(ds5dummyd PRIVATE BT_BACKEND_L2CAP)
     # 分发包里随后端走的 systemd 单元与内核模块清单。
-    set(DS5DUMMY_PKG_DIR "${CMAKE_SOURCE_DIR}/pkg/ds5dummy_l2cap")
+    set(DS5DUMMY_PKG_DIR "${CMAKE_SOURCE_DIR}/pkg/ds5dummy-l2cap")
 
 else()
     # 默认 HIDRAW
@@ -198,7 +198,7 @@ else()
     target_include_directories(ds5dummyd PRIVATE ${DS5DUMMY_MODULE_INCLUDE_DIRS} third_party)
     target_link_libraries(ds5dummyd PRIVATE Threads::Threads)
     target_compile_definitions(ds5dummyd PRIVATE BT_BACKEND_HIDRAW)
-    set(DS5DUMMY_PKG_DIR "${CMAKE_SOURCE_DIR}/pkg/ds5dummy_hidraw")
+    set(DS5DUMMY_PKG_DIR "${CMAKE_SOURCE_DIR}/pkg/ds5dummy-hidraw")
 endif()
 
 # ---------------------------------------------------------------------------

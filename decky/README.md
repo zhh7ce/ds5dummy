@@ -8,13 +8,13 @@
 ## 安装
 
 1. 先装 [Decky Loader](https://github.com/SteamDeckHomebrew/decky-loader)。
-2. 从本项目的应用 release（`v*` 标签）下载 `ds5dummy_decky.zip`。
+2. 从本项目的应用 release（`v*` 标签）下载 `ds5dummy-decky.zip`。
 3. Decky → 设置 → 开发者 → 从 ZIP 安装插件，选那个文件。
 4. 回到 Decky 的插件列表，打开 **DS5Dummy**。
 
 这个插件**不需要**先在系统里装任何 ds5dummy 的包，也不需要在 Deck 上编译：转发程序和
 它的插件都随 ZIP 带在插件目录里。反过来，如果系统里已经装了本项目的 Arch 包
-（`ds5dummy_hidraw`、`ds5dummy_l2cap` 或预编译的 `ds5dummy_bin`），两边会争同一批内核
+（`ds5dummy-hidraw`、`ds5dummy-l2cap` 或预编译的 `ds5dummy-bin`），两边会争同一批内核
 模块与虚拟设备，启用时会被拒绝并提示先停掉 `ds5dummy.service`。
 
 ## 首次启用

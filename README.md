@@ -29,25 +29,25 @@ Entertainment DualSense Wireless Controller`，`054c:0ce6`），同时把它经�
 
 | 你的系统 | 怎么装 |
 |---|---|
-| Arch Linux（含 Arch 系衍生版） | release 上的预编译包 `ds5dummy_bin`，或用仓库里的 PKGBUILD 自己编 |
+| Arch Linux（含 Arch 系衍生版） | release 上的预编译包 `ds5dummy-bin`，或用仓库里的 PKGBUILD 自己编 |
 | SteamOS（原生 SteamOS / Steam Deck） | Decky Loader 插件 |
 | 其他 Linux | 从源码构建 |
 
 ### Arch Linux（含衍生版）
 
-**预编译包**：release 上挂着打包时编好的 `ds5dummy_bin.pkg.tar.zst`，装不了工具链的机器
+**预编译包**：release 上挂着打包时编好的 `ds5dummy-bin.pkg.tar.zst`，装不了工具链的机器
 也能直接装：
 
 ```bash
-sudo pacman -U ds5dummy_bin.pkg.tar.zst
+sudo pacman -U ds5dummy-bin.pkg.tar.zst
 ```
 
 **自己编**：
 
 ```bash
-cd pkg/ds5dummy_hidraw
+cd pkg/ds5dummy-hidraw
 makepkg -d
-sudo pacman -U ds5dummy_hidraw-*.pkg.tar.zst
+sudo pacman -U ds5dummy-hidraw-*.pkg.tar.zst
 ```
 
 **两种装法都必须再装内核驱动补丁**，否则内核自带的 `hid-playstation` 会接管这只蓝牙
@@ -66,7 +66,7 @@ sudo pacman -U hid-playstation-ds5dummy-dkms-*.pkg.tar.zst
 
 原生 SteamOS 是不可变系统，系统更新会把 `/usr` 整份替换掉，装在系统目录里的东西留不住，
 所以走 [Decky Loader](https://github.com/SteamDeckHomebrew/decky-loader) 插件这条路：装
-Decky，从本项目 release 下载 `ds5dummy_decky.zip`，Decky → 设置 → 开发者 → 从 ZIP 安装
+Decky，从本项目 release 下载 `ds5dummy-decky.zip`，Decky → 设置 → 开发者 → 从 ZIP 安装
 插件，再在 Decky 的插件列表里打开 **DS5Dummy**。插件自带转发程序，内核模块按当前系统内核
 自动取回并缓存；系统更新换内核后同样不需要手动处理。面板说明、缓存位置与卸载见
 [decky/README.md](decky/README.md)。

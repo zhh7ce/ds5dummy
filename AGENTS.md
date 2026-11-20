@@ -48,8 +48,8 @@ Entertainment / DualSense Wireless Controller"，DualSense Edge 是 `054c:0df2`
 | `plugin/` | 随包插件源码，与宿主分开编译：`idle/` 只 include `src/plugin/` 的两份插件作者头文件，不链接宿主任何符号，`c++ -std=c++20 -fPIC -shared -I src plugin/idle/idle.cpp` 就能单独编出 `idle.so`；`buttons/` 同一条路（六个 TU 编成一份 `buttons.so`，它自己的程序侧说明在 `plugin/buttons/AGENTS.md`）；两个目录里还各有一份供配置页面使用的 `<插件名>.panel.js` |
 | `tests/` | googletest 单测（`ctest`，无 root、无硬件） |
 | `tools/` | 诊断程序：`spike_l2cap`、`spike_rumble`、`mini_gadget`、`audio_dump`(+`dump_sink.*`)、几个 `spike_*` 特权/交接探针；`buttons_check` 是 buttons 配置的只读校验器（共用 `buttons_config`，不装载 `.so`），`buttons_web.py` + `buttons_web.html` 是本地配置页面（Python 回环服务、缺省地址 `127.0.0.1:8777`、`--bind 0.0.0.0` 可放到局域网、无令牌；壳画服务状态、配置层选择与只读的当前状态，并取回每层的插件节推给面板——面板不读文件、不发请求；插件界面由插件目录里的 `<插件名>.panel.js` 提供，没有面板的插件退回通用键值编辑器；判定仍调 `buttons_check`），`panels/core.js` 是随工具的 core 面板；`win_audio_probe.cpp` 是唯一的 Windows 侧探针（mingw 交叉编译，在 Wine/Proton 前缀里读 MMDevice 与 setupapi，不参与 Linux 构建） |
-| `pkg/ds5dummy_hidraw`、`pkg/ds5dummy_l2cap` | 两个互斥的 Arch 包：systemd 单元、`/etc/ds5dummy/config.yaml`、`/usr/share/doc/ds5dummy/user-config.example.yaml`、modprobe/modules-load 配置、install 钩子，以及随包插件与它们的配置面板 |
-| `pkg/ds5dummy_bin` | 预编译包：打包时用便携参数编出 dist 二进制，按 Arch 目录铺开（`/usr/lib/ds5dummy/{bin,lib,plugins}` + `/usr/bin` 符号链接 + 单元/模块配置/`/etc` 配置），供装不了工具链的机器装（SteamOS） |
+| `pkg/ds5dummy-hidraw`、`pkg/ds5dummy-l2cap` | 两个互斥的 Arch 包：systemd 单元、`/etc/ds5dummy/config.yaml`、`/usr/share/doc/ds5dummy/user-config.example.yaml`、modprobe/modules-load 配置、install 钩子，以及随包插件与它们的配置面板 |
+| `pkg/ds5dummy-bin` | 预编译包：打包时用便携参数编出 dist 二进制，按 Arch 目录铺开（`/usr/lib/ds5dummy/{bin,lib,plugins}` + `/usr/bin` 符号链接 + 单元/模块配置/`/etc` 配置），供装不了工具链的机器装（SteamOS） |
 | `pkg/ds5dummy-config` | 独立的配置工具包：`ds5dummy-config` 入口、`buttons_web.py` + `buttons_web.html`、core 面板与 `buttons_check`；构建只编校验器，不依赖数据面的库 |
 | `pkg/hid-playstation-ds5dummy/` | 内核 `hid-playstation` 的 DKMS 补丁（hidraw 后端用），只接管蓝牙 DualSense/Edge，合成 VID/PID（`1998:1221`/`1998:1103`）；DualShock 4 与所有 USB 设备走原驱动路径。PKGBUILD 只依赖 `dkms`，头文件由用户按内核自装 |
 | `scripts/` | `setup.sh`/`teardown.sh`（整站准备/清理；teardown 先停掉并禁用 `ds5dummy.service`，再扫 `ds5dummy*` 整族并卸载每个 `ffs-ds5*` 挂载）、`setup-dummy-hcd.sh`/`teardown-dummy-hcd.sh`（只喂 `tools/mini_gadget` 的最小版）、`install.sh`（可重定位分发 `dist` 的安装脚本：整棵树复制到家目录前缀、单元指向该前缀）、`verify.sh`（双后端 + ASan 的发布前验证）；发布侧的 `steamos_repo.py`、`steamos_toolchain.py`、`kernel_source.py`、`kmod_plan.py` 与它们的 `tests/` 见 §17 |
@@ -786,7 +786,7 @@ MODULE（`ds5dummy_plugin_probe`，不链接测试二进制），测试把它拷
 
 ## 14. 打包与内核侧
 
-两个后端包（`pkg/ds5dummy_hidraw`、`pkg/ds5dummy_l2cap`）装
+两个后端包（`pkg/ds5dummy-hidraw`、`pkg/ds5dummy-l2cap`）装
 `/usr/bin/ds5dummyd`、`/usr/lib/ds5dummy/plugins/idle.so`、
 `/usr/lib/ds5dummy/plugins/buttons.so`、`/usr/lib/ds5dummy/plugins/idle.panel.js`、
 `/usr/lib/ds5dummy/plugins/buttons.panel.js`（配置页面的面板，与 `.so` 同目录；
@@ -832,7 +832,7 @@ DESTDIR 暂存、`--prefix /` 再打成 tarball；装到哪个前缀由 `scripts
 同一条规则。这套路径没有内核模块：HIDRAW 后端仍要用户自装 DKMS 包，`install.sh` 缺它时
 只警告。
 
-`pkg/ds5dummy_bin` 把同一份便携构建装成 Arch 包，产物是给装不了工具链的机器装的
+`pkg/ds5dummy-bin` 把同一份便携构建装成 Arch 包，产物是给装不了工具链的机器装的
 （SteamOS 的镜像剥掉了开发文件，cmake/boost 那套跑不起来）：`build()` 用
 `-DBT_BACKEND=HIDRAW -DDS5DUMMY_PORTABLE=ON` 配置后调 `dist` 目标，`package()` 解出
 那份 tarball 再铺到系统目录。二进制与它的 yaml-cpp 一起装在私有前缀
@@ -878,9 +878,9 @@ worker 退出）；恢复后见标记就 `systemctl start`。留在 `/run` 的�
 跑 full-speed，因为本项目提供的是 FS 描述符；`num` 是同时能服务的手柄数上限，缺省
 3，要接更多手柄就改这一行，它是加载参数、改完要停服务后重载 `dummy_hcd`）。差别在
 HID 侧：
-- `pkg/ds5dummy_hidraw` 的 modules-load 里装的是 `hid_playstation_ds5dummy`（DKMS 补丁，
+- `pkg/ds5dummy-hidraw` 的 modules-load 里装的是 `hid_playstation_ds5dummy`（DKMS 补丁，
   把真蓝牙 DualSense/Edge 留在 hidraw-only 并合成 `1998:1221`/`1998:1103`，其余机型与 USB 设备不受影响），`hidp` **必须**可用、不能 blacklist；
-- `pkg/ds5dummy_l2cap` 装的是 in-tree `hid_playstation`，让 BlueZ 先建 HID session 再交接
+- `pkg/ds5dummy-l2cap` 装的是 in-tree `hid_playstation`，让 BlueZ 先建 HID session 再交接
   PSM。
 
 ---
@@ -1035,9 +1035,9 @@ Deck 插件自己的安装说明在 `decky/README.md`。
 两个后端包互斥，`makepkg -d` 的 `-d` 跳过依赖检查（PKGBUILD 里给的就是这条命令）：
 
 ```bash
-cd pkg/ds5dummy_hidraw          # 或 pkg/ds5dummy_l2cap
+cd pkg/ds5dummy-hidraw          # 或 pkg/ds5dummy-l2cap
 makepkg -d
-sudo pacman -U ds5dummy_*.pkg.tar.zst
+sudo pacman -U ds5dummy-*.pkg.tar.zst
 ```
 
 hidraw 后端另装 DKMS 驱动补丁（不装的话 in-tree `hid-playstation` 会抢走蓝牙手柄）：
