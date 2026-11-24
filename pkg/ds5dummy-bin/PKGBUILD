@@ -35,16 +35,15 @@ arch=('x86_64')
 url="https://github.com/zhh7ce/ds5dummy"
 license=('GPL-3.0-or-later')
 provides=('ds5dummy')
-conflicts=('ds5dummy' 'ds5dummy-hidraw' 'ds5dummy-l2cap')
-replaces=('ds5dummy')
+conflicts=('ds5dummy' 'ds5dummy-hidraw' 'ds5dummy-l2cap' 'ds5dummy-config' 'ds5dummy-config-bin')
+replaces=('ds5dummy' 'ds5dummy-config' 'ds5dummy-config-bin')
 # yaml-cpp 不在这里：随包那份在 /usr/lib/ds5dummy/lib 下，与宿主自己的版本互不干扰。
 # fmt 只在构建期要（FMT_HEADER_ONLY 之后没有动态依赖）。
-depends=('bluez' 'pipewire' 'opus' 'libsamplerate' 'systemd-libs')
+depends=('bluez' 'pipewire' 'opus' 'libsamplerate' 'systemd-libs' 'python' 'python-yaml')
 makedepends=('cmake' 'pkgconf' 'boost' 'fmt' 'git' 'yaml-cpp')
 optdepends=(
   'dummy_hcd: kernel module (CONFIG_USB_DUMMY_HCD=m)'
   'hid-playstation-ds5dummy-dkms: hidraw-only Bluetooth DualSense support'
-  'ds5dummy-config: local web page for editing the plugin settings'
 )
 backup=(
   'etc/modprobe.d/ds5dummy.conf'
@@ -120,6 +119,21 @@ package() {
   install -m755 "$tree/bin/ds5dummyd" "$pkgdir/usr/lib/ds5dummy/bin/ds5dummyd"
   ln -s ../lib/ds5dummy/bin/ds5dummyd "$pkgdir/usr/bin/ds5dummyd"
   install -m644 "$tree"/lib/libyaml-cpp.so.* "$pkgdir/usr/lib/ds5dummy/lib/"
+
+  # 配置工具随 tarball 一起产出（CMake dist 清单），这里按同一前缀铺开。
+  # 入口脚本与校验器都放 bin/，和 ds5dummyd 共用 $ORIGIN/../lib 的 RPATH。
+  install -Dm755 "$tree/bin/ds5dummy-config" \
+    "$pkgdir/usr/lib/ds5dummy/bin/ds5dummy-config"
+  ln -s ../lib/ds5dummy/bin/ds5dummy-config \
+    "$pkgdir/usr/bin/ds5dummy-config"
+  install -Dm755 "$tree/bin/buttons_check" \
+    "$pkgdir/usr/lib/ds5dummy/bin/buttons_check"
+  install -Dm755 "$tree/lib/buttons_web.py" \
+    "$pkgdir/usr/lib/ds5dummy/lib/buttons_web.py"
+  install -Dm644 "$tree/lib/buttons_web.html" \
+    "$pkgdir/usr/lib/ds5dummy/lib/buttons_web.html"
+  install -Dm644 "$tree/lib/panels/core.js" \
+    "$pkgdir/usr/lib/ds5dummy/lib/panels/core.js"
 
   install -m755 "$tree"/plugins/*.so "$pkgdir/usr/lib/ds5dummy/plugins/"
   install -m644 "$tree"/plugins/*.panel.js "$pkgdir/usr/lib/ds5dummy/plugins/"

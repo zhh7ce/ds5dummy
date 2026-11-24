@@ -52,13 +52,8 @@ sudo pacman -R ds5dummy_bin hid-playstation-ds5dummy-dkms
 
 面板说明、缓存位置与卸载方式见插件目录里的 README。
 
-## 配置工具（可选）
+## 配置工具
 
-不想手写 YAML 就单独装本页的 `ds5dummy-config-bin.pkg.tar.zst`：
-
-```bash
-sudo pacman -U https://github.com/zhh7ce/ds5dummy/releases/download/v0.1.2/ds5dummy-config-bin.pkg.tar.zst
-```
-
-装好后在终端运行 `ds5dummy-config`，浏览器打开 `http://127.0.0.1:8777/` 就能在网页上
-改手柄设置（按键映射、自动关机之类），保存前会先做一次校验。
+配置工具已随主程序包一起安装，不需要单独装包。运行 `ds5dummy-config` 后浏览器打开
+`http://127.0.0.1:8777/` 就能在网页上改手柄设置（按键映射、自动关机之类），保存前
+会先做一次校验。Decky 用户从插件面板的「操作」里点「打开配置页面」即可。

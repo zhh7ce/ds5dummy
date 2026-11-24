@@ -109,6 +109,11 @@ const redownload = callable<[], Snapshot>("redownload");
 const restartDaemon = callable<[], Snapshot>("restart_daemon");
 const cleanCache = callable<[], Snapshot>("clean_cache");
 const getLogs = callable<[], LogBundle>("get_logs");
+/** 起随包的配置页面；返回它监听的地址，失败时带一句原因。 */
+const openConfigRpc = callable<
+  [],
+  { ok: boolean; url?: string; error?: string }
+>("open_config");
 
 /**
  * 八种状态的中文名（§4.3）。
@@ -377,6 +382,20 @@ function Content() {
     }
   };
 
+  /** 起配置页面并把地址报给用户；页面自己会拉起浏览器。 */
+  const openConfig = async () => {
+    try {
+      const result = await openConfigRpc();
+      if (!result.ok) throw new Error(result.error ?? "未知错误");
+      toaster.toast({
+        title: "配置页面已启动",
+        body: result.url ?? "http://127.0.0.1:8777/",
+      });
+    } catch (error) {
+      toaster.toast({ title: "启动配置页面失败", body: String(error) });
+    }
+  };
+
   if (snapshot === null) {
     return (
       <PanelSection>
@@ -554,6 +573,15 @@ function Content() {
             onClick={() => void openLogs()}
           >
             查看日志
+          </ButtonItem>
+        </PanelSectionRow>
+        <PanelSectionRow>
+          <ButtonItem
+            layout="below"
+            disabled={pending}
+            onClick={() => void openConfig()}
+          >
+            打开配置页面
           </ButtonItem>
         </PanelSectionRow>
       </PanelSection>

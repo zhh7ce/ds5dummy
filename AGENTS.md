@@ -3,6 +3,14 @@
 面向要改这个仓库代码的人。内容全部从当前代码、构建脚本与打包文件推出，不含历史叙述。
 面向终端用户的安装与运行说明在 [README.md](README.md)。
 
+## AI 生成文件的存放约定
+
+`.agents/`（已 gitignore）专门放 AI 生成的临时文件、需求与设计文档、执行计划等，
+例如 `audio-haptics-requirements.md`、`audio-haptics-stage2-design.md` 以及
+`superpowers/` 下的 specs/plans。**以后新生成的这类文档一律写进 `.agents/`，不要放进
+`docs/`。** `docs/` 只放要进 git 的正式文档（如 `releases/`）；Doxygen 输出与演示
+文稿物料虽留在 `docs/`，但已单独 ignore，不进 git。
+
 ---
 
 ## 1. 系统在做什么
@@ -50,11 +58,9 @@ Entertainment / DualSense Wireless Controller"，DualSense Edge 是 `054c:0df2`
 | `tools/` | 诊断程序：`spike_l2cap`、`spike_rumble`、`mini_gadget`、`audio_dump`(+`dump_sink.*`)、几个 `spike_*` 特权/交接探针；`buttons_check` 是 buttons 配置的只读校验器（共用 `buttons_config`，不装载 `.so`），`buttons_web.py` + `buttons_web.html` 是本地配置页面（Python 回环服务、缺省地址 `127.0.0.1:8777`、`--bind 0.0.0.0` 可放到局域网、无令牌；壳画服务状态、配置层选择与只读的当前状态，并取回每层的插件节推给面板——面板不读文件、不发请求；插件界面由插件目录里的 `<插件名>.panel.js` 提供，没有面板的插件退回通用键值编辑器；判定仍调 `buttons_check`），`panels/core.js` 是随工具的 core 面板；`win_audio_probe.cpp` 是唯一的 Windows 侧探针（mingw 交叉编译，在 Wine/Proton 前缀里读 MMDevice 与 setupapi，不参与 Linux 构建） |
 | `pkg/ds5dummy-hidraw`、`pkg/ds5dummy-l2cap` | 两个互斥的 Arch 包：systemd 单元、`/etc/ds5dummy/config.yaml`、`/usr/share/doc/ds5dummy/user-config.example.yaml`、modprobe/modules-load 配置、install 钩子，以及随包插件与它们的配置面板 |
 | `pkg/ds5dummy-bin` | 预编译包：打包时用便携参数编出 dist 二进制，按 Arch 目录铺开（`/usr/lib/ds5dummy/{bin,lib,plugins}` + `/usr/bin` 符号链接 + 单元/模块配置/`/etc` 配置），供装不了工具链的机器装（SteamOS） |
-| `pkg/ds5dummy-config` | 独立的配置工具包：`ds5dummy-config` 入口、`buttons_web.py` + `buttons_web.html`、core 面板与 `buttons_check`；构建只编校验器，不依赖数据面的库 |
-| `pkg/ds5dummy-config-bin` | 同一份页面的预编译包：便携参数编出 `buttons_check`，随包 yaml-cpp，整棵树装进自己的前缀 `/usr/lib/ds5dummy-config`（不与 `/usr/lib/ds5dummy` 交叉）；`provides=('ds5dummy-config')` |
 | `pkg/hid-playstation-ds5dummy/` | 内核 `hid-playstation` 的 DKMS 补丁（hidraw 后端用），只接管蓝牙 DualSense/Edge，合成 VID/PID（`1998:1221`/`1998:1103`）；DualShock 4 与所有 USB 设备走原驱动路径。PKGBUILD 只依赖 `dkms`，头文件由用户按内核自装 |
 | `scripts/` | `setup.sh`/`teardown.sh`（整站准备/清理；teardown 先停掉并禁用 `ds5dummy.service`，再扫 `ds5dummy*` 整族并卸载每个 `ffs-ds5*` 挂载）、`setup-dummy-hcd.sh`/`teardown-dummy-hcd.sh`（只喂 `tools/mini_gadget` 的最小版）、`install.sh`（可重定位分发 `dist` 的安装脚本：整棵树复制到家目录前缀、单元指向该前缀）、`verify.sh`（双后端 + ASan 的发布前验证）；发布侧的 `steamos_repo.py`、`steamos_toolchain.py`、`kernel_source.py`、`kmod_plan.py` 与它们的 `tests/` 见 §17 |
-| `.github/workflows/` | `release.yml`（推 tag 建 Arch 包并发布：`v*` 发应用包与配置工具包、`driver.*` 发驱动包）、`kmod.yml`（按内核编模块，每个频道一个固定 Release，见 §17） |
+| `.github/workflows/` | `release.yml`（推 tag 建 Arch 包并发布：`v*` 发应用包、`driver.*` 发驱动包）、`kmod.yml`（按内核编模块，每个频道一个固定 Release，见 §17） |
 | `docs/releases/kmod/` | 频道 Release 的说明模板（§17） |
 | `third_party/` | loguru（vendored，不改注释不格式化） |
 
@@ -802,33 +808,23 @@ MODULE（`ds5dummy_plugin_probe`，不链接测试二进制），测试把它拷
 回写会把它重置为 1），`depends` 只含数据面运行库，构建参数固定在
 `-DCMAKE_BUILD_TYPE=Release -DBT_BACKEND=<对应后端> -DDS5DUMMY_STRICT=ON
 -DDS5DUMMY_DEBUG=OFF -DDS5DUMMY_DEBUG_LOG=OFF -DDS5DUMMY_BUILD_TOOLS=OFF
--DCMAKE_INSTALL_PREFIX=/usr`：诊断工具只留在构建树里、不安装。配置页面通过
-`optdepends` 指向 `ds5dummy-config`，不并进后端包。
+-DCMAKE_INSTALL_PREFIX=/usr`：诊断工具只留在构建树里、不安装。
 
-`pkg/ds5dummy-config` 是独立的配置工具包：装 `/usr/bin/ds5dummy-config`（入口，把参数
-交给 `/usr/lib/ds5dummy/buttons_web.py`）、`/usr/lib/ds5dummy/buttons_web.html`、
-`/usr/lib/ds5dummy/panels/core.js`（页面壳与 core 面板）、`/usr/bin/buttons_check`
-（页面保存前的权威判定，也是可单独运行的只读校验器）；依赖 `python` 与
-`python-yaml`，`makedepends` 只需要 `cmake pkgconf yaml-cpp git`。构建传
-`-DDS5DUMMY_CONFIG_ONLY=ON`，CMake 只注册 `buttons_check` 后提前返回，不要求
-PipeWire/Opus/BlueZ 这些数据面依赖。它不硬依赖后端：两个后端是仓库外的本地文件包，
-pacman 解析不了 `ds5dummy` 虚包，所以只在 `optdepends` 里列出两个后端。
-
-`pkg/ds5dummy-config-bin` 是同一份页面的预编译包（与 `ds5dummy-bin` 同一条便携路线），
-整个页面装进它自己的前缀 `/usr/lib/ds5dummy-config`：页面脚本、`buttons_web.html`、
-`panels/core.js` 在根上，便携编出的 `buttons_check` 与随包的 `libyaml-cpp.so.*` 在
-`bin/`、`lib/` 两个兄弟目录，`/usr/bin/buttons_check` 是指向 `bin/` 的符号链接，
-RPATH `$ORIGIN/../lib` 因此仍指向前缀的 `lib/`；`/usr/bin/ds5dummy-config` 是共享入口
-脚本的副本，装包时把 exec 那一行改到本前缀。分开的理由是 pacman 不允许两个包拥有同一
-路径：`ds5dummy-bin` 也随包一份 yaml-cpp（`/usr/lib/ds5dummy/lib/libyaml-cpp.so.0.9`），
-两棵树不交叉才装得在一起。它 `provides=('ds5dummy-config')`（并与源码那份
-`conflicts`），所以后端包的 `optdepends` 只写不带后缀的名字，装哪一份都满足；`v*`
-release 上它以固定名 `ds5dummy-config-bin.pkg.tar.zst` 与应用包一起发布。
+**配置工具随每个主程序包一起装**，没有独立包。三份包的 `package()` 都装
+`/usr/bin/ds5dummy-config`（符号链接）、`/usr/lib/ds5dummy/bin/buttons_check`、
+`/usr/lib/ds5dummy/lib/buttons_web.py` 与 `buttons_web.html`、
+`/usr/lib/ds5dummy/lib/panels/core.js`（页面壳与 core 面板）；插件面板仍与各自的
+`.so` 同目录。共享入口脚本在 `tools/ds5dummy-config`，它按自身真实路径解析前缀的
+`lib/` 与 `plugins/`，所以 `/usr/bin` 下那条符号链接与家目录前缀的 tarball 用的是
+同一份脚本。校验器随常规 CMake 构建产出（没有 `DS5DUMMY_CONFIG_ONLY` 开关）；便携
+构建里它与主程序共用 `$ORIGIN/../lib` 的 RPATH 和同一份随包 yaml-cpp。三个包都依赖
+`python` 与 `python-yaml`，并声明 `conflicts`/`replaces` 接管旧独立包，升级时不留
+重复文件。`v*` release 只发一个应用包，不再单独发布配置工具。
 
 **可重定位分发**（`cmake --build build --target dist`，产物
 `build/dist/ds5dummy-<version>-linux-<arch>.tar.gz`）是给"装不进系统目录"的场合用的
-备用形状，不替代上面四个包：`install()` 规则铺出前缀相对布局
-（`bin/ds5dummyd`、`lib/`、`plugins/`、`share/`、根上的 `install.sh`），`dist` 用
+备用形状，不替代上面三个包：`install()` 规则铺出前缀相对布局
+（`bin/`、`lib/`、`plugins/`、`share/`、根上的 `install.sh`），`dist` 用
 DESTDIR 暂存、`--prefix /` 再打成 tarball；装到哪个前缀由 `scripts/install.sh` 决定
 （默认 `$SUDO_USER` 家目录下的 `DS5Dummy/`），它只把单元、睡眠钩子、模块清单与
 `/etc/ds5dummy/config.yaml`（已存在则保留）落到系统目录，`ExecStart` 按前缀改写，
@@ -1064,13 +1060,8 @@ DKMS 包只依赖 `dkms`、不写头文件依赖（§14）；装之前须自行�
 （Arch 上是 `linux-headers`/`linux-zen-headers`，Deck 上是 `linux-neptune-*-headers`），
 缺了 dkms 会报 `Your kernel headers for kernel ... cannot be found`。
 
-可选的配置工具包不依赖后端，装不装都不影响转发：
-
-```bash
-cd pkg/ds5dummy-config
-makepkg -d
-sudo pacman -U ds5dummy-config-*.pkg.tar.zst
-```
+配置工具已随主程序包一起安装，不需要单独装包。装好后运行 `ds5dummy-config`，
+在浏览器打开 `http://127.0.0.1:8777/` 即可编辑按钮配置。
 
 ### 装完之后
 

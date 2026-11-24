@@ -62,8 +62,8 @@ sudo pacman -U hid-playstation-ds5dummy-dkms-*.pkg.tar.zst
 这个 DKMS 包不写内核头文件依赖，装之前请自行装好当前内核对应的头文件（Arch 上是
 `linux-headers` 或 `linux-zen-headers`）。
 
-**配置页面（可选）**：不想手写 YAML 就装 release 上的 `ds5dummy-config-bin.pkg.tar.zst`，
-运行 `ds5dummy-config` 后在浏览器打开 `http://127.0.0.1:8777/`。
+**配置页面**：主程序包已自带。运行 `ds5dummy-config` 后在浏览器打开
+`http://127.0.0.1:8777/`。
 
 ### SteamOS
 
@@ -72,8 +72,8 @@ sudo pacman -U hid-playstation-ds5dummy-dkms-*.pkg.tar.zst
 Decky，从本项目 release 下载 `ds5dummy-decky.zip`，Decky → 设置 → 开发者 → 从 ZIP 安装
 插件，再在 Decky 的插件列表里打开 **DS5Dummy**。插件自带转发程序，内核模块按当前系统内核
 自动取回并缓存；系统更新换内核后同样不需要手动处理。面板说明、缓存位置与卸载见
-[decky/README.md](decky/README.md)。配置页面不在插件里：要用就按 Arch 的方式装
-`ds5dummy-config-bin.pkg.tar.zst`（同样先 `steamos-readonly disable`，系统更新后重装）。
+[decky/README.md](decky/README.md)。插件自带配置页面，在面板的「操作」里点
+「打开配置页面」即可编辑按钮配置并保存生效。
 
 ### 其他 Linux
 

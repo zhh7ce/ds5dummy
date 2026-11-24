@@ -5,7 +5,8 @@
 # 再把只有 root 能写的那几处挂上去：
 #
 #   <prefix>/bin/ds5dummyd                   数据面程序（Manager + worker 同一个二进制）
-#   <prefix>/lib/                            随包的 yaml-cpp（便携构建）
+#   <prefix>/bin/{buttons_check,ds5dummy-config}  配置校验器与页面入口
+#   <prefix>/lib/                            随包的 yaml-cpp（便携构建）+ 配置页面与 core 面板
 #   <prefix>/plugins/                        随包插件与它们的面板
 #   /etc/systemd/system/ds5dummy.service     ExecStart 指向前缀里的那个程序
 #   /usr/lib/systemd/system-sleep/ds5dummy   挂起前停、恢复后起
@@ -260,4 +261,5 @@ log "unit:          /etc/systemd/system/ds5dummy.service (ExecStart=$prefix/bin/
 log "system config: /etc/ds5dummy/config.yaml"
 log "user config:   $home/.config/ds5dummy/config.yaml"
 log "example:       $prefix/share/doc/ds5dummy/user-config.example.yaml"
+log "config page:   $prefix/bin/ds5dummy-config"
 log "status:        systemctl status ds5dummy"

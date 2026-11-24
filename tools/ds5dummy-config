@@ -1,0 +1,16 @@
+#!/bin/sh
+# DS5Dummy 用户配置页面入口，装成 <prefix>/bin/ds5dummy-config。
+#
+# 页面脚本与静态资源（buttons_web.html、panels/core.js）在兄弟目录 lib/，
+# 插件面板随各自的 .so 装在插件目录里，由页面自己扫。
+# 通过解析自身真实路径定位前缀：Arch 包里 /usr/bin 下那条是符号链接，
+# tarball 里脚本就在前缀的 bin/ 下，两种布局都能落到同一个 lib/。
+# 缺省只监听 127.0.0.1（--bind 可换），不需要 root；参数原样交给 buttons_web.py。
+self=$(readlink -f "$0") || exit 1
+root=$(dirname "$self")/..
+# 显式指到同一前缀里的校验器与插件目录：页面自己的默认值只认 /usr 布局，
+# tarball 装到家目录前缀时找不到它们。用户传的同名参数排在后面，覆盖这两项。
+exec /usr/bin/python3 "$root/lib/buttons_web.py" \
+  --check "$root/bin/buttons_check" \
+  --plugins-dir "$root/plugins" \
+  "$@"

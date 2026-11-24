@@ -15,7 +15,9 @@ await）。`_main()` 本身没有人 await，所以这里不靠它"跑完"保证
 from __future__ import annotations
 
 import asyncio
+import os
 import shutil
+import sys
 
 import decky
 
@@ -131,6 +133,35 @@ class Plugin:
     async def get_logs(self) -> dict[str, object]:
         """日志页（U-07）：程序日志尾部与插件事件日志。"""
         return await self._require().get_logs()
+
+    async def open_config(self) -> dict[str, object]:
+        """起随包的配置页面并返回地址；重复调用时端口被占的那一个会自己退出。
+
+        页面是 Python 脚本 + 独立校验器，不编进转发程序。参数显式指向同一插件
+        目录里的页面、校验器与插件目录：它们随 ZIP 解包到 bin/ 与 lib/，而页面
+        自己的默认值只认 /usr 布局。服务端由 `spawn` 脱离插件进程，日志落在数据
+        目录，不污染状态机那一份 daemon.log。
+        """
+        root = self._layout.plugin_dir
+        page = os.path.join(root, "lib", "buttons_web.py")
+        if not os.path.isfile(page):
+            return {"ok": False, "error": "配置页面未随插件安装"}
+
+        argv = [
+            sys.executable,
+            page,
+            "--check",
+            os.path.join(root, "bin", "buttons_check"),
+            "--plugins-dir",
+            os.path.join(root, "plugins"),
+        ]
+        try:
+            self._system.spawn(
+                argv, root, os.path.join(self._layout.logs_dir, "config-web.log")
+            )
+        except OSError as error:
+            return {"ok": False, "error": str(error)}
+        return {"ok": True, "url": "http://127.0.0.1:8777/"}
 
     def _require(self) -> Controller:
         """取状态机；`_main` 还没跑过时是编程错误，直接抛给 Decky 的 RPC 层。"""

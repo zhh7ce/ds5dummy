@@ -417,8 +417,8 @@ cmake --build build --target buttons_check
 #   buttons.panel.js  本插件的 UI，与 buttons.so 同目录。63 字节解码表在这里是
 #                     第二处写法，与 ids.cpp 的对账在 test_buttons_web.py。
 #                     词表从 ctx.catalog 来，判定走 ctx.validate(items)。
-# 两个包都装 /usr/bin/ds5dummy-config（入口脚本）、/usr/lib/ds5dummy 下的
-# buttons_web.py + 页面壳 + panels/core.js，以及 /usr/bin/buttons_check；
+# 主程序包装 /usr/bin/ds5dummy-config（符号链接）、/usr/lib/ds5dummy 下的
+# lib/buttons_web.py + 页面壳 + lib/panels/core.js，以及 bin/buttons_check；
 # 插件面板随各自的 .so 装在插件目录里。
 ds5dummy-config --config /path/to/config.yaml --no-open
 python3 tools/buttons_web.py --config /path/to/config.yaml --no-open  # 源码树

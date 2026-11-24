@@ -213,39 +213,6 @@ function(ds5dummy_add_buttons_check)
     target_link_libraries(buttons_check PRIVATE PkgConfig::YAMLCPP)
 endfunction()
 
-# ---------------------------------------------------------------------------
-# 只编配置校验器（打包用）：ds5dummy-config-bin 是独立于转发程序的包，页面与校验器
-# 不需要 PipeWire/Opus/BlueZ 这些只为数据面存在的依赖。打开后只产出
-# buttons_check，其余目标都不注册。
-# ---------------------------------------------------------------------------
-option(DS5DUMMY_CONFIG_ONLY "Build only buttons_check (for the split config package)" OFF)
-if(DS5DUMMY_CONFIG_ONLY)
-    find_package(PkgConfig REQUIRED)
-    pkg_check_modules(YAMLCPP REQUIRED IMPORTED_TARGET yaml-cpp)
-    ds5dummy_add_buttons_check()
-    if(DS5DUMMY_PORTABLE)
-        # 打包脚本直接从构建树里取这个二进制（不走 cmake --install），RPATH
-        # 只能在链接时就写进去。
-        ds5dummy_make_portable(buttons_check)
-        set_target_properties(buttons_check PROPERTIES BUILD_WITH_INSTALL_RPATH ON)
-        # 随包的 .so 按 SONAME 落在构建树的 config-lib/，由包原样装进前缀的
-        # lib/；许可文本同目录，随包分发 yaml-cpp 时一起带上。
-        ds5dummy_resolve_yamlcpp()
-        file(MAKE_DIRECTORY "${CMAKE_BINARY_DIR}/config-lib")
-        configure_file("${YAMLCPP_RUNTIME_FILE}"
-            "${CMAKE_BINARY_DIR}/config-lib/${YAMLCPP_SONAME}" COPYONLY)
-        find_file(YAMLCPP_LICENSE_FILE NAMES LICENSE COPYING
-            PATHS /usr/share/licenses/yaml-cpp /usr/share/doc/yaml-cpp NO_DEFAULT_PATH)
-        if(YAMLCPP_LICENSE_FILE)
-            configure_file("${YAMLCPP_LICENSE_FILE}"
-                "${CMAKE_BINARY_DIR}/config-lib/yaml-cpp-LICENSE" COPYONLY)
-        else()
-            message(WARNING "yaml-cpp license text not found; ship it alongside the package")
-        endif()
-    endif()
-    return()
-endif()
-
 if(BT_BACKEND STREQUAL "L2CAP")
     message(STATUS "BT backend: raw AF_BLUETOOTH L2CAP (BlueZ pkg required)")
     find_package(PkgConfig REQUIRED)
@@ -342,6 +309,10 @@ target_compile_definitions(ds5dummyd PRIVATE LOGURU_USE_FMTLIB=1)
 # pthreads — 两个后端都需要
 find_package(Threads REQUIRED)
 
+# 配置校验器：页面与它只是一份配置语法的两半，随主程序一起编、一起分发。
+# 它复用插件的 settings/ids 与宿主的 config/options，不碰数据面依赖。
+ds5dummy_add_buttons_check()
+
 # ---------------------------------------------------------------------------
 # 诊断/验证工具（可选）
 #   cmake -DDS5DUMMY_BUILD_TOOLS=ON ...
@@ -381,16 +352,16 @@ if(DS5DUMMY_BUILD_TOOLS)
         PkgConfig::PIPEWIRE PkgConfig::SPA PkgConfig::OPUS PkgConfig::SAMPLERATE)
     target_compile_definitions(audio_dump PRIVATE LOGURU_USE_FMTLIB=1)
 
-    ds5dummy_add_buttons_check()
-
     # 本地配置页面是 tools/buttons_web.py + tools/buttons_web.html：页面不参与编译，
-    # 判定仍然由上面的 buttons_check 给出，Python 只负责读取、写回与起服务。
-    message(STATUS "Diagnostic tools enabled: spike_l2cap, spike_rumble, mini_gadget, audio_dump, buttons_check")
+    # 判定由 buttons_check 给出，Python 只负责读取、写回与起服务。
+    message(STATUS "Diagnostic tools enabled: spike_l2cap, spike_rumble, mini_gadget, audio_dump")
 endif()
 
 # ---------------------------------------------------------------------------
 # 可重定位分发（不装系统目录）：前缀内布局
-#   bin/ds5dummyd  lib/  plugins/  share/{doc,licenses,ds5dummy}  install.sh
+#   bin/{ds5dummyd,buttons_check,ds5dummy-config}
+#   lib/{buttons_web.py,buttons_web.html,panels/core.js}  plugins/
+#   share/{doc,licenses,ds5dummy}  install.sh
 # 这些 install() 只服务于 dist：它用 DESTDIR 暂存、--prefix / 把上面这套布局
 # 铺成 tarball 的根，所以 DESTINATION 全是前缀相对路径。装到哪个前缀由
 # scripts/install.sh 决定（默认 ~/DS5Dummy），CMake 自己不碰系统目录。
@@ -400,6 +371,13 @@ endif()
 # 宿主配置与单元模板在 share/ds5dummy 下，由 install.sh 落到 /etc。
 # ---------------------------------------------------------------------------
 install(TARGETS ds5dummyd RUNTIME DESTINATION bin)
+# 配置工具：入口脚本按自身位置解析前缀的 lib/，所以源码包、预编译包与 tarball
+# 用同一份脚本，不需要为独立前缀做路径替换。
+install(TARGETS buttons_check RUNTIME DESTINATION bin)
+install(PROGRAMS tools/ds5dummy-config DESTINATION bin)
+install(PROGRAMS tools/buttons_web.py DESTINATION lib)
+install(FILES tools/buttons_web.html DESTINATION lib)
+install(FILES tools/panels/core.js DESTINATION lib/panels)
 install(TARGETS ds5dummy_idle ds5dummy_buttons LIBRARY DESTINATION plugins)
 install(FILES
     plugin/idle/idle.panel.js
@@ -421,6 +399,11 @@ install(FILES LICENSE NOTICE DESTINATION share/licenses/ds5dummy)
 install(PROGRAMS scripts/install.sh DESTINATION /)
 
 if(DS5DUMMY_PORTABLE)
+    # 随包二进制都用 $ORIGIN/../lib 找 yaml-cpp：校验器与主程序共用同一前缀树，
+    # 链接期就要写进 RPATH（不走 cmake --install 的包直接从构建树取它）。
+    ds5dummy_make_portable(buttons_check)
+    set_target_properties(buttons_check PROPERTIES BUILD_WITH_INSTALL_RPATH ON)
+
     # yaml-cpp 的 .so 按它自己的 SONAME 命名：DT_NEEDED 用的是 SONAME，
     # 存成 libyaml-cpp.so 或带完整版本的别名，加载器都找不到。
     ds5dummy_resolve_yamlcpp()
@@ -452,7 +435,7 @@ add_custom_target(dist
             ${CMAKE_COMMAND} --install "${CMAKE_BINARY_DIR}" --prefix / --strip
     COMMAND ${TAR_EXECUTABLE} -C "${DS5DUMMY_DIST_DIR}" -czf
             "${DS5DUMMY_DIST_DIR}/${DS5DUMMY_DIST_NAME}.tar.gz" "${DS5DUMMY_DIST_NAME}"
-    DEPENDS ds5dummyd ds5dummy_idle ds5dummy_buttons
+    DEPENDS ds5dummyd buttons_check ds5dummy_idle ds5dummy_buttons
     COMMENT "Packing ${DS5DUMMY_DIST_NAME}.tar.gz into ${DS5DUMMY_DIST_DIR}"
     VERBATIM)
 

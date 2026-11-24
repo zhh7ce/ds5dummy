@@ -295,11 +295,12 @@ ds5dummy-config --plugins-dir /path/to/plugins --no-open
 ds5dummy-config --bind 0.0.0.0                     # 局域网里的别的机器也能打开
 ```
 
-两个包都装 `/usr/bin/ds5dummy-config`（入口）、`/usr/lib/ds5dummy/buttons_web.py`、
-页面壳 `buttons_web.html` 与 `tools/panels/core.js`，以及保存前做判定的
-`/usr/bin/buttons_check`；插件面板随各自的 `.so` 在插件目录里。`ds5dummy-config`
-只把参数原样交给那个 Python 脚本；脚本按自身位置找页面壳与 core 面板，所以从源码树
-与安装目录运行的是同一份代码。
+主程序包装 `/usr/bin/ds5dummy-config`（符号链接）、
+`/usr/lib/ds5dummy/lib/buttons_web.py`、页面壳 `buttons_web.html` 与
+`lib/panels/core.js`，以及保存前做判定的 `/usr/lib/ds5dummy/bin/buttons_check`；
+插件面板随各自的 `.so` 在插件目录里。`ds5dummy-config` 按自身真实路径解析前缀里的
+页面与插件目录，再把用户参数原样交给 Python 脚本；源码树里直接跑
+`buttons_web.py` 时它按 `__file__` 找页面壳与 core 面板。
 
 按键映射那一节沿用上游 DS5Dongle-Studio 配置门户的形状：标签页
 （概览/映射/连点/组合键/宏/轴/其他）、搜索框与卡片列表，取值从下拉框与复选框中选，

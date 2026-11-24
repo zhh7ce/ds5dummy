@@ -15,7 +15,7 @@ ds5dummy/
   main.py                入口文件名是 loader 写死的（不读 plugin.json 的键）
   py_modules/ds5dummy/   本地 Python 包：loader 只把 <插件>/py_modules 加进 sys.path
   dist/index.js          npm run build 产出的前端 bundle
-  bin/ lib/ plugins/     便携分发；RPATH 是 $ORIGIN/../lib，三者必须保持兄弟
+  bin/ lib/ plugins/     便携分发；含配置工具入口、页面与校验器，三者必须保持兄弟
   share/doc/ds5dummy/    随包文档
   README.md              插件安装/使用说明（T-03）
   VERSION                面板显示的版本号，与 package.json 同源
@@ -53,6 +53,8 @@ PLUGIN_DIR_NAME = "ds5dummy"
 PAYLOAD_PREFIX = Path("usr/lib/ds5dummy")
 
 # 设备侧真正会用到的子目录：数据面二进制、它随包的共享库、随包插件。
+# bin/ 里同时有 buttons_check 与 ds5dummy-config 入口，lib/ 里有页面与 core 面板：
+# 配置工具随主程序包一起产出，这里整目录复制，不需要为它单列一份来源。
 PAYLOAD_PARTS = ("bin", "lib", "plugins")
 
 # 版本号只允许这些字符：它会进文件名、ZIP 内文本与 Decky 的目录名，出现空格或斜杠
