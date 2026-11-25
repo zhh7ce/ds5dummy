@@ -2,10 +2,11 @@
  * @file audio_encoder.cpp
  * @brief audio::encoder 实现：输入环、重采样、Opus 编码、触觉量化与编码线程
  *
- * 输入环由 PipeWire RT 线程写入、编码线程按段读取。每段固定 512 输入帧，
- * 拆成喇叭(ch0/1)与触觉(ch2/3)两路，分别重采样后做 Opus 编码或 int8 量化。
- * 段内布局固定为 `[64B 触觉][200B 喇叭]`，两路产出都由编译期几何精确填满
- * （见 static_assert），交付路径上没有补零和 carry。
+ * 输入环由 PipeWire RT 线程写入、编码线程按段读取，两者之间只有两个原子索引
+ * 加一个门铃——RT 写方不碰任何锁。每段固定 512 输入帧，拆成喇叭(ch0/1)与
+ * 触觉(ch2/3)两路，分别重采样后做 Opus 编码或 int8 量化。段内布局固定为
+ * `[64B 触觉][200B 喇叭]`，两路产出都由编译期几何精确填满（见 static_assert），
+ * 交付路径上没有补零和 carry。
  */
 
 #include "audio/audio_encoder.h"
@@ -16,17 +17,11 @@
 #include <algorithm>
 #include <array>
 #include <atomic>
-#include <boost/circular_buffer.hpp>
-#include <chrono>
-#include <cmath>
-#include <condition_variable>
 #include <cstddef>
-#include <cstring>
-#include <mutex>
-#include <system_error>
+#include <cstdint>
 #include <thread>
-#include <vector>
 
+#include "audio/audio_ring.h"
 #include "core/debug.h"
 #include "loguru.hpp"
 
@@ -77,24 +72,39 @@ constexpr uint32_t kOpusBitrateBps =
 
 // 一段需要的输入量，和拆声道后每路的输入/输出量：门限、拷贝长度、重采样入参都从这里取。
 constexpr size_t kSegmentInputFloats = kSegmentInputFrames * kInputChannels;
+constexpr size_t kSegmentInputBytes = kSegmentInputFloats * sizeof(float);
 constexpr size_t kPathInputFloats = kSegmentInputFrames * kEncodedChannels;
 constexpr size_t kAudioOutputFloats = kAudioOutputFrames * kEncodedChannels;
 constexpr size_t kHapticsOutputFloats = kHapticsOutputFrames * kEncodedChannels;
 
 /**
- * @brief 输入环容量，按段表达：150 段 ≈ 1.6 秒音频。
+ * @brief 输入环容量：32 段 ≈ 341ms。
  *
- * 环满时 boost::circular_buffer::insert 静默覆盖最旧数据——延迟优先：
- * 宁丢旧样本也要让新样本立刻可编码。RT 路径不打印日志、不分配内存。
+ * 下限由单次写入量决定：`ProcessFrame` 一次收到的帧数 = 图的一次 quantum，系统
+ * 硬顶 `quantum-limit` 是 8192 帧 = 16 段 = 131072 B。容量等于它只能保证"一次
+ * 最大回调不自覆盖"，连来两次或读方晚一拍就会丢，所以取 2 倍 = 32 段。
+ *
+ * 满了丢最旧——延迟优先：宁可丢旧样本也不让新样本等着。
+ *
+ * 环元素是"一帧"（4 声道 × 4 B = 16 B），容量与一切推进量都必须是它的整数倍，
+ * 否则丢旧之后读起点会落在半个帧上，四个声道整体轮转。
  */
-constexpr size_t kMaxInputSegments = 150;
+constexpr size_t kMaxInputSegments = 32;
 constexpr size_t kMaxInputFloats = kMaxInputSegments * kSegmentInputFloats;
+constexpr size_t kRingBytes = kMaxInputFloats * sizeof(float);
+constexpr size_t kFrameBytes = kInputChannels * sizeof(float);
+
+static_assert(kRingBytes % kFrameBytes == 0,
+              "ring capacity must hold whole 4-channel frames");
+static_assert(std::atomic<uint64_t>::is_always_lock_free,
+              "doorbell must be lock-free");
 
 /**
  * @brief 进程内单实例状态。
  *
- * PipeWire RT 线程写 input_buffer，编码线程读，由 input_mutex 保护。
- * output 在起线程前安装、join 之后清空，运行期只读，因此不需要额外锁。
+ * `ring` 由 PipeWire RT 线程写、编码线程读（严格单生产者单消费者）。`seq` 是
+ * 唤醒用的门铃，用 alignas 独占一条缓存行，避免与环内的索引互相打掉。
+ * `output` 在起线程前安装、join 之后清空，运行期只读。
  */
 struct State {
   OpusEncoder* opus_encoder = nullptr;     ///< Opus 立体声编码器
@@ -103,13 +113,11 @@ struct State {
 
   std::thread encode_thread;  ///< EncodeLoop 的载体
 
-  boost::circular_buffer<float>
-      input_buffer;  ///< 4 通道交织输入，受 input_mutex 保护
+  AudioRing ring{kRingBytes};  ///< 4 通道交织字节环，32 段
+  alignas(64) std::atomic<uint64_t> seq{0};       ///< 写入门铃，编码线程在它上面 wait
 
-  std::mutex input_mutex;            ///< 护 input_buffer
-  std::condition_variable queue_cv;  ///< 通知"输入够出一段了"或停机
-  std::atomic<bool> running{
-      false};  ///< 编码线程运行标志，Stop() 置 false 后 cv 广播
+  std::atomic<bool> running{false};            ///< 编码线程运行标志
+  std::atomic<bool> discard_requested{false};  ///< 清环请求，只由编码线程消费
 
   SegmentSink output;  ///< 攒够一段时的去处（Init 装填，Stop join 后清空）
 
@@ -185,6 +193,55 @@ void ConvertToInt8(const float* input, size_t count, uint8_t* output,
 }
 
 /**
+ * @brief 从环里取一整段交织样本；不够一段就什么都不动。
+ *
+ * 先看可读量再读，是因为 Read 会读走"能读的部分"：零头读出来既凑不成一段，
+ * 还会让下一段的起点偏离段边界。溢出与索引环过头两种异常由 Read 内部纠正。
+ *
+ * @param out 目标缓冲，容量恰好 kSegmentInputFloats 个 float。
+ * @return 取到一整段 true；不足一段 false（零头仍留在环里，等下一批接上）。
+ * @note 只由编码线程调用——这里会写读索引。
+ */
+bool TakeSegment(float* out) {
+  if (st.ring.Readable() < kSegmentInputBytes) return false;
+  return st.ring.Read(out, kSegmentInputBytes) == kSegmentInputBytes;
+}
+
+/**
+ * @brief 整段输入是否数字静音：4 个通道全部正好是零。
+ *
+ * 判 4 个通道而不是只看喇叭两路：ch2/3 是触觉，游戏完全可能只震动不出声，
+ * 只看喇叭会把纯触觉段当成静音丢掉。
+ *
+ * 用 `== 0.0f` 而不是按字节比较：`-0.0f` 的位模式是 0x80000000，memcmp 会把它
+ * 判成非静音；IEEE 下 `-0.0f == 0.0f` 为真，比较天然覆盖。
+ *
+ * @param interleaved 刚读出的一段交织样本，长度恰为 kSegmentInputFloats。
+ * @return 全零 true。
+ * @note 遇到第一个非零就退出，有声段几乎零开销；只有真静音才走满 2048 次比较。
+ */
+bool SegmentIsSilent(const float* interleaved) {
+  return std::all_of(interleaved, interleaved + kSegmentInputFloats,
+                     [](float value) { return value == 0.0f; });
+}
+
+/**
+ * @brief 把两路重采样器与 Opus 编码器的状态清干净。
+ *
+ * 三者都是有状态的：SRC 带着滤波历史，Opus 带着上一帧的预测器。丢掉一段静音
+ * 之后若不复位，恢复时的第一帧会拿静音之前的样本做插值和预测，带一次可闻的
+ * 瞬态。复位就在判定静音、丢弃这一段的当时做——状态直接归零，之后恢复时从
+ * 干净状态开始。成本是微秒级。
+ */
+void ResetCodecState() {
+  if (st.audio_src_state != nullptr) (void)src_reset(st.audio_src_state);
+  if (st.haptics_src_state != nullptr) (void)src_reset(st.haptics_src_state);
+  if (st.opus_encoder != nullptr) {
+    (void)opus_encoder_ctl(st.opus_encoder, OPUS_RESET_STATE);
+  }
+}
+
+/**
  * @brief 编码线程主体：一次取满一段 → 拆声道 → 重采样 → Opus 编码 /
  *        int8 量化 → 交付。
  *
@@ -208,25 +265,35 @@ void EncodeLoop() {
       haptics_out{};                            // 32 帧 × 2 = 64 个样本
   std::array<uint8_t, kSegmentSize> segment{};  // [64B 触觉 | 200B 喇叭]
 
-  while (st.running) {
-    {
-      std::unique_lock<std::mutex> lock(st.input_mutex);
-      // 谓词双出口：攒够一整段，或者 Stop() 要求停机。
-      st.queue_cv.wait(lock, [] {
-        return st.input_buffer.size() >= kSegmentInputFloats || !st.running;
-      });
+  while (st.running.load(std::memory_order_acquire)) {
+    // 先记门铃、再取数据：顺序反过来会丢唤醒——生产者在"发现环空"与"记录
+    // 门铃"之间写入时，新值已被算进 seen，wait 会认为没人动过而睡死。
+    const uint64_t seen = st.seq.load(std::memory_order_acquire);
 
-      // 停线时环里剩下的不足一段，本来就出不了段，直接丢。
-      if (!st.running) {
-        break;
-      }
+    // 清环请求（重建 / 复位）只由本线程执行——读索引归本线程所有。
+    if (st.discard_requested.exchange(false, std::memory_order_acquire)) {
+      st.ring.Clear();
+    }
 
-      // 只取一段的量：零头留在环里，不进任何本地缓冲。
-      std::copy_n(st.input_buffer.begin(),
-                  static_cast<ptrdiff_t>(kSegmentInputFloats),
-                  segment_input.begin());
-      st.input_buffer.erase_begin(kSegmentInputFloats);
-    }  // 锁在重计算前释放：拆声道/编码期间不挡 RT 线程入环
+    // 只取一段的量：零头留在环里，不进任何本地缓冲。
+    if (!TakeSegment(segment_input.data())) {
+      // 不够一段就等门铃；Stop() 会加一并发 notify_all 把它叫醒。
+      st.seq.wait(seen, std::memory_order_acquire);
+      continue;
+    }
+
+    // 整段静音：主机静音时数据照来（实测），内容全零，编出来就是静音包——
+    // 直接丢，不拆声道、不重采样、不编码、不交付。丢完之后两路 SRC 与 Opus
+    // 的历史停在静音之前，顺手复位，免得恢复时第一帧拿旧历史做插值。
+    if (SegmentIsSilent(segment_input.data())) {
+      ResetCodecState();
+      continue;
+    }
+
+    // 诊断：每真的编一段打一行。静音段在上面已经丢掉了，所以这行出现的频率
+    // 就是实际编码频率。只在 DS5DUMMY_DEBUG_LOG 构建里编译。
+    DS5DUMMY_DLOG(1, "[encoder] encode request: frames={} floats={}",
+                  kSegmentInputFrames, kSegmentInputFloats);
 
     // 拆声道：一段 512 帧，两路各 512 帧立体声。
     for (size_t i = 0; i < kSegmentInputFrames; ++i) {
@@ -308,10 +375,13 @@ bool Init(SegmentSink output, float haptics_gain) {
   st.output = std::move(output);
   st.haptics_gain = haptics_gain;
 
-  st.input_buffer.set_capacity(kMaxInputFloats);
-  // 上一次停线时攒下的半批输入不带进新会话：那时线程已经 join，再没人会
-  // 排空它。
-  st.input_buffer.clear();
+  // 丢掉上一会话的残料：此刻没有任何线程能碰它——编码线程还没创建，sink 的
+  // RT 回调还没注册（sink::Start 在 encoder::Init 之后）。worker 会在同一进程里
+  // Stop→Start 重试音频，残料因此不会跨到新会话。
+  st.ring.Clear();
+  // 运行期那次清理由 ResetInputBuffer() 置标志、由编码线程执行；这里把可能
+  // 残留的请求一并清掉，免得新会话第一段被上一次的请求误吞。
+  st.discard_requested.store(false, std::memory_order_relaxed);
 
   // Opus 编码器：48kHz 立体声；RESTRICTED_LOWDELAY 不引入任何预听延迟，
   // 本链路每一帧都要尽快上线。
@@ -378,34 +448,45 @@ void ProcessFrame(const float* input, uint32_t frames) {
   // 跑在 PipeWire RT 线程上：静默返回，不记日志——loguru 的格式化、内存
   // 分配和文件写入都不适合出现在实时回调里。running 未置位（未 Init 或
   // 已 Stop）与空指针/零帧一律拒绝。
-  if (!st.running || !input || frames == 0) {
+  if (!st.running.load(std::memory_order_acquire) || input == nullptr ||
+      frames == 0) {
     return;
   }
 
-  {
-    std::lock_guard<std::mutex> lock(st.input_mutex);
-    // 整批插入：环满时 circular_buffer 覆盖最旧样本（丢旧保新，见
-    // kMaxInputSegments 注释），不做背压反馈。
-    st.input_buffer.insert(st.input_buffer.end(), input,
-                           input + frames * kInputChannels);
-    // 每批插完 notify 一次：真正唤醒发生在等待中的编码线程上，而它的谓词
-    // 是"够不够一段"，所以唤醒频率实际被段产出频率封顶，不会被每批输入
-    // 打爆。
-    if (st.input_buffer.size() >= kSegmentInputFloats) {
-      st.queue_cv.notify_one();
-    }
+  // 不看剩余空间：写索引前进多少就覆盖多少最旧样本，丢旧由编码线程在下次取
+  // 一段时发现。整批写入保证环里不会出现半帧。
+  st.ring.Write(input, frames * kFrameBytes);
+
+  // 门限只按"写完之后够不够一整段"判断，不看"之前够不够"。
+  //
+  // 跨越式判断（before < 段 && after >= 段）在这里有一个会永久卡住的竞态：
+  // before 里的读索引可能是旧值——消费者刚把读索引推上去、编码线程还没看见，
+  // 于是 before 被抬到门限之上，条件不成立、不按铃，而消费者恰好也在这一刻
+  // 判断"不够一段"睡下了。此后读索引不再前进，每次写算出的 before 都 >= 门限，
+  // 再也不会按铃，音频就此停住，直到 Stop 或重建。
+  //
+  // 电平式判断只会多按不会漏按：没攒够一段时不按（稳态下就是每秒约 94 次，
+  // 和跨越式一样），攒够了就按——此时消费者本来就在跑，多一次唤醒无害。
+  if (st.ring.Readable() >= kSegmentInputBytes) {
+    st.seq.fetch_add(1, std::memory_order_release);
+    st.seq.notify_one();
   }
 }
 
 void ResetInputBuffer() {
-  std::lock_guard<std::mutex> lock(st.input_mutex);
-  st.input_buffer.clear();
+  // 只置标志 + 唤醒：发起方（port 的 monitor 线程）不是读索引的所有者，
+  // 真正清空由编码线程在自己的循环里执行。
+  st.discard_requested.store(true, std::memory_order_release);
+  st.seq.fetch_add(1, std::memory_order_release);
+  st.seq.notify_one();
 }
 
 void Stop() {
-  if (st.running) {
-    st.running = false;
-    st.queue_cv.notify_all();  // 叫醒可能卡在 wait 谓词上的线程走停机出口
+  // 门铃值必须变一次：睡在 wait 上的编码线程只在"值变了"时才会醒，光置
+  // running 会让 join 永久阻塞。
+  if (st.running.exchange(false, std::memory_order_acq_rel)) {
+    st.seq.fetch_add(1, std::memory_order_release);
+    st.seq.notify_all();
   }
 
   if (st.encode_thread.joinable()) {
@@ -417,6 +498,8 @@ void Stop() {
   // 对象可能建了一部分。收尾一律走这里，停着的模块不该继续持有调用方的
   // lambda。join 之后才动 output，最后一次交付还用它。
   ReleaseCodec();
+  // 环不在这里清：下一次 Init 会把索引归零，两步之间没有任何线程读写它
+  // （读方已 join、写方被 running 闸门挡住）。
   st.output = nullptr;
 }
 

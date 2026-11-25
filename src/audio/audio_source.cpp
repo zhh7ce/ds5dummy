@@ -7,9 +7,10 @@
  * 以及把 STREAMING/PAUSED 的迁移翻成 on_mic_open 通知。
  *
  * 线程构成：PipeWire main loop 线程驱动事件，process 回调由 PipeWire 的 RT
- * data-loop 线程执行；port 另起一条 monitor 线程，在断线后按退避重建。PCM
- * 环由解码线程写、RT 回调读。每次重建前 monitor 先清空 PCM 环，旧会话的
- * 样本不会跨到新流上。
+ * data-loop 线程执行；port 另起一条 monitor 线程，在断线后按退避重建。PCM 环
+ * 由解码线程写、RT 回调读，两者之间只有两个原子索引——RT 回调不碰任何锁。
+ * 环只在 Start 里归零（此刻还没有回调在跑）；重连不清，因为残留最多是断线前
+ * 最后不到一包 PCM，被主机当成当前声音录进去而已。
  */
 
 #include "audio/audio_source.h"
@@ -18,15 +19,14 @@
 #include <spa/param/audio/raw.h>
 
 #include <algorithm>
-#include <boost/circular_buffer.hpp>
 #include <cstddef>
 #include <cstdint>
-#include <mutex>
 #include <string>
 #include <string_view>
 #include <utility>
 
 #include "audio/audio_identity.h"
+#include "audio/audio_ring.h"
 #include "audio/audio_port.h"
 #include "core/debug.h"
 #include "core/protocol/audio_format.h"
@@ -37,12 +37,25 @@ namespace source {
 namespace {
 
 /**
- * @brief PCM 环容量：2048 帧 @48kHz ≈ 43ms。
+ * @brief PCM 环容量：8 拍 × 480 帧 = 3840 帧 ≈ 80ms。
  *
- * 解码线程写、RT 回调读。满了覆盖最旧样本——上行实时链路里过期样本没有
- * 价值；RT 路径不打印日志、不分配内存。
+ * "一拍"是上行的 10ms 节拍（一包 Opus 解出 480 帧）。取满 8 拍是为了与 decoder
+ * 的 8 包对齐——解码线程把队列一次抽干时，8 × 480 正好填满这个环，一帧不丢。
+ * 两个常量分处两个 TU，无法编译期断言，改一处必须同步改另一处
+ * （`audio_decoder.cpp` 的 `kQueueMax`）。
+ *
+ * 读方是 PipeWire 的拉模型回调，且被服务端节流（每次只取 requested 帧），所以
+ * 容量本身就是最坏延迟上限：稳态填充是 0～1 包，只有积压时才会顶到 80ms。
  */
-constexpr size_t kRingFrames = 2048;
+constexpr size_t kRingFrames = 3840;
+constexpr size_t kRingBytes = kRingFrames * sizeof(float);
+
+// 环元素 = 一帧单声道 PCM = 一个 float。容量是它的整数倍，丢旧之后的读起点
+// 因此不会落在半个样本上。
+static_assert(kRingFrames == 8 * core::protocol::kOpusFrameSamples,
+              "capacity must equal eight 10ms beats, aligned with decoder");
+static_assert(kRingBytes % sizeof(float) == 0,
+              "ring capacity must hold whole single-channel frames");
 
 // 节点显示名（昵称/描述）的前缀，后接本站标识（12 位 MAC 十六进制）。描述里带
 // Microphone，与同名 sink 在扁平列表里仍可分辨。节点名那条走
@@ -59,16 +72,15 @@ static_assert(std::string_view(kNodeDescriptionBase).size() + 12 <= 62);
 /**
  * @brief 进程内单实例状态。
  *
- * PipeWire 对象与恢复状态机归 audio::port；ring 由解码线程与 RT 回调共享，
- * 受 ring_mutex 保护。open 只在 PipeWire main loop 线程上翻转，Stop() 在
- * join 之后读它补 close 通知，因此不需要锁。
+ * PipeWire 对象与恢复状态机归 audio::port；PCM 环由解码线程写、RT 回调读，
+ * 两个索引各归一方。open 只在 PipeWire main loop 线程上翻转，Stop() 在
+ * join 之后读它补 close 通知，因此不需要原子。
  */
 struct State {
   port::Pipeline pipeline;
   port::Monitor monitor;
 
-  boost::circular_buffer<float> ring;  ///< 待交付的单声道 PCM，受 ring_mutex 保护
-  std::mutex ring_mutex;               ///< 护 ring
+  AudioRing ring{kRingBytes};  ///< 单声道 PCM 字节环，容量 = 3840 帧
 
   bool open = false;       ///< 主机是否正在录音（只在 main loop 线程翻转）
   MicOpenHandler on_open;  ///< Start 装填，Stop join 之后清空
@@ -136,7 +148,7 @@ void OnStreamStateChanged(void* userdata, enum pw_stream_state old,
 /**
  * @brief RT process 回调：从 PCM 环取样本填输出缓冲，欠载补静音。
  *
- * 跑在 PipeWire RT 线程上：不分配、不打日志，且无论走哪条路都必须把
+ * 跑在 PipeWire RT 线程上：不分配、不打日志、不抢锁，且无论走哪条路都必须把
  * buffer 归还（pw_stream_queue_buffer），否则缓冲池很快枯竭、流卡死。
  *
  * @param userdata 注册时传入的 &st。
@@ -160,13 +172,11 @@ void OnStreamProcess(void* userdata) {
   frames = std::min(frames, max_frames);
 
   float* data = static_cast<float*>(spa_buf->datas[0].data);
-  size_t copied = 0;
-  {
-    std::lock_guard<std::mutex> lock(self->ring_mutex);
-    copied = std::min(frames, self->ring.size());
-    std::copy_n(self->ring.begin(), copied, data);
-    self->ring.erase_begin(copied);
-  }
+
+  // 取走环里现有的部分；不够就少给，剩下的用静音补。溢出与索引环过头两种
+  // 异常由 Read 内部纠正，这里看不到。
+  const size_t copied =
+      self->ring.Read(data, frames * kBytesPerFrame) / kBytesPerFrame;
   // 欠载补静音：主机拿到的是连续时间轴，不会因为解码慢一拍听到拖尾。
   std::fill(data + copied, data + frames, 0.0f);
 
@@ -192,7 +202,7 @@ bool Start(const std::string& station_id, const std::string& host_sysfs_path,
     return false;
   }
   // 双 Start 在这里拒掉、而不是交给 port：下面的状态复位会覆盖在跑实例的
-  // on_open 与 PCM 环，必须在动它们之前退出。
+  // on_open，必须在动它们之前退出。
   if (st.pipeline.running.load() || st.monitor.thread.joinable()) {
     DS5DUMMY_LOG(ERROR, "[source] source already running");
     return false;
@@ -202,11 +212,13 @@ bool Start(const std::string& station_id, const std::string& host_sysfs_path,
   // audio::identity，与 sink 侧同一族（这是一台声卡的播放与录音两半边）。
   st.open = false;
   st.on_open = std::move(on_mic_open);
-  {
-    std::lock_guard<std::mutex> lock(st.ring_mutex);
-    st.ring.set_capacity(kRingFrames);
-    st.ring.clear();
-  }
+  // 丢掉上一会话的残料：此刻 RT 回调还没注册（流尚未连上），解码线程即便在推
+  // 样本也被 pipeline.running 挡着，没有读者也没有写者。
+  //
+  // 重连（同一个 Pipeline 内部重建）不清：那次残留最多是断线前最后不到一包
+  // PCM，被主机当成"当前声音"录进去而已。下行不同——那边清掉是因为旧样本会被
+  // 编码成 0x36 从手柄喇叭放出来。
+  st.ring.Clear();
   port::StreamSpec spec;
   spec.tag = "source";
   spec.media_class = "Audio/Source";
@@ -224,13 +236,8 @@ bool Start(const std::string& station_id, const std::string& host_sysfs_path,
   spec.process = OnStreamProcess;
   spec.userdata = &st;
 
-  // 重建前清空 PCM 环：旧会话剩的样本比新流的第一帧更旧，跨过去只会让主机
-  // 听到一段错位的回声。回调跑在 port 的 monitor 线程上。
-  if (!port::Start(st.pipeline, st.monitor, std::move(spec),
-                   [] {
-                     std::lock_guard<std::mutex> lock(st.ring_mutex);
-                     st.ring.clear();
-                   },
+  // on_reset 留空：上行的重连不需要丢旧样本（见上）。下行那条由 sink 自己传。
+  if (!port::Start(st.pipeline, st.monitor, std::move(spec), {},
                    std::move(on_lost))) {
     st.on_open = nullptr;
     return false;
@@ -248,11 +255,8 @@ void Stop() {
   st.open = false;
   auto callback = std::move(st.on_open);
   st.on_open = nullptr;
-  {
-    // 与在途的 PushSamples 互斥：它可能在闸门检查之后已经拿到锁。
-    std::lock_guard<std::mutex> lock(st.ring_mutex);
-    st.ring.clear();
-  }
+  // 环不在这里清：下一次 Start 会把索引归零，两步之间没有任何线程读写它
+  // （RT 回调已停、写方被 pipeline.running 挡住）。
   if (was_open && callback) callback(false);
 }
 
@@ -262,10 +266,9 @@ void PushSamples(const float* samples, uint32_t frames) {
     return;
   }
 
-  std::lock_guard<std::mutex> lock(st.ring_mutex);
-  // 整批插入：环满时 circular_buffer 覆盖最旧样本（丢旧保新，见
-  // kRingFrames），不做背压反馈。
-  st.ring.insert(st.ring.end(), samples, samples + frames);
+  // 单声道：一帧就是一个 float，字节数即 frames × 4。不看剩余空间——满了由
+  // RT 回调在下次读时跳过最旧的部分，写方永不等待。
+  st.ring.Write(samples, frames * sizeof(float));
 }
 
 }  // namespace source

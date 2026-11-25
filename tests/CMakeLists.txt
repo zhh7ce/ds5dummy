@@ -47,6 +47,7 @@ add_executable(ds5dummy_tests
     ../src/daemon/identity.cpp
     ../src/core/protocol/input_state.cpp
     ../src/core/protocol/output_state.cpp
+    ../src/audio/audio_ring.cpp
     ../src/audio/audio_encoder.cpp
     ../src/audio/audio_identity.cpp
     ../src/bridge/bridge.cpp

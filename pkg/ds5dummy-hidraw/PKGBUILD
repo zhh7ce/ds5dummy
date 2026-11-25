@@ -17,7 +17,7 @@ provides=('ds5dummy')
 conflicts=('ds5dummy' 'ds5dummy-l2cap' 'ds5dummy-config' 'ds5dummy-config-bin')
 replaces=('ds5dummy' 'ds5dummy-config' 'ds5dummy-config-bin')
 depends=('bluez' 'pipewire' 'fmt' 'opus' 'libsamplerate' 'yaml-cpp' 'systemd-libs' 'python' 'python-yaml')
-makedepends=('cmake' 'pkgconf' 'boost' 'git')
+makedepends=('cmake' 'pkgconf' 'git')
 optdepends=(
   'dummy_hcd: kernel module (CONFIG_USB_DUMMY_HCD=m)'
   'hid-playstation-ds5dummy-dkms: hidraw-only Bluetooth DualSense support'

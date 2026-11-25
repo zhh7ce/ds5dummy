@@ -70,9 +70,9 @@ void Stop();
  *
  * @param samples 单声道 float 样本，长度 frames。
  * @param frames  帧数，0 会被忽略。
- * @details 由解码线程调用：一次锁 + 一次插入；环满时覆盖最旧样本（延迟
- *          优先：宁丢旧样本也要让主机尽快听到当前声音）。未 Start / 已 Stop /
- *          重建期间时静默丢弃。
+ * @details 由解码线程调用：一次无锁写入；不抢锁、不分配、不写日志。环满时由
+ *          RT 回调在下次取样本时跳过最旧的部分（延迟优先：宁丢旧样本也要让
+ *          主机尽快听到当前声音）。未 Start / 已 Stop / 重建期间静默丢弃。
  */
 void PushSamples(const float* samples, uint32_t frames);
 

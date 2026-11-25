@@ -113,8 +113,8 @@ struct Monitor {
  * @param monitor  调用方持有的恢复状态；本函数写入 spec/回调并清事件位。
  * @param spec     建流参数；本函数接管所有权，重连时从 Monitor::spec 复用。
  * @param on_reset 每次销毁旧流之前调用一次，跑在 monitor 线程上；用来丢掉
- *                 跨会话残留的输入样本（sink 清编码环，source 清 PCM 环）。
- *                 可为空。
+ *                 跨会话残留的输入样本（只有 sink 传：清编码环，避免旧音频被
+ *                 手柄喇叭放出来）。可为空。
  * @param on_lost  连续 kMaxReconnectAttempts 次重建失败后的通知，跑在
  *                 monitor 线程上；可为空（不降级，只丢这条流）。实现方不得在
  *                 回调里调用 Stop()——要 join 的正是这条线程。

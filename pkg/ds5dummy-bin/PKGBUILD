@@ -2,7 +2,7 @@
 #
 # DS5Dummy 的预编译包：打包时用便携参数（-DDS5DUMMY_PORTABLE=ON）编出同一份
 # dist 二进制，再按 Arch 的目录位置铺开。用户拿到的是 .pkg.tar.zst，不需要工具链
-# ——SteamOS 的镜像剥掉了开发文件（cmake/boost 那套跑不起来），这个包就是给它装的。
+# ——SteamOS 的镜像剥掉了开发文件（cmake 那套跑不起来），这个包就是给它装的。
 #
 # 与 pkg/ds5dummy-hidraw 的区别只在产物：那个包链系统的 yaml-cpp 与动态
 # libstdc++，只能在同版本的 Arch 上跑；这个包把 libstdc++ 静态链进去、fmt 走头文件
@@ -40,7 +40,7 @@ replaces=('ds5dummy' 'ds5dummy-config' 'ds5dummy-config-bin')
 # yaml-cpp 不在这里：随包那份在 /usr/lib/ds5dummy/lib 下，与宿主自己的版本互不干扰。
 # fmt 只在构建期要（FMT_HEADER_ONLY 之后没有动态依赖）。
 depends=('bluez' 'pipewire' 'opus' 'libsamplerate' 'systemd-libs' 'python' 'python-yaml')
-makedepends=('cmake' 'pkgconf' 'boost' 'fmt' 'git' 'yaml-cpp')
+makedepends=('cmake' 'pkgconf' 'fmt' 'git' 'yaml-cpp')
 optdepends=(
   'dummy_hcd: kernel module (CONFIG_USB_DUMMY_HCD=m)'
   'hid-playstation-ds5dummy-dkms: hidraw-only Bluetooth DualSense support'

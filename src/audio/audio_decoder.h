@@ -7,7 +7,7 @@
  * PCM 交给 Init() 装好的出口（生产实现是 source::PushSamples，写进虚拟
  * 麦克风的 PCM 环）。
  *
- * 队列有界（kQueueMax 包 ≈ 80ms）：麦克风是实时链路，积压比丢包更糟，满了
+ * 环有界（kQueueMax 包 ≈ 80ms）：麦克风是实时链路，积压比丢包更糟，满了
  * 丢最旧的一包。解码不做重采样——48kHz、480 帧、10ms 与来包节奏一致；时钟
  * 漂移由 source 的 PCM 环兜底（满则覆盖、空则静音）。
  *
@@ -52,16 +52,18 @@ bool Init(PcmSink output);
  *
  * @param packet core::protocol::kMicOpusSize 字节的单声道 Opus 包体。
  * @param len    包体长度；短于 kMicOpusSize 的整帧丢弃。
- * @details 由 bridge 在 bt 的读线程上调用：一次锁 + 一次 71 字节拷贝就返回，
- *          不阻塞、不打日志。未 Init / 已 Stop 时静默丢弃；队列满时覆盖最旧
- *          的一包（丢旧保新）。
+ * @details 由 bridge 在 bt 的读线程上调用：一次无锁写入 + 一次门铃就返回，
+ *          不阻塞、不打日志、不分配。未 Init / 已 Stop 时静默丢弃；环满时由
+ *          解码线程在下次读时跳过最旧的一包（丢旧保新）。
+ * @note 生产者路径上没有任何可能无限期等待的同步原语——这条线程同时负责
+ *       0x31 状态报告的分发，不能被音频拖住。
  */
 void PushPacket(const uint8_t* packet, size_t len);
 
 /**
  * @brief 停解码线程并释放 Opus 解码器；可重复调用，未起来时调用无害。
  *
- * @note join 之后才清出口与队列：线程最后一次交付仍要用它。
+ * @note join 之后才清出口：线程最后一次交付仍要用它。环留给下一次 Init 归零。
  */
 void Stop();
 

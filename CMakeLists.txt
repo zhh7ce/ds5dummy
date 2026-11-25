@@ -134,6 +134,7 @@ set(DS5DUMMY_CORE_SRC
     src/bridge/audio_report.cpp
     src/bridge/usb_report.cpp
     src/audio/audio.cpp
+    src/audio/audio_ring.cpp
     src/audio/audio_identity.cpp
     src/audio/audio_port.cpp
     src/audio/audio_sink.cpp
@@ -291,13 +292,10 @@ pkg_check_modules(YAMLCPP REQUIRED IMPORTED_TARGET yaml-cpp)
 # 降权身份从 systemd-logind 的图形会话推导（sd_get_sessions 等）；缺库同样
 # 直接 configure 失败，避免服务起来后才发现身份策略不可用。
 pkg_check_modules(SYSTEMD REQUIRED IMPORTED_TARGET libsystemd)
-# boost/circular_buffer.hpp — header-only, only the headers are checked.
-find_package(Boost REQUIRED)
 
 target_link_libraries(ds5dummyd PRIVATE
     PkgConfig::PIPEWIRE PkgConfig::SPA PkgConfig::OPUS PkgConfig::SAMPLERATE
     PkgConfig::YAMLCPP PkgConfig::SYSTEMD
-    Boost::headers
     # plugin/loader.cpp 的 dlopen/dlsym；glibc 上它是独立的 libdl。
     ${CMAKE_DL_LIBS})
 
@@ -340,7 +338,8 @@ if(DS5DUMMY_BUILD_TOOLS)
     # 离线回听：audio 下行链 + dump sink，不链 usb/bt/bridge，手柄连不连都能跑。
     # tools/ 的头按 <repo>/tools/<file>.h 引用，所以搜索路径加仓库根。
     add_executable(audio_dump tools/audio_dump.cpp tools/dump_sink.cpp
-        src/audio/audio.cpp src/audio/audio_identity.cpp
+        src/audio/audio.cpp src/audio/audio_ring.cpp
+        src/audio/audio_identity.cpp
         src/audio/audio_port.cpp src/audio/audio_sink.cpp
         src/audio/audio_encoder.cpp
         src/audio/audio_decoder.cpp src/audio/audio_source.cpp
@@ -348,7 +347,7 @@ if(DS5DUMMY_BUILD_TOOLS)
     target_include_directories(audio_dump PRIVATE
         ${DS5DUMMY_MODULE_INCLUDE_DIRS} ${CMAKE_SOURCE_DIR} third_party)
     target_link_libraries(audio_dump PRIVATE
-        Threads::Threads fmt Boost::headers
+        Threads::Threads fmt
         PkgConfig::PIPEWIRE PkgConfig::SPA PkgConfig::OPUS PkgConfig::SAMPLERATE)
     target_compile_definitions(audio_dump PRIVATE LOGURU_USE_FMTLIB=1)
 

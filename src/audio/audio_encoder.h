@@ -65,8 +65,9 @@ bool Init(SegmentSink output, float haptics_gain);
  *
  * @param input  4 通道交织 float 首地址，长度恰为 frames × kInputChannels。
  * @param frames 本批输入帧数，0 会被忽略。
- * @details 由 PipeWire RT 线程调用：一次锁操作 + 一次插入，环满覆盖最旧
- *          数据；不打印日志、不分配内存。
+ * @details 由 PipeWire RT 线程调用：一次无锁写入 + 一次门铃（只在跨过"够一段"
+ *          的门限时按），环满由编码线程在取数据时跳过最旧；不打印日志、不分配
+ *          内存、不抢锁。
  */
 void ProcessFrame(const float* input, uint32_t frames);
 
