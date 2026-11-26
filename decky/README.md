@@ -29,14 +29,28 @@
 
 ## 插件在自己的目录里带了什么
 
+整棵便携树原样放在 `bin/ds5dummy/` 下，与 tarball 解压后一模一样：
+
 | 路径 | 内容 |
 |---|---|
-| `bin/ds5dummyd` | 转发程序本体（预编译，装不了工具链的机器也能用） |
-| `lib/` | 它需要的共享库（yaml-cpp） |
-| `plugins/` | 程序插件：`idle.so`（闲置自动关机）、`buttons.so`（按键改写） |
-| `share/doc/ds5dummy/` | 随包文档，含 `buttons.md`（按键插件的配置语法） |
+| `bin/ds5dummy/bin/` | 转发程序 `ds5dummyd`、配置校验器 `buttons_check`、页面入口 `ds5dummy-config` |
+| `bin/ds5dummy/lib/` | 它需要的共享库（yaml-cpp）与配置页面 |
+| `bin/ds5dummy/plugins/` | 程序插件：`idle.so`（闲置自动关机）、`buttons.so`（按键改写）与它们的面板 |
+| `bin/ds5dummy/etc/config.yaml` | 系统配置（身份策略、发现间隔、程序日志级别） |
+| `bin/ds5dummy/share/doc/ds5dummy/` | 随包文档，含 `buttons.md`（按键插件的配置语法） |
 
 **不要改插件目录里的东西**：插件更新会整目录替换。用户可写的位置在下面。
+
+## 自己打包
+
+```
+python3 decky/pack.py --version v0.1.3 \
+    [--backend hidraw|l2cap] [--out build/decky/ds5dummy-decky.zip] [--skip-build]
+```
+
+它自己调 CMake 编出便携后端（`DS5DUMMY_PORTABLE=ON`、`DS5DUMMY_LAYOUT=tree`）、自己调
+npm 编前端，再按 decky-loader 官方 CLI 的白名单组装 ZIP——不需要先打任何包。打包前会
+校验 RUNPATH 与依赖，不合格直接失败。需要 `cmake`、`npm`、`readelf`/`ldd`。
 
 ## 缓存、设置与日志
 
@@ -87,11 +101,16 @@ SteamOS 的系统更新会换内核，也会把 `/usr` 整个替换掉——所�
 | 按钮 | 作用 |
 |---|---|
 | 主开关 | 启用 / 停用。进行中会显示当前阶段，并可以取消（取消会回滚到操作前） |
+| 在局域网内提供配置页面 | 起/停一个只读本机文件的配置页面服务；打开后下面会显示地址，在别的电脑浏览器里打开即可改按键配置。关掉即停服务 |
 | 重新检查 | 重新走一遍远端查询，缓存命中也强制查 |
 | 重新下载当前内核模块 | 覆盖缓存条目并重新校验；运行中不可用，先停用 |
 | 重启程序 | 只重启转发程序，不碰内核模块；改了 `~/.config/ds5dummy/config.yaml` 后用 |
 | 清理内核缓存 | 删掉当前内核以外的模块缓存 |
 | 查看日志 | 程序日志尾部 + 插件事件日志，可复制 |
+
+配置页面服务绑在 `0.0.0.0:8777`，**页面没有口令**：能连到这台机器 8777 端口的人都能
+改配置，而 `buttons:` 里的 `run:` 规则就是在那台机器上执行 shell 命令。只在可信的
+局域网里打开，用完关掉。
 
 ## 卸载
 

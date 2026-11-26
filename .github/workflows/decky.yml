@@ -1,11 +1,11 @@
-# 把应用 release 的预编译包打成 Decky 插件 ZIP，附在同一次 release 上（C-03、T-02）。
+# 从源码编出后端与前端，打成 Decky 插件 ZIP，附在同一次 release 上（C-03、T-02）。
 #
 # 触发：`release` workflow 成功结束之后（workflow_run），或手动指定一个 `v*` tag。
 # 只处理应用 release：驱动（`driver.*`）与内核模块的频道 Release（`jupiter-*`）不归这里管（G-02）。
 #
-# 现有的 `release.yml` 一行不动（G-01）：它已经把固定名资产
-# `ds5dummy-bin.pkg.tar.zst` 上传到该 release，这里只做"下载 → 打包 → 附上去"。
-# 包的形状由 `decky/pack.py` 决定（解包、铺目录、构建前端、压 ZIP）。
+# 不吃任何预编译包：和官方 CLI 那条路一样，自己编前端、自己编后端，再按官方白名单
+# 组装（细节见 `decky/pack.py` 的模块注释）。所以这里要的是构建依赖，不是 release
+# 资产——release 只需要提供一个可溯源的 tag。
 #
 # 幂等：ZIP 已经挂在 release 上就直接结束。GitHub 的 release 可以是不可变的
 # （发布后资产冻结），重复上传会失败，所以先查再传，不用 --clobber。
@@ -26,7 +26,6 @@ permissions:
   contents: write
 
 env:
-  BIN_ASSET: ds5dummy-bin.pkg.tar.zst
   ZIP_ASSET: ds5dummy-decky.zip
 
 # 同一个 tag 只跑一份：两个 workflow_run（例如重跑）同时上传会互相踩。
@@ -61,8 +60,8 @@ jobs:
           fi
           echo "tag=$tag" >> "$GITHUB_OUTPUT"
 
-      # 取该 tag 的源码：插件源码、`decky/pack.py` 与 `package-lock.json` 必须与
-      # 这次 release 同版（C-03）。
+      # 取该 tag 的源码：插件源码、`decky/pack.py`、`package-lock.json` 与后端源码
+      # 必须与这次 release 同版（C-03）。
       - uses: actions/checkout@v4
         with:
           ref: ${{ steps.tag.outputs.tag }}
@@ -74,17 +73,15 @@ jobs:
           cache: npm
           cache-dependency-path: decky/package-lock.json
 
-      # pack.py 用 bsdtar 读 zstd 压缩的 pacman 包（Python 的 tarfile 在 3.12 上不认）。
-      - name: Install bsdtar
-        run: sudo apt-get update && sudo apt-get install -y libarchive-tools
-
-      - name: Download the prebuilt package
-        env:
-          GH_TOKEN: ${{ github.token }}
-          TAG: ${{ steps.tag.outputs.tag }}
+      # 后端是原生程序：编它要 CMake 与那几个开发包。版本上限对齐 SteamOS 的
+      # 库，因此这里只管"能编"，不用管装到哪。
+      - name: Install build dependencies
         run: |
-          mkdir -p build/asset
-          gh release download "$TAG" --pattern "$BIN_ASSET" --dir build/asset
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            cmake pkg-config binutils \
+            libpipewire-0.3-dev libspa-0.2-dev libopus-dev \
+            libsamplerate0-dev libyaml-cpp-dev libsystemd-dev
 
       - name: Check whether the ZIP is already attached
         id: existing
@@ -107,7 +104,6 @@ jobs:
           TAG: ${{ steps.tag.outputs.tag }}
         run: |
           python3 decky/pack.py \
-            --pkg "build/asset/$BIN_ASSET" \
             --version "$TAG" \
             --out "build/decky/$ZIP_ASSET"
 

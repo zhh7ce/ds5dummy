@@ -1,13 +1,10 @@
 #!/usr/bin/env python3
-"""`decky/pack.py` 的 ZIP 形状、版本号与解包路径（T-02）。
+"""`decky/pack.py` 的 ZIP 形状、版本号与插件内布局。
 
-不解真的 pacman 包、也不跑 npm：`stage_plugin` 只读 `DECKY_DIR` 下的插件源码与前端
-产物，所以这里把 `DECKY_DIR` 指到临时搭的树上，验证 loader 真正认的那几样东西——
-入口文件名、版本号所在的 `package.json`、`py_modules/` 的位置、`bin/` 的执行位——
-以及同样的输入压出的 ZIP 逐字节相同。
-
-`extract_package` 用 `bsdtar`，本机没有就跳过那一项；它是打包脚本声明的依赖，不是
-测试环境该自备的东西。
+不跑 npm、不跑 cmake：`stage_plugin` 只读 `decky/` 下的插件源码、前端产物和一份
+已经铺好的树，所以这里把两者都指到临时搭的目录上，验证 loader 真正认的那几样
+东西——入口文件名、版本号所在的 `package.json`、`py_modules/` 的位置、整棵便携树
+嵌在 `bin/ds5dummy/` 下——以及同样的输入压出的 ZIP 逐字节相同。
 """
 
 from __future__ import annotations
@@ -16,7 +13,6 @@ import json
 import os
 import shutil
 import stat
-import tarfile
 import tempfile
 import unittest
 import zipfile
@@ -49,34 +45,43 @@ class VersionTest(unittest.TestCase):
 
 
 class _StagedTree(unittest.TestCase):
-    """搭一棵最小的 `DECKY_DIR` 与便携分发树，供 staging 测试共用。"""
+    """搭一份最小的 `decky/` 与一棵最小的便携树，供 staging 测试共用。"""
 
     def setUp(self) -> None:
         self._tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self._tmp.cleanup)
         root = Path(self._tmp.name)
         self.decky = root / "decky"
-        self.payload = root / "usr" / "lib" / "ds5dummy"
+        self.tree = root / "tree"
 
         (self.decky / "ds5dummy").mkdir(parents=True)
         (self.decky / "ds5dummy" / "__init__.py").write_text("", encoding="utf-8")
         (self.decky / "ds5dummy" / "__pycache__").mkdir()
         (self.decky / "ds5dummy" / "__pycache__" / "junk.pyc").write_bytes(b"x")
-        (self.decky / "plugin.json").write_text('{"name": "x"}\n', encoding="utf-8")
+        (self.decky / "plugin.json").write_text(
+            '{"name": "DS5Dummy", "author": "t", "publish": {"description": "d"}}\n',
+            encoding="utf-8",
+        )
         (self.decky / "main.py").write_text("", encoding="utf-8")
         (self.decky / "README.md").write_text("", encoding="utf-8")
         (self.decky / "dist").mkdir()
         (self.decky / "dist" / "index.js").write_text("// bundle\n", encoding="utf-8")
 
-        (self.payload / "bin").mkdir(parents=True)
-        binary = self.payload / "bin" / "ds5dummyd"
+        (self.tree / "bin").mkdir(parents=True)
+        binary = self.tree / "bin" / "ds5dummyd"
         binary.write_bytes(b"\x7fELF")
         binary.chmod(0o755)
-        (self.payload / "lib").mkdir()
-        (self.payload / "lib" / "libfoo.so").write_bytes(b"")
-        (self.payload / "plugins").mkdir()
-        (self.payload / "plugins" / "idle.so").write_bytes(b"")
-        docs = self.payload / "share" / "doc" / "ds5dummy"
+        for name in ("buttons_check", "ds5dummy-config"):
+            script = self.tree / "bin" / name
+            script.write_bytes(b"\x7fELF")
+            script.chmod(0o755)
+        (self.tree / "lib").mkdir()
+        (self.tree / "lib" / "libyaml-cpp.so.0.9").write_bytes(b"")
+        (self.tree / "plugins").mkdir()
+        (self.tree / "plugins" / "idle.so").write_bytes(b"")
+        (self.tree / "etc").mkdir()
+        (self.tree / "etc" / "config.yaml").write_text("", encoding="utf-8")
+        docs = self.tree / "share" / "doc" / "ds5dummy"
         docs.mkdir(parents=True)
         (docs / "buttons.md").write_text("", encoding="utf-8")
 
@@ -88,17 +93,22 @@ class _StagedTree(unittest.TestCase):
 
 
 class StageTest(_StagedTree):
-    """ZIP 里的目录形状：loader 认的入口名、版本位置、`py_modules/`。"""
+    """ZIP 里的目录形状：loader 认的入口名、版本位置、`py_modules/`、嵌套的树。"""
 
     def _stage(self) -> Path:
         staging = Path(self._tmp.name) / "staging"
         staging.mkdir()
-        return pack.stage_plugin(staging, self.payload, "1.2.3")
+        return pack.stage_plugin(staging, self.tree, "1.2.3")
+
+    def test_top_directory_comes_from_plugin_json(self) -> None:
+        """官方 CLI 用 plugin.json 的 name 作顶层目录名，loader 按它认插件。"""
+        self.assertEqual(self._stage().name, "DS5Dummy")
 
     def test_entry_and_metadata(self) -> None:
         """loader 写死的入口名与它读版本号的位置都是承重的。"""
         plugin = self._stage()
         self.assertTrue((plugin / "main.py").is_file())
+        self.assertTrue((plugin / "LICENSE").is_file())
         package = json.loads((plugin / "package.json").read_text(encoding="utf-8"))
         self.assertEqual(package["version"], "1.2.3")
         self.assertEqual(package["type"], "module")
@@ -110,13 +120,16 @@ class StageTest(_StagedTree):
         self.assertTrue((plugin / "py_modules" / "ds5dummy" / "__init__.py").is_file())
         self.assertFalse((plugin / "py_modules" / "ds5dummy" / "__pycache__").exists())
 
-    def test_frontend_and_payload(self) -> None:
-        """前端 bundle、执行位与便携分发都要落到插件根下。"""
+    def test_frontend_and_nested_tree(self) -> None:
+        """前端在 `dist/`，整棵便携树在 `bin/ds5dummy/` 且形状不变。"""
         plugin = self._stage()
         self.assertTrue((plugin / "dist" / "index.js").is_file())
-        self.assertTrue(os.access(plugin / "bin" / "ds5dummyd", os.X_OK))
-        self.assertTrue((plugin / "plugins" / "idle.so").is_file())
-        self.assertTrue((plugin / "share" / "doc" / "ds5dummy" / "buttons.md").is_file())
+        tree = plugin / "bin" / "ds5dummy"
+        self.assertTrue(os.access(tree / "bin" / "ds5dummyd", os.X_OK))
+        self.assertTrue((tree / "lib" / "libyaml-cpp.so.0.9").is_file())
+        self.assertTrue((tree / "plugins" / "idle.so").is_file())
+        self.assertTrue((tree / "etc" / "config.yaml").is_file())
+        self.assertTrue((tree / "share" / "doc" / "ds5dummy" / "buttons.md").is_file())
 
     def test_missing_frontend_fails(self) -> None:
         """没有 `dist/index.js` 就点名失败，不打出一个没面板的 ZIP。"""
@@ -132,7 +145,7 @@ class ZipTest(_StagedTree):
         """权限位取自文件本身；同样的输入压出逐字节相同的 ZIP。"""
         staging = Path(self._tmp.name) / "staging"
         staging.mkdir()
-        plugin = pack.stage_plugin(staging, self.payload, "1.2.3")
+        plugin = pack.stage_plugin(staging, self.tree, "1.2.3")
         first = Path(self._tmp.name) / "a.zip"
         second = Path(self._tmp.name) / "b.zip"
         pack.write_zip(plugin, first)
@@ -140,54 +153,26 @@ class ZipTest(_StagedTree):
         self.assertEqual(first.read_bytes(), second.read_bytes())
 
         with zipfile.ZipFile(first) as bundle:
-            info = bundle.getinfo("ds5dummy/bin/ds5dummyd")
+            info = bundle.getinfo("DS5Dummy/bin/ds5dummy/bin/ds5dummyd")
             self.assertEqual(stat.S_IMODE(info.external_attr >> 16), 0o755)
-            self.assertIn("ds5dummy/dist/index.js", bundle.namelist())
+            self.assertIn("DS5Dummy/dist/index.js", bundle.namelist())
 
 
-class CollectTest(_StagedTree):
-    """输入包缺东西时点名失败，不让坏包静默打成半个 ZIP。"""
+class CheckTreeTest(_StagedTree):
+    """便携性校验：不合格的树不许打成 ZIP。"""
 
-    def test_accepts_complete_payload(self) -> None:
-        """三样都在、二进制可执行时放行。"""
-        self.assertEqual(pack.collect_payload(self.payload.parent.parent.parent), self.payload)
-
-    def test_rejects_missing_binary(self) -> None:
-        """没有 `bin/ds5dummyd` 说明输入包不是便携构建。"""
-        (self.payload / "bin" / "ds5dummyd").unlink()
+    def test_rejects_missing_yaml_cpp(self) -> None:
+        """没有随包 yaml-cpp 的树在别的机器上起不来。"""
+        shutil.rmtree(self.tree / "lib")
+        (self.tree / "lib").mkdir()
         with self.assertRaises(SystemExit):
-            pack.collect_payload(self.payload.parent.parent.parent)
+            pack.check_tree(self.tree)
 
-    def test_rejects_binary_without_exec_bit(self) -> None:
-        """二进制没有执行位时装到 Deck 上也起不来。"""
-        (self.payload / "bin" / "ds5dummyd").chmod(0o644)
+    def test_rejects_non_elf_binary(self) -> None:
+        """`readelf` 读不动说明这不是便携构建（或二进制被换过）。"""
+        (self.tree / "bin" / "ds5dummyd").write_text("not an elf", encoding="utf-8")
         with self.assertRaises(SystemExit):
-            pack.collect_payload(self.payload.parent.parent.parent)
-
-
-class ExtractTest(unittest.TestCase):
-    """相对路径的输入包：`bsdtar` 以解包目录为工作目录跑，路径必须先解析。"""
-
-    @unittest.skipUnless(shutil.which("bsdtar"), "需要 bsdtar")
-    def test_relative_package_path(self) -> None:
-        """调用方给的相对路径必须按当前目录解析，而不是按解包目录。"""
-        with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp)
-            source = root / "sample.bin"
-            source.write_bytes(b"payload")
-            package = root / "sample.pkg.tar"
-            with tarfile.open(package, "w") as archive:
-                archive.add(source, arcname="bin/sample.bin")
-            destination = root / "out"
-            destination.mkdir()
-
-            previous = os.getcwd()
-            os.chdir(root)
-            try:
-                pack.extract_package(Path("sample.pkg.tar"), destination)
-            finally:
-                os.chdir(previous)
-            self.assertTrue((destination / "bin" / "sample.bin").is_file())
+            pack.check_tree(self.tree)
 
 
 if __name__ == "__main__":

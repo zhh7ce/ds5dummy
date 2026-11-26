@@ -4,7 +4,8 @@
 Decky 给插件三处互不重叠的位置，职责不能混：
 
 - 插件目录（`homebrew/plugins/<插件>`）：随插件更新**整目录替换**，所以只放代码与
-  随包的便携分发（`bin/`、`lib/`、`plugins/`），不放任何运行期状态。
+  随包的便携树（`bin/ds5dummy/`，里面是 `bin/`、`lib/`、`plugins/`、`etc/` 与
+  `share/`），不放任何运行期状态。
 - 设置目录（`homebrew/settings/<插件>`）：用户可见的开关与虚拟 UDC 数量。
 - 数据目录（`homebrew/data/<插件>`）：内核模块缓存、程序日志、pid 文件。卸载插件时
   随数据目录一起被 Decky 删除，所以本模块不负责清理它们。
@@ -23,8 +24,11 @@ from pathlib import Path
 DEFAULT_PLUGIN_NAME = "ds5dummy"
 DEFAULT_HOMEBREW = "/home/deck/homebrew"
 
-# 便携分发里程序自己的插件目录。程序按 /proc/self/exe 推前缀，所以只要
-# bin/ 与 plugins/ 是插件目录下的兄弟，随包的 idle.so / buttons.so 就会被扫到。
+# 便携树在插件目录里的固定位置：ZIP 里 `bin/ds5dummy/` 是整棵 tarball 树，
+# 程序、随包库与随包插件都在里面，彼此的相对位置与 tarball 一致。
+_TREE_DIR = "bin/ds5dummy"
+
+# 树内相对路径：程序与版本号。
 _DAEMON_BIN = "bin/ds5dummyd"
 _VERSION_FILE = "VERSION"
 
@@ -74,13 +78,25 @@ class Layout:
         return os.path.join(self.data_dir, "daemon.pid")
 
     @property
+    def tree_dir(self) -> str:
+        """随插件发布的便携树根：`<插件目录>/bin/ds5dummy`。
+
+        这棵树与 tarball 解压后的目录逐字节相同，程序按自身位置找配置
+        （`<树>/etc/config.yaml`）与随包插件（`<树>/plugins`）。
+        """
+        return os.path.join(self.plugin_dir, _TREE_DIR)
+
+    @property
     def daemon_bin(self) -> str:
         """随插件发布的转发程序本体（C-02、C-04）。"""
-        return os.path.join(self.plugin_dir, _DAEMON_BIN)
+        return os.path.join(self.tree_dir, _DAEMON_BIN)
 
     @property
     def version_file(self) -> str:
-        """打包时写入的应用版本号，与 `plugin.json` 同源（U-08 显示它）。"""
+        """打包时写入的应用版本号，与 `package.json` 同源（U-08 显示它）。
+
+        放在插件根上（不是树里）：它是面板的展示信息，不是树的一部分。
+        """
         return os.path.join(self.plugin_dir, _VERSION_FILE)
 
 

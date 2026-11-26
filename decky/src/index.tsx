@@ -92,6 +92,16 @@ interface Snapshot {
   retry_in_s: number;
   /** `daemon.log` 最后一条非空行，WAITING 时用来说明运行环境缺少什么。 */
   log_last_line: string;
+  /** 配置页面服务（局域网）的状态；它不归核心状态机管，由后端单独拼进来。
+   *  标成可选：后端版本比前端旧时这里会是 undefined，面板不能因此崩掉。 */
+  config_web?: {
+    /** 服务是否在跑。 */
+    on: boolean;
+    /** 跑起来时给用户手输的地址（局域网 IP + 端口）；没跑时是空串。 */
+    url: string;
+    /** 上一次启动失败的原因；正常时是空串。 */
+    error: string;
+  };
 }
 
 /** 后端的 `get_logs`（U-07）。 */
@@ -109,11 +119,8 @@ const redownload = callable<[], Snapshot>("redownload");
 const restartDaemon = callable<[], Snapshot>("restart_daemon");
 const cleanCache = callable<[], Snapshot>("clean_cache");
 const getLogs = callable<[], LogBundle>("get_logs");
-/** 起随包的配置页面；返回它监听的地址，失败时带一句原因。 */
-const openConfigRpc = callable<
-  [],
-  { ok: boolean; url?: string; error?: string }
->("open_config");
+/** 起/停配置页面服务；返回含 `config_web` 的新快照。 */
+const setConfigWeb = callable<[enabled: boolean], Snapshot>("set_config_web");
 
 /**
  * 八种状态的中文名（§4.3）。
@@ -313,6 +320,9 @@ function Content() {
   const [pending, setPending] = useState(false);
   // 用户刚拨到的位置。RPC 返回前开关就停在这一侧，返回后用后端快照复核。
   const [switchTarget, setSwitchTarget] = useState<boolean | null>(null);
+  // 配置页面开关自己的等待标记：起停要等子进程，别让主开关跟着变灰。
+  const [configPending, setConfigPending] = useState(false);
+  const [configTarget, setConfigTarget] = useState<boolean | null>(null);
 
   // 每 2 s 取一次快照；组件卸载（面板关闭）时清掉计时器。取失败不改界面——后端
   // 可能正在重载，下一次轮询会重新连上。
@@ -373,26 +383,30 @@ function Content() {
     }
   };
 
+  /**
+   * 拨配置页面的开关：起停那个本地服务，成功后用返回的快照更新地址。
+   *
+   * @param value 用户拨到的目标位置。
+   */
+  const toggleConfigWeb = async (value: boolean) => {
+    setConfigTarget(value);
+    setConfigPending(true);
+    try {
+      setSnapshot(await setConfigWeb(value));
+    } catch (error) {
+      toaster.toast({ title: "切换配置页面失败", body: String(error) });
+    } finally {
+      setConfigTarget(null);
+      setConfigPending(false);
+    }
+  };
+
   /** 取日志并弹出日志窗；取不到只报警，不改变面板状态。 */
   const openLogs = async () => {
     try {
       showModal(<LogModal logs={await getLogs()} />);
     } catch (error) {
       toaster.toast({ title: "读取日志失败", body: String(error) });
-    }
-  };
-
-  /** 起配置页面并把地址报给用户；页面自己会拉起浏览器。 */
-  const openConfig = async () => {
-    try {
-      const result = await openConfigRpc();
-      if (!result.ok) throw new Error(result.error ?? "未知错误");
-      toaster.toast({
-        title: "配置页面已启动",
-        body: result.url ?? "http://127.0.0.1:8777/",
-      });
-    } catch (error) {
-      toaster.toast({ title: "启动配置页面失败", body: String(error) });
     }
   };
 
@@ -414,6 +428,9 @@ function Content() {
   // 拨开关本身要保持可用：启用途中用户必须能关（E-09），停用途中必须能反悔。
   // 只有"不可用且现在是关的"才置灰——那种情况下拨开只会再失败一次（U-02）。
   const toggleDisabled = pending || (unavailable && !snapshot.enabled);
+  // 配置页面的开关位置：用户刚拨的那一侧优先，其次看后端；后端没给这个字段
+  // （旧版本）就当作关。
+  const configOn = configTarget ?? snapshot.config_web?.on ?? false;
   const errorLine = snapshot.reason_text || snapshot.detail;
 
   return (
@@ -529,6 +546,43 @@ function Content() {
         </PanelSectionRow>
       </PanelSection>
 
+      {/* 配置页面：一个开关 + 一行地址。不做成按钮——点按钮在 Deck 上会连带把
+          Steam 客户端切走，改成"用户自己拿地址去别的机器上开"。 */}
+      <PanelSection title="配置页面">
+        <PanelSectionRow>
+          <ToggleField
+            label="在局域网内提供配置页面"
+            description="启动后可以在同一局域网的电脑浏览器里改按键配置；关掉即停止服务"
+            checked={configOn}
+            disabled={configPending}
+            onChange={(value) => void toggleConfigWeb(value)}
+          />
+        </PanelSectionRow>
+        {configOn && (
+          <PanelSectionRow>
+            {/* 标签单独占一行、值独占整行：地址是给人手抄的，挤在右半边会折成
+                好几行碎片。`childrenLayout="below"` 把它放到标签下面，宽度拉满。 */}
+            <Field
+              label="地址"
+              childrenLayout="below"
+              childrenContainerWidth="max"
+              focusable
+            >
+              <span style={{ wordBreak: "break-all", lineHeight: 1.3 }}>
+                {snapshot.config_web?.url || "正在获取本机地址…"}
+              </span>
+            </Field>
+          </PanelSectionRow>
+        )}
+        {!configOn && snapshot.config_web?.error && (
+          <PanelSectionRow>
+            <div style={{ color: "#ffb4a9", fontSize: "0.9em", lineHeight: 1.4 }}>
+              {snapshot.config_web.error}
+            </div>
+          </PanelSectionRow>
+        )}
+      </PanelSection>
+
       <PanelSection title="操作">
         <PanelSectionRow>
           <ButtonItem
@@ -573,15 +627,6 @@ function Content() {
             onClick={() => void openLogs()}
           >
             查看日志
-          </ButtonItem>
-        </PanelSectionRow>
-        <PanelSectionRow>
-          <ButtonItem
-            layout="below"
-            disabled={pending}
-            onClick={() => void openConfig()}
-          >
-            打开配置页面
           </ButtonItem>
         </PanelSectionRow>
       </PanelSection>

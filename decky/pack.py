@@ -1,39 +1,42 @@
 #!/usr/bin/env python3
-"""把应用 release 的预编译包打成 Decky 插件 ZIP（C-02、C-03、T-02）。
+"""把仓库这一份源码打成 Decky 插件 ZIP（自编前端 + 自编后端，官方形状）。
 
-输入是 `pkg/ds5dummy-bin` 打出来的 pacman 包（`ds5dummy-bin.pkg.tar.zst`），输出是可
-直接装进 Decky 的 `ds5dummy-decky.zip`。两者是同一份产物的两种形状：ZIP 里的
-`bin/`、`lib/`、`plugins/` 就是那个包 `/usr/lib/ds5dummy/` 下的文件，逐字节相同，
-不重新编译数据面（G-02、C-03）。
+输入不再是任何预先打好的包：本脚本自己调 CMake 编出便携后端（数据面程序、配置
+校验器、随包 `.so`），自己调 npm 编出前端，然后按 decky-loader 官方 CLI
+（`SteamDeckHomebrew/cli` 的 `plugin build`）那套白名单组装 ZIP。两边的文件来源
+完全不同，产物形状却一致，所以将来交商店不需要重排。
 
-ZIP 内的布局由 decky-loader 的真实读取路径决定，不是随意摆的：
+ZIP 里允许出现什么，是官方 CLI 的硬规则（`src/cli/plugin/build.rs::zip_plugin`）：
 
 ```
-ds5dummy/
-  plugin.json            loader 读 name/author/flags/api_version
-  package.json           loader 从它取版本号；`type: module` 决定按 ESM 加载 dist/
-  main.py                入口文件名是 loader 写死的（不读 plugin.json 的键）
-  py_modules/ds5dummy/   本地 Python 包：loader 只把 <插件>/py_modules 加进 sys.path
-  dist/index.js          npm run build 产出的前端 bundle
-  bin/ lib/ plugins/     便携分发；含配置工具入口、页面与校验器，三者必须保持兄弟
-  share/doc/ds5dummy/    随包文档
-  README.md              插件安装/使用说明（T-03）
-  VERSION                面板显示的版本号，与 package.json 同源
+<plugin.json 的 name>/
+  plugin.json          loader 读 name/author/flags/api_version
+  package.json         loader 从它取版本号；`type: module` 决定按 ESM 加载 dist/
+  main.py              入口文件名是 loader 写死的
+  README.md  LICENSE   官方白名单要求根上有这两份（缺了官方 CLI 直接 panic）
+  *.py                 根上其它 Python 文件会被自动带上
+  dist/index.js        npm run build 的产物，唯一前端入口
+  py_modules/ds5dummy/ loader 只把 <插件>/py_modules 加进 sys.path
+  bin/ds5dummy/        整棵便携树原样嵌在这里（官方 CLI 递归收录 bin/）
 ```
 
-压缩包里仍然写真实的 Unix 权限位（`unzip` 之类按 `external_attr` 解包时用得上），但
-别指望安装方一定会恢复它：Decky 用 `zipfile.extractall`，而 CPython 的解包不恢复
-mode，`bin/ds5dummyd` 会落在 0644。所以执行位真正靠的是运行期那一次补齐——转发程序
-启动前 `Daemon.start()` 走 `System.make_executable()` 把执行位加上。
+**`bin/ds5dummy/` 里是完整的一棵树**，与 tarball 解压后逐字节相同：`bin/` 与
+`lib/` 保持兄弟关系（RUNPATH 是 `$ORIGIN/../lib`），程序按自身位置推树根，所以
+同一个后端在 tarball 与插件里行为一致。这层目录名固定（不带版本、不带架构），
+升级换版本不会让路径变。
 
-依赖两个外部命令：`bsdtar`（读 zstd 压缩的 pacman 包；Python 3.12 的 `tarfile` 不认
-zstd）与 `npm`（构建前端）。缺哪个就直接报错，不做静默降级。
+打包前会校验"便携"这件事本身：RUNPATH 必须指向树内 `lib/`、`ldd` 不能有
+`not found`、三个二进制都必须在。不合格直接失败，不打出一个装上去起不来的 ZIP。
+
+依赖三个外部命令：`cmake`（编后端）、`npm`（编前端）、`readelf`/`ldd`（校验）。
+缺哪个直接报错，不做静默降级。
 """
 
 from __future__ import annotations
 
 import argparse
 import json
+import os
 import re
 import shutil
 import subprocess
@@ -45,37 +48,41 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parent.parent
 DECKY_DIR = REPO_ROOT / "decky"
 
-# ZIP 顶层目录名，同时也是 `homebrew/plugins/<目录>` 的目录名；必须与 plugin.json 的
-# 目录约定一致，否则 Decky 里会出现两个同名插件或找不到它。
-PLUGIN_DIR_NAME = "ds5dummy"
+# 插件目录里那棵便携树的固定目录名（`bin/ds5dummy/`）。不带版本号与架构：插件
+# 目录里只有一个后端，版本看 plugin.json / package.json。
+TREE_DIR_NAME = "ds5dummy"
 
-# pacman 包里便携分发的落点（`pkg/ds5dummy-bin` 的 package() 铺出来的位置）。
-PAYLOAD_PREFIX = Path("usr/lib/ds5dummy")
+# 官方 CLI 用来放原生后端产物的目录名。
+PAYLOAD_PARENT = "bin"
 
-# 设备侧真正会用到的子目录：数据面二进制、它随包的共享库、随包插件。
-# bin/ 里同时有 buttons_check 与 ds5dummy-config 入口，lib/ 里有页面与 core 面板：
-# 配置工具随主程序包一起产出，这里整目录复制，不需要为它单列一份来源。
-PAYLOAD_PARTS = ("bin", "lib", "plugins")
+# 后端必须有的三个二进制：缺一个就说明构建没跑全，不能打成"能用"的包。
+REQUIRED_BINARIES = ("ds5dummyd", "buttons_check", "ds5dummy-config")
 
-# 版本号只允许这些字符：它会进文件名、ZIP 内文本与 Decky 的目录名，出现空格或斜杠
-# 会破坏其中至少一处。前导 `v` 在解析阶段就去掉。
+# RUNPATH 必须包含这一项：树里 `bin/` 与 `lib/` 是兄弟（见 CMakeLists 的
+# ds5dummy_make_portable）。
+REQUIRED_RUNPATH = "$ORIGIN/../lib"
+
+# 版本号只允许这些字符：它会进文件名、ZIP 内文本与 Decky 的目录名，出现空格或
+# 斜杠会破坏其中至少一处。前导 `v` 在解析阶段就去掉。
 _VERSION_RE = re.compile(r"^[0-9A-Za-z][0-9A-Za-z._+-]*$")
 
-_BIN_NAME = "ds5dummyd"
+# 以前那个"吃 pacman 包"的版本默认输出这个文件名，保持不变，省得手册与脚本失效。
+_DEFAULT_OUTPUT = REPO_ROOT / "build" / "decky" / "ds5dummy-decky.zip"
 
 
-def _run(command: list[str], cwd: Path) -> None:
+def _run(command: list[str], cwd: Path, env: dict[str, str] | None = None) -> None:
     """跑一个外部命令；失败时把命令与返回码一起抛出。
 
     Args:
         command: argv，第一项是可执行文件名。
         cwd: 工作目录。
+        env: 完整环境；None 表示继承当前进程。
 
     Raises:
         SystemExit: 命令不存在或返回非零。
     """
     try:
-        subprocess.run(command, cwd=cwd, check=True)
+        subprocess.run(command, cwd=cwd, check=True, env=env)
     except FileNotFoundError as error:
         raise SystemExit(f"找不到命令 {command[0]}：{error}") from error
     except subprocess.CalledProcessError as error:
@@ -102,58 +109,39 @@ def normalize_version(raw: str) -> str:
     return version
 
 
-def extract_package(package: Path, destination: Path) -> Path:
-    """用 `bsdtar` 把 pacman 包解开。
+def read_plugin_meta(decky_dir: Path) -> dict:
+    """读 `plugin.json`；ZIP 的顶层目录名用它，缺了就没法装。
 
     Args:
-        package: `.pkg.tar.zst` 文件。
-        destination: 解包目标目录（已存在）。
+        decky_dir: 插件源码目录（`decky/`）。
 
     Returns:
-        解包根目录，等于 `destination`。
+        解析后的 JSON 对象。
 
     Raises:
-        SystemExit: 包不存在或解包失败。
+        SystemExit: 文件缺失、不是 JSON，或缺 `name`。
     """
-    if not package.is_file():
-        raise SystemExit(f"找不到输入包：{package}")
-    # `bsdtar` 以 `destination` 为工作目录跑，相对路径会落到解包目录里去，所以这里
-    # 先按调用方的当前目录解析成绝对路径。
-    _run(["bsdtar", "-xf", str(package.resolve()), "-C", str(destination)], destination)
-    return destination
+    path = decky_dir / "plugin.json"
+    try:
+        meta = json.loads(path.read_text(encoding="utf-8"))
+    except OSError as error:
+        raise SystemExit(f"读不到 {path}：{error}") from error
+    except json.JSONDecodeError as error:
+        raise SystemExit(f"{path} 不是合法 JSON：{error}") from error
+    if not isinstance(meta, dict) or not isinstance(meta.get("name"), str):
+        raise SystemExit(f"{path} 缺少 name 字段（ZIP 顶层目录名用它）")
+    return meta
 
 
-def collect_payload(extracted: Path) -> Path:
-    """校验便携分发树并把三样东西挑出来。
-
-    Args:
-        extracted: 解包根目录。
-
-    Returns:
-        `usr/lib/ds5dummy` 在解包树里的路径。
-
-    Raises:
-        SystemExit: 缺目录、缺二进制、二进制没有执行位，或某个目录是空的。
-    """
-    payload = extracted / PAYLOAD_PREFIX
-    for part in PAYLOAD_PARTS:
-        if not (payload / part).is_dir():
-            raise SystemExit(f"输入包里没有 {PAYLOAD_PREFIX / part}，不是预期的便携构建")
-    binary = payload / "bin" / _BIN_NAME
-    if not binary.is_file():
-        raise SystemExit(f"输入包里没有 {PAYLOAD_PREFIX / 'bin' / _BIN_NAME}")
-    if not binary.stat().st_mode & 0o111:
-        raise SystemExit(f"{binary} 没有执行位，装到 Deck 上也起不来")
-    for part in ("lib", "plugins"):
-        if not any((payload / part).iterdir()):
-            raise SystemExit(f"输入包里的 {PAYLOAD_PREFIX / part} 是空的")
-    return payload
-
-
-def build_frontend() -> Path:
+def build_frontend(decky_dir: Path) -> Path:
     """在 `decky/` 里装依赖并构建前端。
 
-    `npm ci` 用提交在仓库里的 `package-lock.json`，保证 CI 与本机装出同一棵依赖树。
+    `npm install` 按提交在仓库里的 `package-lock.json` 解析版本；不用 `npm ci`
+    是因为它会先把 `node_modules` 整个删掉，在只读/受限环境里会直接失败，而
+    我们要的只是"版本按 lock 走"这件事。
+
+    Args:
+        decky_dir: 插件源码目录。
 
     Returns:
         `dist/index.js` 的路径。
@@ -161,83 +149,239 @@ def build_frontend() -> Path:
     Raises:
         SystemExit: npm 失败或构建产物缺失。
     """
-    _run(["npm", "ci", "--no-audit", "--no-fund"], DECKY_DIR)
-    _run(["npm", "run", "build"], DECKY_DIR)
-    bundle = DECKY_DIR / "dist" / "index.js"
+    _run(["npm", "install", "--no-audit", "--no-fund"], decky_dir)
+    _run(["npm", "run", "build"], decky_dir)
+    bundle = decky_dir / "dist" / "index.js"
     if not bundle.is_file():
         raise SystemExit("npm run build 没有产出 dist/index.js")
     return bundle
 
 
-def copy_python_package(destination: Path) -> None:
+def build_backend(build_dir: Path, backend: str) -> None:
+    """配置并编译便携后端（`DS5DUMMY_PORTABLE` + `DS5DUMMY_LAYOUT=tree`）。
+
+    两个开关都不能省：没有 PORTABLE 就没有随包 yaml-cpp 与 RUNPATH，换台机器起
+    不来；没有 tree 布局程序会去读 `/etc/ds5dummy`，插件目录里的树就白带了。
+
+    Args:
+        build_dir: CMake 构建目录（会被复用，增量编译更快）。
+        backend: `hidraw` 或 `l2cap`，对应 `BT_BACKEND`。
+
+    Raises:
+        SystemExit: 配置或编译失败。
+    """
+    _run(
+        [
+            "cmake", "-S", str(REPO_ROOT), "-B", str(build_dir),
+            "-DCMAKE_BUILD_TYPE=Release",
+            f"-DBT_BACKEND={backend.upper()}",
+            "-DDS5DUMMY_PORTABLE=ON",
+            "-DDS5DUMMY_LAYOUT=tree",
+            "-DDS5DUMMY_STRICT=ON",
+            "-DDS5DUMMY_BUILD_TOOLS=OFF",
+            "-DDS5DUMMY_BUILD_TESTS=OFF",
+        ],
+        REPO_ROOT,
+    )
+    _run(
+        [
+            "cmake", "--build", str(build_dir),
+            "--target", "ds5dummyd", "buttons_check", "ds5dummy_idle", "ds5dummy_buttons",
+            "-j", str(os.cpu_count() or 1),
+        ],
+        REPO_ROOT,
+    )
+
+
+def install_tree(build_dir: Path, destination: Path) -> Path:
+    """把编好的东西按树铺到 `destination`（与 `dist` 目标同一份 install 清单）。
+
+    走 `cmake --install` 而不是"打 tarball 再解开"：后者多一道压缩解压，还得依赖
+    tar；这里直接把 staging 当 DESTDIR，得到的树与 tarball 里那份一致。
+
+    Args:
+        build_dir: CMake 构建目录。
+        destination: 树的根（`<staging>/tree`）。
+
+    Returns:
+        `destination`，便于链式调用。
+
+    Raises:
+        SystemExit: 安装失败或树里缺二进制。
+    """
+    destination.mkdir(parents=True, exist_ok=True)
+    env = dict(os.environ)
+    env["DESTDIR"] = str(destination)
+    _run(
+        ["cmake", "--install", str(build_dir), "--prefix", "/", "--strip"],
+        REPO_ROOT,
+        env=env,
+    )
+    for name in REQUIRED_BINARIES:
+        binary = destination / "bin" / name
+        if not binary.is_file():
+            raise SystemExit(f"树里缺 bin/{name}：install 清单与构建目标不一致")
+    return destination
+
+
+def read_runpath(binary: Path) -> list[str]:
+    """读 ELF 的 RUNPATH（`readelf -d`）。
+
+    Args:
+        binary: 待检查的可执行文件。
+
+    Returns:
+        RUNPATH 里的目录列表；没有该项时为空。
+
+    Raises:
+        SystemExit: `readelf` 不存在或读失败。
+    """
+    try:
+        output = subprocess.run(
+            ["readelf", "-d", str(binary)],
+            check=True,
+            capture_output=True,
+            text=True,
+        ).stdout
+    except FileNotFoundError as error:
+        raise SystemExit(f"找不到 readelf（binutils）：{error}") from error
+    except subprocess.CalledProcessError as error:
+        raise SystemExit(f"readelf 读不了 {binary}：{error}") from error
+
+    match = re.search(r"\(RUNPATH\).*\[([^\]]*)\]", output)
+    return match.group(1).split(":") if match else []
+
+
+def check_tree(tree: Path) -> None:
+    """校验这棵树真的能"搬走就跑"。
+
+    三条判据：RUNPATH 指向树内 `lib/`、`ldd` 没有 `not found`、随包的 yaml-cpp
+    在 `lib/` 里。任何一条不过都直接失败——打出一个装上去起不来的 ZIP 比不打包
+    更糟，用户只会看到"插件装了但没反应"。
+
+    Args:
+        tree: `install_tree` 铺出来的树根。
+
+    Raises:
+        SystemExit: 任何一条判据不过。
+    """
+    binary = tree / "bin" / "ds5dummyd"
+    runpath = read_runpath(binary)
+    if REQUIRED_RUNPATH not in runpath:
+        raise SystemExit(
+            f"{binary} 的 RUNPATH 是 {runpath or '（没有）'}，"
+            f"必须是含 {REQUIRED_RUNPATH} 的便携构建"
+        )
+    if not any((tree / "lib").glob("libyaml-cpp.so*")):
+        raise SystemExit(f"{tree}/lib 里没有随包的 libyaml-cpp，换台机器会起不来")
+
+    missing = []
+    for name in REQUIRED_BINARIES:
+        path = tree / "bin" / name
+        try:
+            output = subprocess.run(
+                ["ldd", str(path)], capture_output=True, text=True, check=False
+            ).stdout
+        except FileNotFoundError as error:
+            raise SystemExit(f"找不到 ldd：{error}") from error
+        for line in output.splitlines():
+            if "not found" in line:
+                missing.append(f"{name}: {line.strip()}")
+    if missing:
+        raise SystemExit("这些依赖在构建机上就找不到，装上一定起不来：\n  " + "\n  ".join(missing))
+
+
+def copy_python_package(destination: Path, decky_dir: Path) -> None:
     """把本地 Python 包放进 `py_modules/`（loader 只把这一层加进 `sys.path`）。
 
     Args:
-        destination: 插件根目录（staging 里的 `ds5dummy/`）。
+        destination: 插件根目录（staging 里的 `<plugin.json 的 name>/`）。
+        decky_dir: 插件源码目录。
     """
     modules = destination / "py_modules"
     modules.mkdir(parents=True)
     shutil.copytree(
-        DECKY_DIR / "ds5dummy",
+        decky_dir / "ds5dummy",
         modules / "ds5dummy",
         ignore=shutil.ignore_patterns("__pycache__", "*.pyc"),
     )
 
 
-def stage_plugin(staging: Path, payload: Path, version: str) -> Path:
-    """搭出 ZIP 里那份插件目录。
+def write_package_json(destination: Path, version: str, meta: dict) -> None:
+    """写 `package.json`：loader 从这里取版本号，`type: module` 决定 ESM 加载。
 
     Args:
-        staging: 空的临时目录。
-        payload: `collect_payload` 返回的便携分发目录。
+        destination: 插件根目录。
         version: 已规范化的版本号。
-
-    Returns:
-        staging 里的插件根目录。
-
-    Raises:
-        SystemExit: 源文件缺失。
+        meta: `plugin.json` 的内容，作者与描述沿用它的 publish 段。
     """
-    plugin = staging / PLUGIN_DIR_NAME
-    plugin.mkdir()
-
-    # 入口与元数据。plugin.json 原样复制：版本号由 package.json 承载（loader 从那里
-    # 取），往 plugin.json 里塞它不认识的键只会多一处得记住同步的副本。
-    for name in ("plugin.json", "main.py", "README.md"):
-        source = DECKY_DIR / name
-        if not source.is_file():
-            raise SystemExit(f"缺少插件的 {name}：{source}")
-        shutil.copy2(source, plugin / name)
-
-    package_json = {
-        "name": PLUGIN_DIR_NAME,
+    publish = meta.get("publish") if isinstance(meta.get("publish"), dict) else {}
+    payload = {
+        "name": TREE_DIR_NAME,
         "version": version,
-        "description": "在 Steam Deck 上以虚拟 USB 身份转发蓝牙 DualSense。",
-        "author": "zhh7ce",
-        # loader 按这个字段决定用 ESM 加载 dist/index.js；缺了它会退回复制旧的
+        "description": publish.get("description", "DS5Dummy Decky 插件"),
+        "author": meta.get("author", ""),
+        # loader 按这个字段决定用 ESM 加载 dist/index.js；缺了它会退回旧的
         # IIFE eval 方式，我们的 bundle 是 ESM，装上也加载不起来。
         "type": "module",
     }
-    (plugin / "package.json").write_text(
-        json.dumps(package_json, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
+    (destination / "package.json").write_text(
+        json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
     )
+
+
+def stage_plugin(
+    staging: Path, tree: Path, version: str, decky_dir: Path | None = None
+) -> Path:
+    """按官方白名单搭出 ZIP 里那份插件目录。
+
+    Args:
+        staging: 空的临时目录。
+        tree: `install_tree` 铺出来的便携树。
+        version: 已规范化的版本号。
+        decky_dir: 插件源码目录；None 表示用模块级 `DECKY_DIR`（测试会替换它）。
+
+    Returns:
+        staging 里的插件根目录（名字取自 `plugin.json` 的 name）。
+
+    Raises:
+        SystemExit: 源文件缺失（根上那几份缺一不可，官方 CLI 同样会失败）。
+    """
+    source = decky_dir or DECKY_DIR
+    meta = read_plugin_meta(source)
+    plugin = staging / meta["name"]
+    plugin.mkdir()
+
+    # 根上必需的四份 + LICENSE：官方 CLI 对这五份是硬要求（`fs::read` 直接
+    # unwrap），我们也在这里卡住。
+    for name, origin in (
+        ("plugin.json", source / "plugin.json"),
+        ("main.py", source / "main.py"),
+        ("README.md", source / "README.md"),
+        ("LICENSE", REPO_ROOT / "LICENSE"),
+    ):
+        if not origin.is_file():
+            raise SystemExit(f"缺少 {origin}（ZIP 根上必须带 {name}）")
+        shutil.copy2(origin, plugin / name)
+
+    write_package_json(plugin, version, meta)
+    # 面板显示的版本号：与 package.json 同源，写在同一层方便 main.py 读。
     (plugin / "VERSION").write_text(version + "\n", encoding="utf-8")
 
-    copy_python_package(plugin)
+    copy_python_package(plugin, source)
 
     # 前端 bundle：loader 只认 `dist/index.js`，整目录复制（sourcemap 一起带上，
     # 现场排查面板问题时才有得看）。
-    dist = DECKY_DIR / "dist"
+    dist = source / "dist"
     if not (dist / "index.js").is_file():
         raise SystemExit(f"缺少前端产物：{dist / 'index.js'}（先 npm run build）")
     shutil.copytree(dist, plugin / "dist", copy_function=shutil.copy2)
 
-    for part in PAYLOAD_PARTS:
-        shutil.copytree(payload / part, plugin / part, copy_function=shutil.copy2)
-
-    docs = payload / "share" / "doc" / "ds5dummy"
-    if docs.is_dir():
-        shutil.copytree(docs, plugin / "share" / "doc" / "ds5dummy")
+    # 整棵便携树原样嵌进 bin/：官方 CLI 对 bin/ 递归收录，树内形状不变，所以
+    # 程序推树根、RUNPATH、插件目录查找全都只有一套规则。
+    payload = plugin / PAYLOAD_PARENT / TREE_DIR_NAME
+    payload.parent.mkdir(parents=True)
+    shutil.copytree(tree, payload, symlinks=True, copy_function=shutil.copy2)
 
     return plugin
 
@@ -245,15 +389,15 @@ def stage_plugin(staging: Path, payload: Path, version: str) -> Path:
 def write_zip(plugin: Path, output: Path) -> None:
     """把插件目录压成 ZIP；条目时间戳固定、权限位取自文件本身。
 
-    `zipfile.extractall` 在 Decky 侧解包时会按 `external_attr` 恢复权限，所以这里
-    必须写真实的 mode；时间戳固定成 1980-01-01 是为了同样的输入产出逐字节相同的
-    ZIP（重复打包不会因为构建时刻不同而处处变脏）。
+    时间戳固定成 1980-01-01 是为了同样的输入产出逐字节相同的 ZIP（重复打包不会
+    因为构建时刻不同而处处变脏）。官方 CLI 不这么做，但那是它的事，不是约束。
 
     Args:
         plugin: staging 里的插件根目录。
         output: 输出 ZIP 路径；父目录自动创建。
     """
     output.parent.mkdir(parents=True, exist_ok=True)
+    top = plugin.name
     with zipfile.ZipFile(
         output, "w", compression=zipfile.ZIP_DEFLATED, compresslevel=9
     ) as bundle:
@@ -261,9 +405,7 @@ def write_zip(plugin: Path, output: Path) -> None:
             if path.is_dir():
                 continue
             relative = path.relative_to(plugin).as_posix()
-            info = zipfile.ZipInfo(
-                f"{PLUGIN_DIR_NAME}/{relative}", date_time=(1980, 1, 1, 0, 0, 0)
-            )
+            info = zipfile.ZipInfo(f"{top}/{relative}", date_time=(1980, 1, 1, 0, 0, 0))
             info.external_attr = (path.stat().st_mode & 0o7777) << 16
             info.compress_type = zipfile.ZIP_DEFLATED
             info.create_system = 3  # Unix，权限位才会被解包方采信
@@ -280,41 +422,53 @@ def main(argv: list[str]) -> int:
         进程退出码：0 成功，1 失败（错误信息已打到 stderr）。
     """
     parser = argparse.ArgumentParser(
-        description="把 ds5dummy-bin 的 pacman 包打成 Decky 插件 ZIP"
+        description="从源码编出后端与前端，打成 Decky 插件 ZIP"
     )
-    parser.add_argument("--pkg", required=True, type=Path, help="ds5dummy-bin.pkg.tar.zst")
     parser.add_argument("--version", required=True, help="release tag（v 前缀可有可无）")
     parser.add_argument(
         "--out",
         type=Path,
-        default=REPO_ROOT / "build" / "decky" / "ds5dummy-decky.zip",
-        help="输出 ZIP 路径（缺省 build/decky/ds5dummy-decky.zip）",
+        default=_DEFAULT_OUTPUT,
+        help=f"输出 ZIP 路径（缺省 {_DEFAULT_OUTPUT.relative_to(REPO_ROOT)}）",
+    )
+    parser.add_argument(
+        "--backend",
+        choices=("hidraw", "l2cap"),
+        default="hidraw",
+        help="蓝牙后端（缺省 hidraw，SteamOS 用的就是它）",
     )
     parser.add_argument(
         "--skip-build",
         action="store_true",
-        help="复用已有的 decky/dist/，不跑 npm（本机调试用）",
+        help="复用已有的 decky/dist/ 与后端构建目录，不跑 npm 与 cmake 编译",
     )
     args = parser.parse_args(argv)
 
     version = normalize_version(args.version)
-    bundle = DECKY_DIR / "dist" / "index.js"
-    if args.skip_build:
-        if not bundle.is_file():
-            raise SystemExit("--skip-build 要求 decky/dist/index.js 已存在")
-    else:
-        build_frontend()
 
-    # 所有临时文件都放在 build/ 下（仓库内的临时区），不落系统临时目录。
+    if not args.skip_build:
+        build_frontend(DECKY_DIR)
+
+    # 后端构建目录复用（增量编译）；staging 每次都是新的临时目录。
+    build_dir = REPO_ROOT / "build" / "decky-cmake"
     scratch_root = REPO_ROOT / "build" / "decky"
     scratch_root.mkdir(parents=True, exist_ok=True)
-    with tempfile.TemporaryDirectory(dir=scratch_root, prefix="pack-") as scratch:
-        extracted = Path(scratch) / "package"
-        extracted.mkdir()
-        extract_package(args.pkg, extracted)
-        payload = collect_payload(extracted)
-        plugin = stage_plugin(Path(scratch), payload, version)
+    # 用 mkdtemp + 尽力清理而不是 TemporaryDirectory：ZIP 已经写出去之后，清理失败
+    # 不该让整条命令变成失败（受限环境里删目录可能被拦）。
+    scratch = Path(tempfile.mkdtemp(dir=scratch_root, prefix="pack-"))
+    try:
+        tree = scratch / "tree"
+        if args.skip_build:
+            if not (build_dir / "CMakeCache.txt").is_file():
+                raise SystemExit(f"--skip-build 要求 {build_dir} 里已有配置好的构建")
+        else:
+            build_backend(build_dir, args.backend)
+        install_tree(build_dir, tree)
+        check_tree(tree)
+        plugin = stage_plugin(scratch, tree, version)
         write_zip(plugin, args.out)
+    finally:
+        shutil.rmtree(scratch, ignore_errors=True)
 
     count = sum(1 for path in zipfile.ZipFile(args.out).infolist() if not path.is_dir())
     size = args.out.stat().st_size
