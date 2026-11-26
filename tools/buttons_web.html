@@ -465,7 +465,9 @@ const DS5 = {
       updateChrome();
       await refreshPanels(true);
       updateChrome();
-      showToast('已保存。运行 ' + result.restart + ' 让新配置生效。');
+      showToast(result.restart_error
+        ? '已保存，但自动重启失败：' + result.restart_error + '；可手动运行 ' + result.restart + '。'
+        : '已保存，已通知服务重启，约两秒后生效。');
     } catch (error){
       this.busy = false;
       updateChrome();
@@ -939,9 +941,9 @@ function statusHTML(){
     ${padsHTML}
     <div class="subdiv-light">系统配置 ${esc(system.path || '')}（只读）</div>
     <pre class="yaml">${esc(systemText)}</pre>
-    <p class="info-text" style="margin:10px 0 0">改完运行
-      <code>${esc(state.restart || 'sudo systemctl restart ds5dummy')}</code> 生效；
-      主机看到的是一次约两秒的拔插。</p>
+    <p class="info-text" style="margin:10px 0 0">保存后会自动通知服务重启，约两秒后生效；
+      主机看到的是一次约两秒的拔插。服务未运行时可手动运行
+      <code>${esc(state.restart || 'sudo systemctl restart ds5dummy')}</code>。</p>
   </section>`;
 }
 

@@ -15,10 +15,15 @@
 一份配置是否有效，最终由 `buttons_check` 调用的 daemon 解析器说了算，服务不
 另写一套取值规则。
 
+保存成功后还要让运行中的程序读新配置：向 Manager 的控制 socket 发一条 `abort`
+数据报，Manager 清完站点后异常退出，systemd 再拉起它。服务本来没运行时保存仍然
+成功，只是回执里带一条自动重启失败的原因。
+
 缺省只监听 127.0.0.1（`http://127.0.0.1:8777/`），POST 校验 Host/Origin 与
 Content-Type。`--bind 0.0.0.0` 让局域网里的别的机器也能打开它，此时 Host 检查
 退化成同源判定；页面没有口令，而 `run:` 规则在服务运行的那台机器上就是执行
-shell 命令——暴露给谁就是授权给谁。它不是多用户服务，同一时间只允许一个保存。
+shell 命令——暴露给谁就是授权给谁。保存还会触发服务重启，同理。它不是多用户
+服务，同一时间只允许一个保存。
 
 用法: python3 tools/buttons_web.py [--config PATH] [--bind ADDR] [--port N]
                                  [--check PATH] [--plugins-dir DIR]... [--verbose]
@@ -32,6 +37,7 @@ import json
 import os
 import re
 import shutil
+import socket
 import subprocess
 import sys
 import tempfile
@@ -168,6 +174,26 @@ MAC_RE = re.compile(r"[0-9A-F]{2}(?::[0-9A-F]{2}){5}\Z")
 DEFAULT_PORT = 8777
 #: 绑到这些地址时接受任何 Host：主机名取决于访问方用哪个地址连进来，列不出来。
 WILDCARD_BINDS = {"0.0.0.0"}
+#: Manager 的控制 socket；保存成功后往这里发一条命令触发重启。
+CONTROL_SOCKET = "/run/ds5dummy/control.sock"
+#: 等价于 `printf 'abort\n' | socat - UNIX-SENDTO:/run/ds5dummy/control.sock`。
+CONTROL_COMMAND = b"abort\n"
+
+
+def request_restart(path: str = CONTROL_SOCKET) -> str:
+    """发一条 `abort` 数据报，让 Manager 异常退出、由 systemd 拉起并读新配置。
+
+    @return 空串表示命令已发出；否则是可直接给用户看的失败原因。配置已经写盘，
+            发不出去也不回滚——例如服务本来就没在跑。
+    """
+    sock = socket.socket(socket.AF_UNIX, socket.SOCK_DGRAM)
+    try:
+        sock.sendto(CONTROL_COMMAND, path)
+    except OSError as error:
+        return f"连接控制 socket 失败：{error.strerror or error}"
+    finally:
+        sock.close()
+    return ""
 
 
 def catalog() -> dict:
@@ -1746,6 +1772,7 @@ class App:
         script_dir: Path,
         plugin_dirs: list[Path],
         verbose: bool,
+        control_socket: str = CONTROL_SOCKET,
     ):
         self.config_path = config_path
         self.checker = checker
@@ -1753,6 +1780,7 @@ class App:
         self.script_dir = script_dir
         self.plugin_dirs = plugin_dirs
         self.verbose = verbose
+        self.control_socket = control_socket
         self.lock = threading.Lock()
         self.panels: dict[str, Panel] = {}
         self.refresh_panels()
@@ -1983,10 +2011,14 @@ class App:
                 _atomic_write(self.config_path, updated)
             except OSError as error:
                 raise UserError(f"写不进去：{error}") from error
+            # 配置已经原子替换，重启只是让它生效；发不出去也保留保存结果，
+            # 由回执告诉用户手动处理（典型情况：服务本来就没在跑）。
+            restart_error = request_restart(self.control_socket)
             return {
                 "ok": True,
                 "hash": _hash(updated),
                 "restart": "sudo systemctl restart ds5dummy",
+                "restart_error": restart_error,
             }
 
 

@@ -14,6 +14,7 @@ import ast
 import http.client
 import json
 import re
+import socket
 import sys
 import tempfile
 import threading
@@ -1165,6 +1166,8 @@ class HttpTest(unittest.TestCase):
         self.root = Path(self.directory.name)
         self.config = self.root / "config.yaml"
         self.config.write_text(SAMPLE, encoding="utf-8")
+        # 保存不能再打到真实的 /run/ds5dummy/control.sock，否则用例会重启服务。
+        self.control_socket = self.root / "control.sock"
         self.plugins = self.root / "plugins"
         self.plugins.mkdir()
         (self.plugins / "buttons.so").write_bytes(b"")
@@ -1191,6 +1194,7 @@ class HttpTest(unittest.TestCase):
             TOOLS,
             [self.plugins],
             False,
+            str(self.control_socket),
         )
 
     def stop(self):
@@ -1309,6 +1313,7 @@ class HttpTest(unittest.TestCase):
             TOOLS,
             [self.plugins],
             False,
+            str(self.control_socket),
         )
         app.save(
             [{"kind": "scalar", "path": ["enabled"], "value": "false"}], ""
@@ -1721,6 +1726,52 @@ class HttpTest(unittest.TestCase):
             self.assertEqual(
                 self.config.read_text(encoding="utf-8"), SAMPLE
             )
+
+    @unittest.skipUnless(
+        web.find_checker(None, TOOLS) is not None,
+        "需要 buttons_check：cmake --build build --target buttons_check",
+    )
+    def test_save_triggers_restart(self):
+        """保存成功后往控制 socket 发一条 abort，让 systemd 拉起新进程读配置。"""
+        listener = socket.socket(socket.AF_UNIX, socket.SOCK_DGRAM)
+        self.addCleanup(listener.close)
+        self.addCleanup(lambda: self.control_socket.unlink(missing_ok=True))
+        listener.bind(str(self.control_socket))
+        status, data = self.json_of(
+            self.request(
+                "POST",
+                self.prefix + "api/save",
+                {
+                    "hash": self.current_hash(),
+                    "edits": [
+                        {"kind": "scalar", "path": ["enabled"], "value": "false"}
+                    ],
+                },
+            )
+        )
+        self.assertEqual(status, 200, data)
+        self.assertEqual(data["restart_error"], "")
+        self.assertEqual(listener.recvfrom(64)[0], b"abort\n")
+
+
+class ControlSocketTest(unittest.TestCase):
+    """给 Manager 发重启命令的两种结局：发出去、以及服务没在跑。"""
+
+    def setUp(self):
+        self.directory = tempfile.TemporaryDirectory()
+        self.addCleanup(self.directory.cleanup)
+        self.path = Path(self.directory.name) / "control.sock"
+
+    def test_request_restart_sends_abort_datagram(self):
+        listener = socket.socket(socket.AF_UNIX, socket.SOCK_DGRAM)
+        self.addCleanup(listener.close)
+        self.addCleanup(lambda: self.path.unlink(missing_ok=True))
+        listener.bind(str(self.path))
+        self.assertEqual(web.request_restart(str(self.path)), "")
+        self.assertEqual(listener.recvfrom(64)[0], b"abort\n")
+
+    def test_request_restart_reports_missing_socket(self):
+        self.assertTrue(web.request_restart(str(self.path)))
 
 
 if __name__ == "__main__":
