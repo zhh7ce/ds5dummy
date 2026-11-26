@@ -1,8 +1,12 @@
-# 编译并发布两个包：
-#   v<版本> 标签   → 应用包（bin）发布成该版本的 release，并占据仓库的 Latest；
+# 编译并发布：
+#   v<版本> 标签   → 应用包（bin）、便携 tarball、Decky 插件 ZIP，发布成该版本的
+#                   release，并占据仓库的 Latest；驱动 DKMS 包补建 driver.v1。
 #   driver.<n> 标签 → 内核驱动包（DKMS）单独发布，永远不是 Latest。
 # 第一个应用版本会顺带建出 driver.v1（若还不存在），这样 install 说明从第一天
 # 起就是可用的；驱动更新时发 driver.v2，不动应用版本的 release。
+#
+# 三种产物共用 Arch 容器：`makepkg -s` 会按 PKGBUILD 把后端编译依赖（含 fmt
+# 头文件）装齐，Decky 的 pack.py 直接复用这套环境，只额外装前端的 node/npm。
 #
 # 应用包必须在容器里编：便携构建的 ABI 下限取决于构建环境。发布前用 readelf
 # 断言它不越过 SteamOS 的 glibc 2.41 / GLIBCXX 3.4.34——在本机 Arch 上编得
@@ -24,6 +28,8 @@ env:
   # 固定资产名：下载 URL 稳定，安装命令里不用出现 pkgver（0.1.0.r0.gabc1234）。
   BIN_ASSET: ds5dummy-bin.pkg.tar.zst
   DRIVER_ASSET: hid-playstation-ds5dummy-dkms.pkg.tar.zst
+  TARBALL_ASSET: ds5dummy-linux-x86_64.tar.gz
+  DECKY_ASSET: ds5dummy-decky.zip
 
 jobs:
   build-bin:
@@ -97,6 +103,34 @@ jobs:
             check_le "$(basename "$lib") GLIBC" "$(max_of "$lib" GLIBC)" 2.41
             check_le "$(basename "$lib") GLIBCXX" "$(max_of "$lib" GLIBCXX)" 3.4.34
           done
+      # makepkg 的 build() 已经跑过 `cmake --build --target dist`，tarball 留在
+      # $srcdir/build-bin/dist/。package() 解它铺 Arch 目录，但文件不会删。
+      - name: Collect the portable tarball
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          tarballs=(pkg/ds5dummy-bin/src/build-bin/dist/ds5dummy-*-linux-x86_64.tar.gz)
+          if [ ${#tarballs[@]} -ne 1 ]; then
+            echo "::error::expected exactly one dist tarball, found ${#tarballs[@]}: ${tarballs[*]}"
+            exit 1
+          fi
+          echo "tarball: ${tarballs[0]}"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: tarball
+          path: pkg/ds5dummy-bin/src/build-bin/dist/ds5dummy-*-linux-x86_64.tar.gz
+      # Decky 插件 ZIP：后端源码编译和 pack.py 都复用上面这套 Arch 环境，
+      # makepkg -s 已装齐 fmt / yaml-cpp / pipewire 等后端开发包，这里只补前端工具链。
+      - name: Build the Decky plugin ZIP
+        run: |
+          set -euo pipefail
+          pacman -Syu --noconfirm --needed nodejs npm python
+          mkdir -p build/decky
+          python3 decky/pack.py --version "$GITHUB_REF_NAME" --out "build/decky/$DECKY_ASSET"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: decky-zip
+          path: build/decky/ds5dummy-decky.zip
       - uses: actions/upload-artifact@v4
         with:
           name: bin-package
@@ -143,18 +177,36 @@ jobs:
         with:
           name: driver-package
           path: assets/driver
+      - uses: actions/download-artifact@v4
+        with:
+          name: tarball
+          path: assets/tarball
+      - uses: actions/download-artifact@v4
+        with:
+          name: decky-zip
+          path: assets/decky
       - name: Use stable asset names
         run: |
           set -euo pipefail
           shopt -s nullglob
           app=(assets/app/*.pkg.tar.zst)
           drv=(assets/driver/*.pkg.tar.zst)
-          if [ ${#app[@]} -ne 1 ] || [ ${#drv[@]} -ne 1 ]; then
-            echo "::error::expected exactly one package per artifact"
+          tarball=(assets/tarball/ds5dummy-*-linux-x86_64.tar.gz)
+          decky=(assets/decky/*.zip)
+          if [ ${#app[@]} -ne 1 ] || [ ${#drv[@]} -ne 1 ] || \
+             [ ${#tarball[@]} -ne 1 ] || [ ${#decky[@]} -ne 1 ]; then
+            echo "::error::expected exactly one file per artifact"
             exit 1
           fi
           mv "${app[0]}" "assets/app/$BIN_ASSET"
           mv "${drv[0]}" "assets/driver/$DRIVER_ASSET"
+          mv "${tarball[0]}" "assets/tarball/$TARBALL_ASSET"
+          # decky ZIP 以固定名产出，下载后已是目标名；同名就别再 mv。
+          if [ "${decky[0]}" -ef "assets/decky/$DECKY_ASSET" ]; then
+            echo "decky ZIP already named $DECKY_ASSET"
+          else
+            mv "${decky[0]}" "assets/decky/$DECKY_ASSET"
+          fi
       - name: Publish the app release
         env:
           GH_TOKEN: ${{ github.token }}
@@ -168,7 +220,9 @@ jobs:
             notes_args=(--generate-notes)
           fi
           gh release create "$tag" --title "$tag" "${notes_args[@]}" \
-            "assets/app/$BIN_ASSET"
+            "assets/app/$BIN_ASSET" \
+            "assets/tarball/$TARBALL_ASSET" \
+            "assets/decky/$DECKY_ASSET"
       - name: Create the driver singleton on the first release
         env:
           GH_TOKEN: ${{ github.token }}

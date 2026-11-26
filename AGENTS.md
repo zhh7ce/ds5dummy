@@ -60,7 +60,7 @@ Entertainment / DualSense Wireless Controller"，DualSense Edge 是 `054c:0df2`
 | `pkg/ds5dummy-bin` | 预编译包：打包时用便携参数编出 dist 二进制，按 Arch 目录铺开（`/usr/lib/ds5dummy/{bin,lib,plugins}` + `/usr/bin` 符号链接 + 单元/模块配置/`/etc` 配置），供装不了工具链的机器装（SteamOS） |
 | `pkg/hid-playstation-ds5dummy/` | 内核 `hid-playstation` 的 DKMS 补丁（hidraw 后端用），只接管蓝牙 DualSense/Edge，合成 VID/PID（`1998:1221`/`1998:1103`）；DualShock 4 与所有 USB 设备走原驱动路径。PKGBUILD 只依赖 `dkms`，头文件由用户按内核自装 |
 | `scripts/` | `setup.sh`/`teardown.sh`（整站准备/清理；teardown 先停掉并禁用 `ds5dummy.service`，再扫 `ds5dummy*` 整族并卸载每个 `ffs-ds5*` 挂载）、`setup-dummy-hcd.sh`/`teardown-dummy-hcd.sh`（只喂 `tools/mini_gadget` 的最小版）、`install.sh`（可重定位分发 `dist` 的安装脚本：默认就地装、`--prefix` 时才把树拷到该目录，只把单元与模块清单落到 `/etc`，系统配置留在树的 `etc/`）、`verify.sh`（双后端 + ASan 的发布前验证）；发布侧的 `steamos_repo.py`、`steamos_toolchain.py`、`kernel_source.py`、`kmod_plan.py` 与它们的 `tests/` 见 §17 |
-| `.github/workflows/` | `release.yml`（推 tag 建 Arch 包并发布：`v*` 发应用包、`driver.*` 发驱动包）、`kmod.yml`（按内核编模块，每个频道一个固定 Release，见 §17） |
+| `.github/workflows/` | `release.yml`（推 tag 发布：`v*` 发 Arch 应用包、便携 tarball 与 Decky 插件 ZIP，`driver.*` 发驱动 DKMS 包）、`kmod.yml`（按内核编模块，每个频道一个固定 Release，见 §17） |
 | `docs/releases/kmod/` | 频道 Release 的说明模板（§17） |
 | `third_party/` | loguru（vendored，不改注释不格式化） |
 
