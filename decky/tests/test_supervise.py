@@ -137,6 +137,25 @@ class DaemonTest(unittest.IsolatedAsyncioTestCase):
         again = self.daemon.status()
         self.assertFalse(again.running)
 
+    async def test_reap_kills_strays_but_keeps_ours(self) -> None:
+        """历次启停留下的同类进程要清掉，正在用的那个不能动。"""
+        pid = self.daemon.start()
+        self.fake.links[f"/proc/{pid}/exe"] = self.layout.daemon_bin
+
+        stray = 9101
+        self.fake.processes[stray] = None
+        self.fake.links[f"/proc/{stray}/exe"] = self.layout.daemon_bin
+
+        else_where = 9102
+        self.fake.processes[else_where] = None
+        self.fake.links[f"/proc/{else_where}/exe"] = "/usr/lib/ds5dummy/bin/ds5dummyd"
+
+        await self.daemon.reap_strays()
+
+        self.assertTrue(self.fake.alive(pid))
+        self.assertFalse(self.fake.alive(stray))
+        self.assertTrue(self.fake.alive(else_where))
+
 
 if __name__ == "__main__":
     unittest.main()

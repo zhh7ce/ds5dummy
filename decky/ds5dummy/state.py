@@ -396,7 +396,7 @@ class Controller:
         self._set_state(STATE_TAKING_OVER, "", "", "启动程序")
         try:
             await self._checkpoint()
-            started = self._start_daemon()
+            started = await self._start_daemon()
         except resolve_module.Aborted:
             await self._abort_enable(agent)
             raise
@@ -491,7 +491,7 @@ class Controller:
             return
         self._set_state(STATE_TAKING_OVER, "", "", "启动程序")
         try:
-            started = self._start_daemon()
+            started = await self._start_daemon()
         except OSError as error:
             self._fail(takeover.TakeoverFailed("daemon_start", str(error)))
             return
@@ -743,7 +743,7 @@ class Controller:
             progress=progress,
         )
 
-    def _start_daemon(self) -> int | None:
+    async def _start_daemon(self) -> int | None:
         """启动程序；已有同名进程在跑就认领它而不是再起一个。
 
         Returns:
@@ -754,6 +754,9 @@ class Controller:
         """
         if self._daemon.pid is None:
             self._daemon.adopt()
+        # 先清掉历次启停留下的同类进程（保留刚认领的那个）：它们各自建 gadget、
+        # 抢同一批 UDC，不清掉的话新进程会一直撞 udc_busy。
+        await self._daemon.reap_strays()
         if self._daemon.status().running:
             self._log.info("转发程序已在运行，接管现有进程")
             return None

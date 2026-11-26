@@ -50,6 +50,10 @@ SYSTEM_UNIT = "ds5dummy.service"
 DUMMY_HCD_DIR = "/sys/module/dummy_hcd"
 DUMMY_HCD_NUM = "/sys/module/dummy_hcd/parameters/num"
 UDC_CLASS = "/sys/class/udc"
+# configfs 的 usb_gadget/ 顶层目录由 libcomposite 注册。SteamOS 内核把它编成模块
+# （CONFIG_USB_LIBCOMPOSITE=m），没加载时 daemon 建 gadget 会在 mkdir 上拿到 EPERM，
+# 每 2 秒重试一次却永远建不成站，表现为「手柄连上了但虚拟手柄出不来」。
+GADGET_MODULE = "libcomposite"
 HID_DEVICES = "/sys/bus/hid/devices"
 HID_DRIVER = "/sys/bus/hid/drivers/hid-playstation"
 
@@ -59,7 +63,11 @@ INSMOD_TIMEOUT_S = 60.0
 COMMAND_TIMEOUT_S = 15.0
 
 # `modprobe hid_playstation` 之后等驱动重新出现在 sysfs；正常是几十毫秒。
-IN_TREE_SETTLE_S = 5.0
+# 恢复 in-tree 驱动后，最多等这么久看 `/sys/bus/hid/drivers/hid-playstation` 出现。
+# 这个目录在部分内核上永远不会出现（驱动注册的名字不同、或模块根本没探测到设备），
+# 所以它只是"给绑定留一点时间"的观察窗口，不能当成必须满足的条件——否则每次停用
+# 都会白等满一整段，覆盖安装时的卸载因此要多花好几秒。
+IN_TREE_SETTLE_S = 1.0
 
 
 class TakeoverFailed(Exception):
@@ -126,6 +134,7 @@ class Takeover:
         self._unloaded_in_tree = False
         try:
             self._precheck()
+            self._ensure_gadget_module()
             self._ensure_dummy_hcd()
             self._unbind_in_tree()
             self._write_blacklist()
@@ -200,6 +209,7 @@ class Takeover:
         Raises:
             TakeoverFailed: `udc_busy`（有站时不能重载）或 `dummy_hcd`（加载失败）。
         """
+        self._ensure_gadget_module()
         self._ensure_dummy_hcd()
 
     def _precheck(self) -> None:
@@ -219,6 +229,34 @@ class Takeover:
             raise TakeoverFailed(
                 "dkms_package",
                 f"检测到 {DKMS_CONF_PATH}（DKMS 内核驱动包），两者不能同时接管",
+            )
+
+    def _ensure_gadget_module(self) -> None:
+        """保证 `libcomposite` 已加载，configfs 的 `usb_gadget/` 才会出现。
+
+        SteamOS 把它编成模块（CONFIG_USB_LIBCOMPOSITE=m），开机不自动加载。缺它时
+        daemon 建 gadget 的第一步 mkdir 就撞 EPERM，每 2 秒重试一次却永远建不成站。
+        加载一次即可，卸载/回滚都不碰它——它是无害的公共前置，和 dummy_hcd 一样。
+
+        Raises:
+            TakeoverFailed: `gadget_module`（modprobe 失败或目录没出现）。
+        """
+        if supervise.module_loaded(self._system, GADGET_MODULE):
+            return
+        self._log.info(f"加载 gadget 前置模块 {GADGET_MODULE}")
+        result = self._system.run(
+            ["modprobe", GADGET_MODULE], timeout=COMMAND_TIMEOUT_S
+        )
+        if result.code != 0:
+            raise TakeoverFailed(
+                "gadget_module",
+                f"modprobe {GADGET_MODULE} 失败（退出码 {result.code}）："
+                f"{result.stderr.strip()}",
+            )
+        if not self._system.exists("/sys/kernel/config/usb_gadget"):
+            raise TakeoverFailed(
+                "gadget_module",
+                f"modprobe {GADGET_MODULE} 成功，但 /sys/kernel/config/usb_gadget 没有出现",
             )
 
     def _ensure_dummy_hcd(self) -> None:
@@ -357,8 +395,12 @@ class Takeover:
             self._log.info(f"{CUSTOM_MODULE} 已在内核里，跳过 insmod")
             return
 
-        # `hid` 是定制模块的依赖，正常早已加载；失败不拦，让 insmod 报真正的错。
-        self._system.run(["modprobe", "hid"], timeout=COMMAND_TIMEOUT_S)
+        # 定制模块的真实依赖（modinfo depends: ff-memless,led-class-multicolor）。
+        # insmod 不像 modprobe 会自动拉依赖：in-tree hid_playstation 尚未加载过时，
+        # 这两个模块不在内核里，insmod 就会报 "Unknown symbol in module"。
+        # 失败不拦，让紧随其后的 insmod 报真正的错。
+        for dependency in ("hid", "ff-memless", "led-class-multicolor"):
+            self._system.run(["modprobe", dependency], timeout=COMMAND_TIMEOUT_S)
         self._log.info(f"insmod {module_path}")
         result = self._system.run(["insmod", module_path], timeout=INSMOD_TIMEOUT_S)
         if result.code != 0:

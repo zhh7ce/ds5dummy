@@ -254,6 +254,34 @@ class Daemon:
             return
         raise StopFailed(f"pid {pid} 在 SIGKILL 之后仍未退出")
 
+    async def reap_strays(self) -> None:
+        """清掉指向本插件二进制的其它进程（历次启停留下的）。
+
+        插件重载、覆盖安装、后端崩溃都可能在 pid 文件之外留下仍在跑的转发程序：
+        它们各自建自己的 gadget、抢同一批 hidraw 与 UDC，表现为"新进程起不来 /
+        手柄行为古怪"。这里按 `/proc/<pid>/exe` **精确匹配本插件的二进制**，只清
+        自己的残留，不会误伤系统包那份（路径不同，`/usr/lib/ds5dummy/bin/...`）。
+
+        先 SIGTERM，宽限 `STOP_GRACE_S` 后再 SIGKILL；清不掉只记日志，不阻断启动。
+        """
+        mine = self.pid
+        for pid in self._system.pids_with_exe(self._layout.daemon_bin):
+            if pid == mine:
+                continue
+            self._log.warn(f"清理残留的转发程序 pid={pid}")
+            self._system.kill(pid, signal.SIGTERM)
+            deadline = self._system.now() + STOP_GRACE_S
+            while self._system.now() < deadline and self._system.alive(pid):
+                await self._sleep(POLL_S)
+            if not self._system.alive(pid):
+                continue
+            self._system.kill(pid, signal.SIGKILL)
+            deadline = self._system.now() + KILL_GRACE_S
+            while self._system.now() < deadline and self._system.alive(pid):
+                await self._sleep(POLL_S)
+            if self._system.alive(pid):
+                self._log.warn(f"pid={pid} 在 SIGKILL 之后仍在，先继续启动")
+
     def forget(self) -> None:
         """丢掉 pid 记录（进程已死或确认不是我们的）。不碰进程本身。"""
         self.pid = None

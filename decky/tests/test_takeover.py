@@ -55,9 +55,12 @@ class TakeoverTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(
             self.verbose(),
             [
+                ("modprobe", takeover.GADGET_MODULE),
                 ("modprobe", "dummy_hcd", "is_high_speed=0", "num=3"),
                 ("rmmod", takeover.IN_TREE_MODULE),
                 ("modprobe", "hid"),
+                ("modprobe", "ff-memless"),
+                ("modprobe", "led-class-multicolor"),
                 ("insmod", self.module_path),
             ],
         )
@@ -66,6 +69,38 @@ class TakeoverTest(unittest.IsolatedAsyncioTestCase):
         )
         self.assertIn("blacklist hid_playstation", self.fake.files[takeover.BLACKLIST_PATH])
         self.assertIn(takeover.CUSTOM_MODULE, self.fake.modules)
+
+    async def test_gadget_module_loaded_before_dummy_hcd(self) -> None:
+        """libcomposite 必须早于建站，缺它时 usb_gadget/ 目录根本不存在。"""
+        await self.agent.run(self.module_path)
+
+        commands = self.verbose()
+        self.assertLess(
+            commands.index(("modprobe", takeover.GADGET_MODULE)),
+            commands.index(("modprobe", "dummy_hcd", "is_high_speed=0", "num=3")),
+        )
+        self.assertIn(takeover.GADGET_MODULE, self.fake.modules)
+
+    async def test_gadget_module_already_loaded_is_skipped(self) -> None:
+        """已加载时不再 modprobe，但 insmod 依赖仍照常补。"""
+        self.fake.modules.add(takeover.GADGET_MODULE)
+        self.fake.directories.add("/sys/kernel/config/usb_gadget")
+
+        await self.agent.run(self.module_path)
+
+        self.assertNotIn(("modprobe", takeover.GADGET_MODULE), self.verbose())
+        self.assertIn(("modprobe", "ff-memless"), self.verbose())
+        self.assertIn(("modprobe", "led-class-multicolor"), self.verbose())
+
+    async def test_gadget_module_failure_blocks_takeover(self) -> None:
+        """modprobe 失败时接管停在 gadget_module，不往下碰 dummy_hcd。"""
+        self.fake.fail["modprobe"] = 1
+
+        with self.assertRaises(takeover.TakeoverFailed) as caught:
+            await self.agent.run(self.module_path)
+
+        self.assertEqual(caught.exception.reason, "gadget_module")
+        self.assertNotIn(("insmod", self.module_path), self.verbose())
 
     async def test_dummy_hcd_reload_when_num_differs(self) -> None:
         self.fake.modules.add("dummy_hcd")

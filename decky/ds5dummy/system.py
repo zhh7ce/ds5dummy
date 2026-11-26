@@ -278,6 +278,20 @@ class System:
         """
         raise NotImplementedError
 
+    def pids_with_exe(self, path: str) -> list[int]:
+        """扫 `/proc`，找出可执行文件指向 `path` 的进程。
+
+        用来清"历次启停留下的自己"：按 exe 路径精确匹配，不会误伤别人装的同一份
+        程序（路径不同），也不需要 root 之外的信息。
+
+        Args:
+            path: 期望的可执行文件路径（按 realpath 比较，符号链接也算同一条）。
+
+        Returns:
+            匹配的 pid 列表；读不到的进程跳过。
+        """
+        raise NotImplementedError
+
     def download(
         self,
         url: str,
@@ -437,6 +451,26 @@ class RealSystem(System):
         except PermissionError:
             return False
         return True
+
+    def pids_with_exe(self, path: str) -> list[int]:
+        """扫 `/proc`，按 exe 的真实路径匹配。"""
+        target = os.path.realpath(path)
+        found: list[int] = []
+        try:
+            entries = os.listdir("/proc")
+        except OSError:
+            return found
+        for entry in entries:
+            if not entry.isdigit():
+                continue
+            try:
+                exe = os.readlink(f"/proc/{entry}/exe")
+            except OSError:
+                # 进程刚好退出，或不是本用户的进程（没有 CAP_SYS_PTRACE）。
+                continue
+            if os.path.realpath(exe) == target:
+                found.append(int(entry))
+        return found
 
     def download(
         self,

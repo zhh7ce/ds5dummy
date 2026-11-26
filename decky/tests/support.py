@@ -144,6 +144,8 @@ class FakeSystem(System):
                 )
                 self.files[takeover.DUMMY_HCD_NUM] = num + "\n"
                 self.files["/sys/module/dummy_hcd/parameters/is_high_speed"] = "N\n"
+            elif name == takeover.GADGET_MODULE:
+                self.directories.add("/sys/kernel/config/usb_gadget")
             elif name == takeover.IN_TREE_MODULE:
                 self.directories.add(takeover.HID_DRIVER)
         elif args[0] == "rmmod" and len(args) >= 2:
@@ -309,6 +311,15 @@ class FakeSystem(System):
             return True
         self.processes[pid] = -int(sig)
         return True
+
+    def pids_with_exe(self, path: str) -> list[int]:
+        """按 `links` 表里登记的 `/proc/<pid>/exe` 找进程。"""
+        target = os.path.realpath(path)
+        return [
+            pid
+            for pid in self.processes
+            if os.path.realpath(self.links.get(f"/proc/{pid}/exe", "")) == target
+        ]
 
     # -- 网络与时钟
 

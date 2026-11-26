@@ -21,8 +21,7 @@ Content-Type。`--bind 0.0.0.0` 让局域网里的别的机器也能打开它，
 shell 命令——暴露给谁就是授权给谁。它不是多用户服务，同一时间只允许一个保存。
 
 用法: python3 tools/buttons_web.py [--config PATH] [--bind ADDR] [--port N]
-                                 [--no-open] [--check PATH] [--plugins-dir DIR]...
-                                 [--verbose]
+                                 [--check PATH] [--plugins-dir DIR]... [--verbose]
 """
 
 from __future__ import annotations
@@ -37,7 +36,6 @@ import subprocess
 import sys
 import tempfile
 import threading
-import webbrowser
 from dataclasses import dataclass, field
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -2208,7 +2206,6 @@ def main(argv: list[str] | None = None) -> int:
         default=DEFAULT_PORT,
         help=f"监听端口（缺省 {DEFAULT_PORT}：页面就是这个固定地址）",
     )
-    parser.add_argument("--no-open", action="store_true", help="不自动打开浏览器")
     parser.add_argument("--check", default=None, help="buttons_check 的路径")
     parser.add_argument(
         "--plugins-dir",
@@ -2264,8 +2261,8 @@ def main(argv: list[str] | None = None) -> int:
             "而 run: 规则就是执行命令——页面没有口令。"
         )
     print("按 Ctrl-C 结束。", flush=True)
-    if not args.no_open:
-        threading.Thread(target=webbrowser.open, args=(url,), daemon=True).start()
+    # 不自动开浏览器：在 Steam Deck 上拉起浏览器会连带把 Steam 客户端切走/重启，
+    # 而本工具也可能跑在没有图形会话的 root 上下文里。地址已经打在下面，用户自己开。
     try:
         server.serve_forever()
     except KeyboardInterrupt:
