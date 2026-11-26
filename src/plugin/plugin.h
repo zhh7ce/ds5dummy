@@ -82,7 +82,8 @@ using Settings = std::map<std::string, std::string>;
 /// 扁平配置键里各段名字之间的分隔符（插件名与第一段、第一段与第二段……）。
 inline constexpr char kKeySeparator = '.';
 
-/// 系统插件目录：随包插件装在这里，与两个 PKGBUILD 的安装位置一致。
+/// 系统插件目录（**只用于 fhs 布局**）：随包插件装在这里，与两个 PKGBUILD 的
+/// 安装位置一致。tree 布局不扫它，随包插件一律在 `<树>/plugins`。
 inline constexpr const char* kSystemPluginDir = "/usr/lib/ds5dummy/plugins";
 
 /// 用户插件目录，相对家目录；同名插件在这里的一份覆盖系统目录里的那份。
@@ -147,15 +148,20 @@ std::span<const StateInHook> Start(const Settings& settings, const ds5Host& host
 
 /**
  * @brief 默认插件目录，按优先级从低到高。
- * @return 依次是 kSystemPluginDir、可执行文件所在前缀的 `plugins/`（推不出前缀
- *         时缺席）、$HOME 可用时的 $HOME/.config/ds5dummy/plugins。
- * @details 中间那一层是便携分发用的：整棵树装在 `~/DS5Dummy` 这类前缀下时，
- *          随包插件在 `<prefix>/plugins`，环境变量里没有它的位置，只能按
- *          `/proc/self/exe` 现推；装到 `/usr` 时推出来的 `/usr/plugins` 不存在，
- *          扫描它对不存在的目录返回空表。
+ * @return 由 `DS5DUMMY_LAYOUT` 决定：
+ *         - fhs（默认，系统包）：kSystemPluginDir、可执行文件所在前缀的
+ *           `plugins/`、$HOME/.config/ds5dummy/plugins；
+ *         - tree（tarball / Decky 插件）：可执行文件所在前缀的 `plugins/`、
+ *           $HOME/.config/ds5dummy/plugins。
+ *         推不出前缀或没有 $HOME 时对应的那一层缺席。
+ * @details tree 布局下随包插件只可能在树里：`<树>/plugins`。前缀按
+ *          `/proc/self/exe` 现推，所以树搬到 `~/DS5Dummy`、`/opt/ds5dummy` 或
+ *          Decky 插件的 `<plugin>/bin/ds5dummy/` 都成立。
+ * @details fhs 布局额外扫 kSystemPluginDir；装到 `/usr` 时推出来的 `/usr/plugins`
+ *          不存在，扫描它对不存在的目录返回空表，代价为零。
  * @details HOME 由 worker 在降权之后修成目标用户的家目录（见
  *          daemon/worker.cpp 的 RestoreHome），所以这里拿到的就是用户的插件目录。
- *          同名插件以后出现的目录为准：用户目录覆盖随包的那两份。
+ *          同名插件以后出现的目录为准：用户目录覆盖随包的那一份。
  * @note 重复的路径只留第一次出现的那一条：Arch 包把整棵树装在
  *       `/usr/lib/ds5dummy` 时，前缀层与 kSystemPluginDir 就是同一个目录。
  */

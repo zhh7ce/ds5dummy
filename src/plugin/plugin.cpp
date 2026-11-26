@@ -91,7 +91,13 @@ std::string ExecutablePrefix() {
 }  // namespace
 
 std::vector<std::string> Directories() {
-  std::vector<std::string> dirs{kSystemPluginDir};
+  std::vector<std::string> dirs;
+#ifndef DS5DUMMY_LAYOUT_TREE
+  // fhs 布局（系统包）：系统目录优先，之后才是程序推出来的前缀层。
+  dirs.emplace_back(kSystemPluginDir);
+#endif
+  // tree 布局只有这一层：<树>/plugins。整棵便携树（tarball 或 Decky 插件里的
+  // bin/ds5dummy/）搬到哪，随包插件就在它旁边。
   const std::string prefix = ExecutablePrefix();
   if (!prefix.empty()) dirs.push_back(prefix + "/plugins");
   const char* home = std::getenv("HOME");

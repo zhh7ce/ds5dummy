@@ -26,9 +26,11 @@
 
 #include <sys/types.h>
 
+#include <filesystem>
 #include <map>
 #include <optional>
 #include <string>
+#include <system_error>
 #include <vector>
 
 #include "core/device/identity.h"
@@ -36,12 +38,39 @@
 
 namespace ds5::daemon {
 
-/// 系统配置的固定路径：只由 root 写，决定 ffs 路径、日志与身份策略。
+/// 系统配置在 fhs 布局下的固定路径：只由 root 写，决定 ffs 路径、日志与身份策略。
 inline constexpr const char* kSystemConfigPath = "/etc/ds5dummy/config.yaml";
 /// 用户配置相对家目录的子目录（固定两级，LoadUserConfig 逐级 openat）。
 inline constexpr const char* kUserConfigDir = ".config/ds5dummy";
 /// 用户配置的文件名，与 kUserConfigDir 拼成 <home>/.config/ds5dummy/config.yaml。
 inline constexpr const char* kUserConfigFileName = "config.yaml";
+
+/**
+ * @brief 本次构建读哪一个系统配置，按 `DS5DUMMY_LAYOUT` 在编译期定死。
+ * @return fhs 构建返回 `kSystemConfigPath`；tree 构建返回
+ *         `<树>/etc/config.yaml`，其中树根由可执行文件位置推出
+ *         （`<树>/bin/ds5dummyd` 的上两级）。
+ * @details tree 布局面向可重定位分发：整棵树（tarball 或 Decky 插件里的
+ *          `bin/ds5dummy/`）搬到哪个绝对路径都在那儿读自己的配置，不看 `/etc`。
+ *          两种布局之间**没有运行期回落**，谁在位由构建参数决定。
+ * @details 头内联：`--help` 的用法文本（options.cpp）与 Manager 的读取点必须给出
+ *          同一个答案，而 options.cpp 会被链进不包含 config.cpp 的诊断工具。
+ * @note 只有 `/proc/self/exe` 读不出来的异常环境才退回 `kSystemConfigPath`：那种
+ *       环境下 Manager 随后也会因为推不出自身路径而退出，这里不制造第二个错误点。
+ */
+inline std::string SystemConfigPath() {
+#ifdef DS5DUMMY_LAYOUT_TREE
+  // 树根 = <树>/bin/ds5dummyd 的上两级。符号链接在 /proc/self/exe 里已经解开，
+  // 所以 /usr/bin 那种入口链接也落到真实位置。
+  std::error_code ec;
+  const std::filesystem::path exe =
+      std::filesystem::read_symlink("/proc/self/exe", ec);
+  if (ec || exe.empty()) return kSystemConfigPath;
+  return (exe.parent_path().parent_path() / "etc" / "config.yaml").string();
+#else
+  return kSystemConfigPath;
+#endif
+}
 
 /**
  * @brief 降权身份的来源策略，对应系统配置里的 identity.mode。

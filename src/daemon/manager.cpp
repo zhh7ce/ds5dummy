@@ -564,16 +564,18 @@ int RunManager(const Options& options) {
   }
 
   // 系统配置：文件缺失走内置默认（不是错误），存在但读不动/解析失败必须停下。
+  // 路径按 DS5DUMMY_LAYOUT 定：fhs 是 /etc，tree 是 <树>/etc（见 config.h）。
+  const std::string system_config = SystemConfigPath();
   SystemConfig sys;
   std::string why;
-  const LoadResult sys_result = LoadSystemConfig(kSystemConfigPath, sys, why);
+  const LoadResult sys_result = LoadSystemConfig(system_config, sys, why);
   if (sys_result == LoadResult::kError) {
     DS5DUMMY_LOG(ERROR, "[manager] {}", why.c_str());
     return 1;
   }
   if (sys_result == LoadResult::kAbsent) {
     DS5DUMMY_LOG(INFO, "[manager] {} is absent; using built-in defaults",
-          kSystemConfigPath);
+          system_config.c_str());
   }
 
   // 目标身份只来自 logind 的活跃图形会话；两种失败语义对应两种退出码。
@@ -633,7 +635,7 @@ int RunManager(const Options& options) {
   // gadget 前置条件：ffs 路径来自 /etc 也仍要过白名单；至少要有空闲 UDC。
   if (!usb::IsSafeGadgetPath(sys.ffs_path)) {
     DS5DUMMY_LOG(ERROR, "[manager] Rejected ffs_path from {}: {}",
-          kSystemConfigPath, sys.ffs_path.c_str());
+          system_config.c_str(), sys.ffs_path.c_str());
     return 1;
   }
   if (!usb::HasDummyUdc()) {
@@ -661,7 +663,7 @@ int RunManager(const Options& options) {
   printf("Worker will run as uid=%u gid=%u\n",
          static_cast<unsigned>(identity.uid),
          static_cast<unsigned>(identity.gid));
-  printf("System config: %s\n", kSystemConfigPath);
+  printf("System config: %s\n", system_config.c_str());
   // 缺文件时把这个事实写进路径那一行：横幅里的路径此时并不存在，读 journal 的
   // 人需要知道当前生效的是内置默认值，而不是去找一个还没写的文件里找原因。
   const std::string user_config_shown =

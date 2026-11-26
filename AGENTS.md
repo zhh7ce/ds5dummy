@@ -59,7 +59,7 @@ Entertainment / DualSense Wireless Controller"，DualSense Edge 是 `054c:0df2`
 | `pkg/ds5dummy-hidraw`、`pkg/ds5dummy-l2cap` | 两个互斥的 Arch 包：systemd 单元、`/etc/ds5dummy/config.yaml`、`/usr/share/doc/ds5dummy/user-config.example.yaml`、modprobe/modules-load 配置、install 钩子，以及随包插件与它们的配置面板 |
 | `pkg/ds5dummy-bin` | 预编译包：打包时用便携参数编出 dist 二进制，按 Arch 目录铺开（`/usr/lib/ds5dummy/{bin,lib,plugins}` + `/usr/bin` 符号链接 + 单元/模块配置/`/etc` 配置），供装不了工具链的机器装（SteamOS） |
 | `pkg/hid-playstation-ds5dummy/` | 内核 `hid-playstation` 的 DKMS 补丁（hidraw 后端用），只接管蓝牙 DualSense/Edge，合成 VID/PID（`1998:1221`/`1998:1103`）；DualShock 4 与所有 USB 设备走原驱动路径。PKGBUILD 只依赖 `dkms`，头文件由用户按内核自装 |
-| `scripts/` | `setup.sh`/`teardown.sh`（整站准备/清理；teardown 先停掉并禁用 `ds5dummy.service`，再扫 `ds5dummy*` 整族并卸载每个 `ffs-ds5*` 挂载）、`setup-dummy-hcd.sh`/`teardown-dummy-hcd.sh`（只喂 `tools/mini_gadget` 的最小版）、`install.sh`（可重定位分发 `dist` 的安装脚本：整棵树复制到家目录前缀、单元指向该前缀）、`verify.sh`（双后端 + ASan 的发布前验证）；发布侧的 `steamos_repo.py`、`steamos_toolchain.py`、`kernel_source.py`、`kmod_plan.py` 与它们的 `tests/` 见 §17 |
+| `scripts/` | `setup.sh`/`teardown.sh`（整站准备/清理；teardown 先停掉并禁用 `ds5dummy.service`，再扫 `ds5dummy*` 整族并卸载每个 `ffs-ds5*` 挂载）、`setup-dummy-hcd.sh`/`teardown-dummy-hcd.sh`（只喂 `tools/mini_gadget` 的最小版）、`install.sh`（可重定位分发 `dist` 的安装脚本：默认就地装、`--prefix` 时才把树拷到该目录，只把单元与模块清单落到 `/etc`，系统配置留在树的 `etc/`）、`verify.sh`（双后端 + ASan 的发布前验证）；发布侧的 `steamos_repo.py`、`steamos_toolchain.py`、`kernel_source.py`、`kmod_plan.py` 与它们的 `tests/` 见 §17 |
 | `.github/workflows/` | `release.yml`（推 tag 建 Arch 包并发布：`v*` 发应用包、`driver.*` 发驱动包）、`kmod.yml`（按内核编模块，每个频道一个固定 Release，见 §17） |
 | `docs/releases/kmod/` | 频道 Release 的说明模板（§17） |
 | `third_party/` | loguru（vendored，不改注释不格式化） |
@@ -77,7 +77,8 @@ Entertainment / DualSense Wireless Controller"，DualSense Edge 是 `054c:0df2`
 bind 后从 UDC 反查主机侧 USB 接口目录 —— 全在 `usb::Provision()` 里，失败自带回滚。
 
 启动前置校验（`RunManager`）按固定顺序：`geteuid()==0` → 读系统配置
-（`kSystemConfigPath`；缺失走内置默认，解析失败返回 1）→ 枚举活跃图形会话并选身份 →
+（`SystemConfigPath()`：`fhs` 构建是 `/etc/ds5dummy/config.yaml`，`tree` 构建是
+`<树>/etc/config.yaml`；缺失走内置默认，解析失败返回 1）→ 枚举活跃图形会话并选身份 →
 查家目录、读用户配置（文件缺失等于"用内置默认继续启动"：`LoadUserConfig` 在
 `kAbsent` 时不动出参，默认构造的 `UserConfig` 就是模板的取值 —— `enabled: true`、
 `bt_addr: auto`、每只手柄的设置全默认，横幅把那行标成
@@ -702,6 +703,7 @@ ASan+UBSan；构建树在 `build/verify-{hidraw,l2cap,asan}`，无需 root、手
 | `BT_BACKEND` | `HIDRAW` | `HIDRAW` 或 `L2CAP`，链接期二选一；L2CAP 额外 `pkg_check_modules(BLUEZ REQUIRED bluez)` |
 | `DS5DUMMY_STRICT` | `ON` | 追加 `-Wpedantic -Wsign-conversion -Wold-style-cast` |
 | `DS5DUMMY_PORTABLE` | `OFF` | 分发用：`FMT_HEADER_ONLY`、`-static-libstdc++`、`INSTALL_RPATH=$ORIGIN/../lib`，并把 yaml-cpp 按 SONAME 随包（`dist` 目标的构建参数） |
+| `DS5DUMMY_LAYOUT` | `fhs` | 路径布局，二选一：`fhs` 用 `/etc/ds5dummy/config.yaml` 与 `/usr/lib/ds5dummy/plugins`（系统包）；`tree` 按可执行文件位置推 `<树>/etc` 与 `<树>/plugins`（tarball、Decky 插件）。没有运行期回落 |
 | `DS5DUMMY_DEBUG` | Debug 为 `ON` | 编译诊断代码：计数器、写耗时、5 s 统计窗口；关闭时相关符号不存在 |
 | `DS5DUMMY_DEBUG_LOG` | Debug 为 `ON` | 编译 `DS5DUMMY_DLOG(...)` 调试日志语句；关闭时参数不被求值。生产日志走始终编译的 `DS5DUMMY_LOG` |
 | `DS5DUMMY_BUILD_TOOLS` | `OFF` | `tools/` 下的诊断程序 |
@@ -823,22 +825,26 @@ MODULE（`ds5dummy_plugin_probe`，不链接测试二进制），测试把它拷
 
 **可重定位分发**（`cmake --build build --target dist`，产物
 `build/dist/ds5dummy-<version>-linux-<arch>.tar.gz`）是给"装不进系统目录"的场合用的
-备用形状，不替代上面三个包：`install()` 规则铺出前缀相对布局
-（`bin/`、`lib/`、`plugins/`、`share/`、根上的 `install.sh`），`dist` 用
-DESTDIR 暂存、`--prefix /` 再打成 tarball；装到哪个前缀由 `scripts/install.sh` 决定
-（默认 `$SUDO_USER` 家目录下的 `DS5Dummy/`），它只把单元、睡眠钩子、模块清单与
-`/etc/ds5dummy/config.yaml`（已存在则保留）落到系统目录，`ExecStart` 按前缀改写，
-另带 `--no-start`/`--uninstall`。为什么要家目录：SteamOS 的 A/B 镜像更新整份替换根
+备用形状，不替代上面三个包：`install()` 规则铺出一棵自洽的树
+（`bin/`、`lib/`、`plugins/`、`etc/config.yaml`、`share/`、根上的 `VERSION` 与
+`install.sh`），`dist` 用 DESTDIR 暂存、`--prefix /` 再打成 tarball。装法由
+`scripts/install.sh` 决定：**默认就地**（树不动，unit 的 `ExecStart` 指向解压位置），
+给 `--prefix DIR` 时才把树拷到 DIR 再指向它。它只把单元、睡眠钩子与模块清单落到
+`/etc`——**系统配置不落 `/etc`**：`tree` 布局的程序读 `<树>/etc/config.yaml`，那份
+随树走、root 所有；另带 `--no-start`/`--uninstall`（卸载只撤系统侧，`--prefix` 的
+拷贝一并删掉，解压目录不动）。为什么要家目录：SteamOS 的 A/B 镜像更新整份替换根
 文件系统，`/usr` 与 `/etc` 里手装的文件都会丢，家目录不参与替换；代价是系统更新后
 要重跑一次脚本。前缀里的文件 `chown` 成 root——程序以 root 跑，可写这个二进制就等于
 交出一份 root。便携构建走 `-DDS5DUMMY_PORTABLE=ON`：`fmt` 切成头文件模式、
 `-static-libstdc++`（代码里有 `std::format`，否则要求 GLIBCXX_3.4.35，SteamOS 只有
 3.4.34）、`INSTALL_RPATH=$ORIGIN/../lib` 并随包一份按 SONAME 命名的 `libyaml-cpp.so.0.9`
 （Arch 与 SteamOS 的 yaml-cpp 版本号不同）。glibc、PipeWire、systemd、BlueZ 保持动态。
-插件目录因此多了"可执行文件所在前缀的 `plugins/`"这一层（见 §10）；系统配置路径仍是
-编译期常量 `/etc/ds5dummy/config.yaml`。版本号从 `git describe` 现查，与 `pkgver()`
-同一条规则。这套路径没有内核模块：HIDRAW 后端仍要用户自装 DKMS 包，`install.sh` 缺它时
-只警告。
+插件目录因此多了"可执行文件所在前缀的 `plugins/`"这一层（见 §10）；系统配置与随包
+插件目录的落点由 `-DDS5DUMMY_LAYOUT` 在编译期选定：`fhs`（默认）是
+`/etc/ds5dummy/config.yaml` 与 `/usr/lib/ds5dummy/plugins`，`tree` 是 `<树>/etc` 与
+`<树>/plugins`（tarball 与 Decky 插件用 `tree`，没有运行期回落）。版本号从
+`git describe` 现查，与 `pkgver()` 同一条规则。这套路径没有内核模块：HIDRAW 后端仍要
+用户自装 DKMS 包，`install.sh` 缺它时只警告。
 
 `pkg/ds5dummy-bin` 把同一份便携构建装成 Arch 包，产物是给装不了工具链的机器装的
 （SteamOS 的镜像剥掉了开发文件，cmake/boost 那套跑不起来）：`build()` 用

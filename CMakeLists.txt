@@ -214,6 +214,27 @@ function(ds5dummy_add_buttons_check)
     target_link_libraries(buttons_check PRIVATE PkgConfig::YAMLCPP)
 endfunction()
 
+# ---------------------------------------------------------------------------
+# 路径布局（DS5DUMMY_LAYOUT）：程序启动时从哪里找系统配置与随包插件。
+#   fhs  （默认）：/etc/ds5dummy/config.yaml、/usr/lib/ds5dummy/plugins——系统包。
+#   tree        ：按可执行文件位置推 <树>/etc/config.yaml、<树>/plugins——dist
+#                 tarball 与 Decky 插件，整棵树搬到哪就在哪成立。
+# 二选一，没有运行期回落：布局在编译期定死，两种装法各自编自己的产物。
+# 用目录级宏而不是 target 宏：config.cpp 同时编进 ds5dummyd 与 buttons_check，
+# 两个二进制对"配置在哪"必须给出同一个答案（`--help` 里印的就是它）。
+# ---------------------------------------------------------------------------
+set(DS5DUMMY_LAYOUT "fhs" CACHE STRING
+    "Path layout: fhs (system dirs) or tree (paths derived from the executable)")
+set_property(CACHE DS5DUMMY_LAYOUT PROPERTY STRINGS fhs tree)
+if(NOT DS5DUMMY_LAYOUT STREQUAL "fhs" AND NOT DS5DUMMY_LAYOUT STREQUAL "tree")
+    message(FATAL_ERROR
+        "DS5DUMMY_LAYOUT must be fhs or tree, got '${DS5DUMMY_LAYOUT}'")
+endif()
+message(STATUS "Path layout: ${DS5DUMMY_LAYOUT}")
+if(DS5DUMMY_LAYOUT STREQUAL "tree")
+    add_compile_definitions(DS5DUMMY_LAYOUT_TREE=1)
+endif()
+
 if(BT_BACKEND STREQUAL "L2CAP")
     message(STATUS "BT backend: raw AF_BLUETOOTH L2CAP (BlueZ pkg required)")
     find_package(PkgConfig REQUIRED)
@@ -357,17 +378,18 @@ if(DS5DUMMY_BUILD_TOOLS)
 endif()
 
 # ---------------------------------------------------------------------------
-# 可重定位分发（不装系统目录）：前缀内布局
+# 可重定位分发（不装系统目录）：一棵树
 #   bin/{ds5dummyd,buttons_check,ds5dummy-config}
 #   lib/{buttons_web.py,buttons_web.html,panels/core.js}  plugins/
-#   share/{doc,licenses,ds5dummy}  install.sh
+#   etc/config.yaml（tree 布局的系统配置）  share/{doc,licenses,ds5dummy}
+#   VERSION  install.sh
 # 这些 install() 只服务于 dist：它用 DESTDIR 暂存、--prefix / 把上面这套布局
 # 铺成 tarball 的根，所以 DESTINATION 全是前缀相对路径。装到哪个前缀由
-# scripts/install.sh 决定（默认 ~/DS5Dummy），CMake 自己不碰系统目录。
+# scripts/install.sh 决定（默认就地，--prefix 时拷贝），CMake 自己不碰系统目录。
 #   cmake --build build --target dist
 #   → build/dist/ds5dummy-<version>-linux-<arch>.tar.gz
-# 随包插件与面板同目录（plugin::Directories 会扫描 <prefix>/plugins），
-# 宿主配置与单元模板在 share/ds5dummy 下，由 install.sh 落到 /etc。
+# 随包插件与面板同目录（plugin::Directories 会扫描 <树>/plugins），系统配置在
+# 树的 etc/ 里，单元与模块模板在 share/ds5dummy 下、由 install.sh 落到 /etc。
 # ---------------------------------------------------------------------------
 install(TARGETS ds5dummyd RUNTIME DESTINATION bin)
 # 配置工具：入口脚本按自身位置解析前缀的 lib/，所以源码包、预编译包与 tarball
@@ -384,7 +406,10 @@ install(FILES
     DESTINATION plugins)
 install(FILES plugin/buttons/README.md DESTINATION share/doc/ds5dummy RENAME buttons.md)
 install(FILES pkg/user-config.example.yaml DESTINATION share/doc/ds5dummy)
-# 系统级配置模板由 install.sh 落到 /etc/ds5dummy/config.yaml（只在缺失时）。
+# 系统配置的两份落点，用途不同：
+#   etc/config.yaml          —— tree 布局真正读的那一份（tarball、Decky 插件）
+#   share/ds5dummy/config.yaml —— 模板，pkg/ 的包把它装到 /etc/ds5dummy/config.yaml
+install(FILES pkg/ds5dummy.system.yaml DESTINATION etc RENAME config.yaml)
 install(FILES pkg/ds5dummy.system.yaml DESTINATION share/ds5dummy RENAME config.yaml)
 install(FILES ${DS5DUMMY_PKG_DIR}/ds5dummy.service DESTINATION share/ds5dummy)
 install(FILES ${DS5DUMMY_PKG_DIR}/ds5dummy.modules-load.conf DESTINATION share/ds5dummy)
@@ -392,7 +417,10 @@ install(FILES ${DS5DUMMY_PKG_DIR}/ds5dummy.modprobe.conf DESTINATION share/ds5du
 install(PROGRAMS pkg/ds5dummy.sleep-hook DESTINATION share/ds5dummy)
 install(PROGRAMS scripts/teardown.sh DESTINATION share/ds5dummy)
 install(FILES LICENSE NOTICE DESTINATION share/licenses/ds5dummy)
-# install.sh 就在前缀根上（用户解包后直接跑它）。DESTINATION 不能用 "."（CMake
+# VERSION 由 DS5DUMMY_VERSION 现生成：面板与 `--help` 都读它，打包脚本不再另写一份。
+file(WRITE "${CMAKE_BINARY_DIR}/VERSION" "${DS5DUMMY_VERSION}\n")
+install(FILES "${CMAKE_BINARY_DIR}/VERSION" DESTINATION /)
+# install.sh 就在树根上（用户解包后直接跑它）。DESTINATION 不能用 "."（CMake
 # 当作没给），只能写成绝对根：dist 传 --prefix /，配上 DESTDIR 正好落在 tarball
 # 的顶层。
 install(PROGRAMS scripts/install.sh DESTINATION /)
@@ -423,6 +451,21 @@ endif()
 set(DS5DUMMY_DIST_NAME "ds5dummy-${DS5DUMMY_VERSION}-linux-${CMAKE_HOST_SYSTEM_PROCESSOR}")
 set(DS5DUMMY_DIST_DIR "${CMAKE_BINARY_DIR}/dist")
 set(DS5DUMMY_DIST_STAGE "${DS5DUMMY_DIST_DIR}/${DS5DUMMY_DIST_NAME}")
+# 这棵树唯一的用途就是"搬到别的机器/别的目录还能跑"，所以没有便携构建就拒绝：
+# 没有随包 yaml-cpp 的产物换台机器起不来。
+if(NOT DS5DUMMY_PORTABLE)
+    message(FATAL_ERROR
+        "dist 目标只发便携构建：请加 -DDS5DUMMY_PORTABLE=ON 重新配置"
+        "（否则产物缺 libyaml-cpp 与 RUNPATH，换一台机器就起不来）")
+endif()
+# fhs 布局照样能出这棵树，但里面的程序会去读 /etc/ds5dummy：把它当"便携 tarball"
+# 发出去就会在别的机器上读到别人的配置。pkg/ds5dummy-bin 正是拿它当系统包的文件
+# 源（那份包本来就装到 /usr/lib/ds5dummy 并读 /etc），所以这里只警告不拦。
+if(NOT DS5DUMMY_LAYOUT STREQUAL "tree")
+    message(WARNING
+        "dist with DS5DUMMY_LAYOUT=fhs: 这棵树里的程序读 /etc/ds5dummy，"
+        "只适合当系统包的文件源；要发便携 tarball 请用 -DDS5DUMMY_LAYOUT=tree")
+endif()
 find_program(TAR_EXECUTABLE NAMES tar)
 if(NOT TAR_EXECUTABLE)
     message(FATAL_ERROR "tar is required for the dist target")

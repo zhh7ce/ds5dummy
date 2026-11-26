@@ -377,7 +377,7 @@ const char* internal::VerbosityName(int level) {
 std::string internal::UsageText() {
   std::string text = "Usage: ds5dummy [--help]\n";
   text += "Configuration:\n";
-  text += std::string("  system: ") + kSystemConfigPath + "\n";
+  text += std::string("  system: ") + SystemConfigPath() + "\n";
   text += std::string("  user:   ~/") + kUserConfigDir + "/" +
           kUserConfigFileName + "\n";
   return text;
