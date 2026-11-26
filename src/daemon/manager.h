@@ -21,10 +21,13 @@ namespace ds5::daemon {
  * @param options 命令行解析出的内部参数。Manager 只留用其中的进程级字段
  *                （verbosity 与两个角色开关）；每只手柄的设置、目标 MAC 与
  *                ffs 路径分别来自用户配置与系统配置。
- * @return 进程退出码：0 表示按 Ctrl-C 正常收摊，或当前登录用户没有启用本服务
- *         （配置 disabled / 不在白名单）；1 表示启动条件不成立（非 root、配置
- *         错误、无唯一目标用户、ffs 路径非法、无 dummy UDC）。
- * @note 阻塞直到收到退出信号；worker 崩溃不会让它返回，只会退避重试。
+ * @return 进程退出码：0 表示按 Ctrl-C/SIGTERM 正常收摊，或当前登录用户没有启用
+ *         本服务（配置 disabled / 不在白名单）；1 表示启动条件不成立（非 root、
+ *         配置错误、无唯一目标用户、ffs 路径非法、无 dummy UDC、控制 socket 建
+ *         不起来）；-1 表示控制 socket 收到 `abort`，清理完站点后由 systemd 的
+ *         `Restart=on-failure` 重启。
+ * @note 阻塞直到收到退出信号或控制 socket 的 `abort`；worker 崩溃不会让它返回，
+ *       只会退避重试。
  * @see RunWorker —— 被 fork+execv 起来的对端。
  */
 int RunManager(const Options& options);

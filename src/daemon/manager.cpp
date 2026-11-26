@@ -35,6 +35,7 @@
 #include "core/debug.h"
 #include "core/device/descriptors.h"
 #include "daemon/config.h"
+#include "daemon/control_socket.h"
 #include "daemon/discovery.h"
 #include "daemon/handoff.h"
 #include "daemon/identity.h"
@@ -57,16 +58,17 @@ constexpr int kRestartBackoffMs = 2000;
 constexpr int kSleepSliceMs = 100;
 
 /**
- * @brief 可中断的退避等待：Ctrl-C 到来时 Manager 可能正睡在这里。
+ * @brief 可中断的退避等待：Ctrl-C 或控制 socket 命令到来时 Manager 可能正睡在这里。
  * @param ms 总等待毫秒数；<=0 时立即返回。
- * @note 切成 @ref kSleepSliceMs 一段是为了响应性：usleep 整段睡下去会让信号
- *       最多晚 ms 毫秒才被看到。
- * @see ShutdownRequested。
+ * @note 切成 @ref kSleepSliceMs 一段是为了响应性：整段睡下去会让退出请求最多晚
+ *       ms 毫秒才被看到。每个切片由控制 socket 的 poll 承担，所以同一段等待既能
+ *       被信号 EINTR 打断，也能处理一条 `abort` 命令，不额外起线程。
+ * @see ShutdownRequested, control_socket::PollOnce。
  */
 void BackoffSleep(int ms) {
   for (int slept = 0; slept < ms && !ShutdownRequested();
        slept += kSleepSliceMs) {
-    usleep(kSleepSliceMs * 1000);
+    control_socket::PollOnce(kSleepSliceMs);
   }
 }
 
@@ -218,14 +220,14 @@ class ManagerSupervisor {
         tick_ms_(tick_ms) {}
 
   /**
-   * @brief 跑监督循环，直到收到退出信号。
-   * @return 恒为 0：启动条件的失败由 RunManager 提前拦下，循环内的失败一律
-   *         退避重试，不向上冒。
+   * @brief 跑监督循环，直到收到退出请求（信号或控制 socket 的 `abort`）。
+   * @return 退出码：信号路径 0，控制 socket 的 `abort` 路径 -1；两种路径的收摊
+   *         完全一样，只是 systemd 对非零退出会重启服务。
    * @details 每轮先补建该服务的站、再回收已退出的 worker，然后睡到下一个节拍
    *          （tick_ms_，来自系统配置的 discovery_interval_s）。单手柄模式不扫描
    *          sysfs（保留"先起站、worker 等手柄连上"的老语义）；auto/list 模式以
    *          发现结果为起站依据。
-   * @warning 无限循环：worker 反复崩溃时本函数不返回，只有信号能结束它。
+   * @warning 无限循环：worker 反复崩溃时本函数不返回，只有退出请求能结束它。
    */
   int Run() {
     while (!ShutdownRequested()) {
@@ -238,7 +240,7 @@ class ManagerSupervisor {
       BackoffSleep(tick_ms_);
     }
 
-    // Ctrl-C：每个 worker 只发一次 SIGTERM，它自己会走 Stop 流程；随后的
+    // 退出请求：每个 worker 只发一次 SIGTERM，它自己会走 Stop 流程；随后的
     // 回收循环负责拆掉每一站，直到所有 worker 都退出。
     TerminateWorkers();
     while (!slots_.empty()) {
@@ -248,7 +250,7 @@ class ManagerSupervisor {
       if (!slots_.empty()) usleep(kSleepSliceMs * 1000);
     }
     DS5DUMMY_LOG(INFO, "[manager] Shutting down");
-    return 0;
+    return ShutdownExitCode();
   }
 
  private:
@@ -545,13 +547,14 @@ class ManagerSupervisor {
  * @param options 命令行解析出的内部参数。Manager 只把它当作 worker 配置的
  *                骨架：手柄级字段全部被配置文件里的生效值覆盖。
  * @return 0 正常收摊，或当前用户没有启用本服务；1 启动条件不成立（每条都有
- *         对应日志说明原因）。
+ *         对应日志说明原因）；-1 控制 socket 收到 `abort`，清理完站点后交给
+ *         systemd 重启。
  * @details 顺序是绑定的：root 校验 → 系统配置 → 会话/身份 → 家目录 → 用户配置
- *          → 生效日志级别 → gadget 前置校验。所有可能随登录状态变化的东西都
- *          在 provision 之前一次算清，循环里只重试建站与 worker。
- * @note 副作用：可能挂 Filesystem、写 configfs、fork 子进程。
+ *          → 生效日志级别 → gadget 前置校验 → 控制 socket 就绪。所有可能随登录
+ *          状态变化的东西都在 provision 之前一次算清，循环里只重试建站与 worker。
+ * @note 副作用：可能挂 Filesystem、写 configfs、fork 子进程、建控制 socket。
  * @warning 四个特权动作之外不再碰数据面；循环里只在节拍休眠与 waitpid 之间
- *          往返。
+ *          往返。控制 socket 的 poll 也只在这段等待里跑。
  * @see ManagerSupervisor, RunWorker。
  */
 int RunManager(const Options& options) {
@@ -656,6 +659,15 @@ int RunManager(const Options& options) {
     return 1;
   }
 
+  // 控制 socket 在横幅之前就绪：横幅把它和两份配置路径一样当作生效事实印出来，
+  // 建不起来就让 systemd 重试，不静默降级成"没有控制通道"的半套服务。
+  std::string control_why;
+  if (!control_socket::Init(control_why)) {
+    DS5DUMMY_LOG(ERROR, "[manager] Cannot open control socket: {}",
+                 control_why.c_str());
+    return 1;
+  }
+
   printf("=== DS5Dummy Manager — virtual USB DualSense ===\n");
   printf("FunctionFS mount base: %s\n", sys.ffs_path.c_str());
   printf("Discovery: scans %s every %d s\n", kHidrawSysfsBase,
@@ -671,6 +683,8 @@ int RunManager(const Options& options) {
           ? user_config + " (absent, built-in defaults in use)"
           : user_config;
   printf("User config: %s\n", user_config_shown.c_str());
+  printf("Control socket: %s (mode=0666, any local user)\n",
+         control_socket::kSocketPath);
   // 横幅要能被 journal 直接读懂：调 DEBUG/VERBOSE 的人正是从这一行确认级别，
   // 只印数字等于没说。名字表与 ParseVerbosity 同源；整数调到枚举之外时没有
   // 对应名字，退回数值，避免把 nullptr 交给 %s。
@@ -694,7 +708,8 @@ int RunManager(const Options& options) {
   for (const auto& [mac, settings] : user.controllers) {
     PrintControllerSettings(mac, settings);
   }
-  printf("Press Ctrl+C to exit.\n\n");
+  printf("Press Ctrl+C to exit, or send 'abort' to %s to restart.\n\n",
+         control_socket::kSocketPath);
   fflush(stdout);
 
   // 节拍按秒配置、内部用毫秒：配置层已把 discovery_interval_s 收口到
@@ -702,7 +717,11 @@ int RunManager(const Options& options) {
   ManagerSupervisor supervisor(std::move(worker_options), std::move(user),
                                sys.ffs_path, self_path, identity.uid,
                                identity.gid, sys.discovery_interval_s * 1000);
-  return supervisor.Run();
+  const int result = supervisor.Run();
+  // 先撤掉监听点再返回：systemd 看到的非零退出与新进程的 socket 之间不会残留
+  // 一个属于旧进程的文件。目录本身留给休眠钩子，不在这里删。
+  control_socket::Close();
+  return result;
 }
 
 }  // namespace ds5::daemon

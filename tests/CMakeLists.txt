@@ -40,7 +40,10 @@ add_executable(ds5dummy_tests
     buttons_sense_test.cpp
     buttons_pipeline_test.cpp
     command_queue_test.cpp
+    control_socket_test.cpp
     ../src/daemon/command_queue.cpp
+    ../src/daemon/control_socket.cpp
+    ../src/daemon/shutdown.cpp
     ../src/daemon/options.cpp
     ../src/daemon/config.cpp
     ../src/daemon/discovery.cpp
@@ -90,6 +93,8 @@ target_compile_definitions(ds5dummy_tests PRIVATE
     DS5DUMMY_DEBUG_LOG=0
     # 只给测试存在的钩子（idle 的时间拨表）在生产构建里不编进来。
     DS5DUMMY_TESTING=1
+    # 控制 socket 的用例不能碰真实 /run/ds5dummy（那里还有休眠钩子的标记）。
+    DS5DUMMY_CONTROL_SOCKET_DIR=\"/tmp/ds5dummy-control-socket-test\"
     # 用户配置模板的路径：用例把这份发布文件解析出来，和内置默认层逐项比对，
     # 这样"模板宣告的默认值"与"家目录没有配置时的生效值"不会各走各的。
     DS5DUMMY_USER_TEMPLATE="${CMAKE_CURRENT_SOURCE_DIR}/../pkg/user-config.example.yaml")
